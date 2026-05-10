@@ -36,6 +36,7 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -54,114 +55,110 @@ const HDR_GRAM_TABLE_OFF: std::ops::Range<usize>  = 140..148;
 const HDR_GRAM_TABLE_SIZE: std::ops::Range<usize> = 148..152;
 const HDR_POSTINGS_SIZE: std::ops::Range<usize>   = 152..160;
 
+/// Mmap-backed phrase index. The file is mapped into the address space and
+/// queried in place — only matching posting lists are decoded into Vecs at
+/// query time. Loading an 8 GB index costs no measurable RAM.
 #[derive(Debug, Clone)]
 pub struct PhraseIndex {
-    pub schema: String,
-    pub gram_len: usize,
-    pub doc_table_fingerprint: String,
-    pub gram_entries: Vec<GramEntry>,
-    pub postings_blob: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct GramEntry {
-    pub gram_hash: u64,
-    pub offset: u64,
-    pub len: u32,
+    schema: String,
+    gram_len: usize,
+    doc_table_fingerprint: String,
+    num_grams: usize,
+    /// Byte offset of the gram-entry table within the mmap.
+    gram_table_offset: usize,
+    /// Byte offset of the postings blob within the mmap.
+    postings_offset: usize,
+    postings_len: usize,
+    mmap: Arc<Mmap>,
 }
 
 impl PhraseIndex {
-    pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("index.tmp");
-        let mut f = BufWriter::new(File::create(&tmp)?);
-
-        let mut hdr = vec![0u8; HEADER_SIZE];
-        hdr[0..4].copy_from_slice(MAGIC);
-        hdr[4..6].copy_from_slice(&2u16.to_le_bytes());
-        hdr[HDR_GRAM_LEN].copy_from_slice(&(self.gram_len as u16).to_le_bytes());
-        hdr[HDR_NUM_GRAMS].copy_from_slice(&(self.gram_entries.len() as u32).to_le_bytes());
-
-        write_padded_string(&mut hdr[HDR_FP], &self.doc_table_fingerprint);
-        write_padded_string(&mut hdr[HDR_SCHEMA], &self.schema);
-
-        let gram_table_off = HEADER_SIZE as u64;
-        let gram_table_sz = (self.gram_entries.len() * GRAM_ENTRY_SIZE) as u32;
-        hdr[HDR_GRAM_TABLE_OFF].copy_from_slice(&gram_table_off.to_le_bytes());
-        hdr[HDR_GRAM_TABLE_SIZE].copy_from_slice(&gram_table_sz.to_le_bytes());
-        hdr[HDR_POSTINGS_SIZE].copy_from_slice(&(self.postings_blob.len() as u64).to_le_bytes());
-
-        f.write_all(&hdr)?;
-        for e in &self.gram_entries {
-            f.write_all(&e.gram_hash.to_le_bytes())?;
-            f.write_all(&e.offset.to_le_bytes())?;
-            f.write_all(&e.len.to_le_bytes())?;
-        }
-        f.write_all(&self.postings_blob)?;
-        f.flush()?;
-        drop(f);
-        fs::rename(&tmp, path)?;
-        Ok(())
-    }
-
-    pub fn load(path: &Path) -> Result<Self> {
-        let data = fs::read(path)?;
-        Self::from_bytes(&data)
-    }
-
-    pub fn load_mmap(path: &Path) -> Result<Self> {
+    /// Open an index by mapping its file into memory. No data is copied.
+    pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
-        Self::from_bytes(&mmap)
-    }
 
-    fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < HEADER_SIZE {
+        if mmap.len() < HEADER_SIZE {
             anyhow::bail!("PhraseIndex file too small");
         }
-        if &data[0..4] != MAGIC {
+        if &mmap[0..4] != MAGIC {
             anyhow::bail!("Not a PhraseIndex file (bad magic)");
         }
-        let version = u16::from_le_bytes([data[4], data[5]]);
+        let version = u16::from_le_bytes([mmap[4], mmap[5]]);
         if version != 2 {
             anyhow::bail!("Unsupported PhraseIndex version: {}", version);
         }
 
-        let gram_len = u16::from_le_bytes(data[HDR_GRAM_LEN].try_into()?) as usize;
-        let num_grams = u32::from_le_bytes(data[HDR_NUM_GRAMS].try_into()?) as usize;
-        let doc_table_fingerprint = read_padded_string(&data[HDR_FP]);
-        let schema = read_padded_string(&data[HDR_SCHEMA]);
-        let gram_table_off = u64::from_le_bytes(data[HDR_GRAM_TABLE_OFF].try_into()?) as usize;
-        let gram_table_sz  = u32::from_le_bytes(data[HDR_GRAM_TABLE_SIZE].try_into()?) as usize;
-        let postings_sz    = u64::from_le_bytes(data[HDR_POSTINGS_SIZE].try_into()?) as usize;
+        let gram_len = u16::from_le_bytes(mmap[HDR_GRAM_LEN].try_into()?) as usize;
+        let num_grams = u32::from_le_bytes(mmap[HDR_NUM_GRAMS].try_into()?) as usize;
+        let doc_table_fingerprint = read_padded_string(&mmap[HDR_FP]);
+        let schema = read_padded_string(&mmap[HDR_SCHEMA]);
+        let gram_table_offset = u64::from_le_bytes(mmap[HDR_GRAM_TABLE_OFF].try_into()?) as usize;
+        let postings_len = u64::from_le_bytes(mmap[HDR_POSTINGS_SIZE].try_into()?) as usize;
 
-        if gram_table_off + gram_table_sz + postings_sz > data.len() {
-            anyhow::bail!("PhraseIndex sections exceed file length");
+        // The HDR_GRAM_TABLE_SIZE field is u32 in the on-disk format and
+        // truncates for indexes whose gram table exceeds 4 GB
+        // (>214,748,364 grams). Always derive the true size from num_grams ×
+        // GRAM_ENTRY_SIZE; the header field is informational only.
+        let gram_table_size = num_grams * GRAM_ENTRY_SIZE;
+        let postings_offset = gram_table_offset + gram_table_size;
+
+        if postings_offset + postings_len > mmap.len() {
+            anyhow::bail!(
+                "PhraseIndex sections exceed file length \
+                 (postings_off={} postings_len={} file_len={})",
+                postings_offset,
+                postings_len,
+                mmap.len()
+            );
         }
-
-        let mut gram_entries = Vec::with_capacity(num_grams);
-        for i in 0..num_grams {
-            let off = gram_table_off + i * GRAM_ENTRY_SIZE;
-            let e = &data[off..off + GRAM_ENTRY_SIZE];
-            gram_entries.push(GramEntry {
-                gram_hash: u64::from_le_bytes(e[0..8].try_into()?),
-                offset:    u64::from_le_bytes(e[8..16].try_into()?),
-                len:       u32::from_le_bytes(e[16..20].try_into()?),
-            });
-        }
-
-        let postings_off = gram_table_off + gram_table_sz;
-        let postings_blob = data[postings_off..postings_off + postings_sz].to_vec();
 
         Ok(Self {
             schema,
             gram_len,
             doc_table_fingerprint,
-            gram_entries,
-            postings_blob,
+            num_grams,
+            gram_table_offset,
+            postings_offset,
+            postings_len,
+            mmap: Arc::new(mmap),
         })
+    }
+
+    /// Backwards-compat alias. Prefer `open`.
+    pub fn load(path: &Path) -> Result<Self> {
+        Self::open(path)
+    }
+
+    pub fn schema(&self) -> &str { &self.schema }
+    pub fn gram_len(&self) -> usize { self.gram_len }
+    pub fn doc_table_fingerprint(&self) -> &str { &self.doc_table_fingerprint }
+    pub fn num_grams(&self) -> usize { self.num_grams }
+
+    /// Read a single gram entry from the mmap (zero-copy decode of 20 bytes).
+    fn gram_entry(&self, idx: usize) -> (u64, u64, u32) {
+        let off = self.gram_table_offset + idx * GRAM_ENTRY_SIZE;
+        let s = &self.mmap[off..off + GRAM_ENTRY_SIZE];
+        let hash = u64::from_le_bytes(s[0..8].try_into().unwrap());
+        let p_off = u64::from_le_bytes(s[8..16].try_into().unwrap());
+        let p_len = u32::from_le_bytes(s[16..20].try_into().unwrap());
+        (hash, p_off, p_len)
+    }
+
+    /// Binary search the sorted gram-entry table for `hash`. Returns the
+    /// (postings_offset_within_blob, postings_len) if found.
+    fn find_gram(&self, hash: u64) -> Option<(u64, u32)> {
+        let (mut lo, mut hi) = (0usize, self.num_grams);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let (h, p_off, p_len) = self.gram_entry(mid);
+            match h.cmp(&hash) {
+                std::cmp::Ordering::Equal => return Some((p_off, p_len)),
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        None
     }
 
     /// Resolve a phrase to candidate doc ids (intersection of all n-gram posting lists).
@@ -179,11 +176,11 @@ impl PhraseIndex {
         let mut posting_lists: Vec<Vec<DocId>> = Vec::with_capacity(grams.len());
         for gram in grams {
             let hash = xxh3_64(gram.as_bytes());
-            let Ok(idx) = self.gram_entries.binary_search_by_key(&hash, |e| e.gram_hash) else {
+            let Some((p_off, p_len)) = self.find_gram(hash) else {
                 return Vec::new();
             };
-            let entry = &self.gram_entries[idx];
-            let slice = &self.postings_blob[entry.offset as usize..][..entry.len as usize];
+            let abs = self.postings_offset + p_off as usize;
+            let slice = &self.mmap[abs..abs + p_len as usize];
             let doc_ids = decode_delta_varint_docids(slice).unwrap_or_default();
             if doc_ids.is_empty() {
                 return Vec::new();
@@ -204,15 +201,44 @@ impl PhraseIndex {
     }
 
     pub fn info_payload(&self) -> serde_json::Value {
-        let posting_bytes: usize = self.postings_blob.len();
         serde_json::json!({
             "schema": self.schema,
             "gram_len": self.gram_len,
             "doc_table_fingerprint": self.doc_table_fingerprint,
-            "num_grams": self.gram_entries.len(),
-            "postings_bytes": posting_bytes,
+            "num_grams": self.num_grams,
+            "postings_bytes": self.postings_len,
             "version": 2,
         })
+    }
+
+    /// Read just the 256-byte header without parsing the gram entries or the
+    /// postings blob. Use for `info` on huge indexes that can't fit in memory.
+    pub fn header_info(path: &Path) -> Result<serde_json::Value> {
+        let mut file = File::open(path)?;
+        let mut hdr = [0u8; HEADER_SIZE];
+        file.read_exact(&mut hdr)?;
+        if &hdr[0..4] != MAGIC {
+            anyhow::bail!("Not a PhraseIndex file (bad magic)");
+        }
+        let version = u16::from_le_bytes([hdr[4], hdr[5]]);
+        if version != 2 {
+            anyhow::bail!("Unsupported PhraseIndex version: {}", version);
+        }
+        let gram_len = u16::from_le_bytes(hdr[HDR_GRAM_LEN].try_into()?) as usize;
+        let num_grams = u32::from_le_bytes(hdr[HDR_NUM_GRAMS].try_into()?) as usize;
+        let doc_table_fingerprint = read_padded_string(&hdr[HDR_FP]);
+        let schema = read_padded_string(&hdr[HDR_SCHEMA]);
+        let postings_bytes = u64::from_le_bytes(hdr[HDR_POSTINGS_SIZE].try_into()?);
+        let file_bytes = std::fs::metadata(path)?.len();
+        Ok(serde_json::json!({
+            "schema": schema,
+            "gram_len": gram_len,
+            "doc_table_fingerprint": doc_table_fingerprint,
+            "num_grams": num_grams,
+            "postings_bytes": postings_bytes,
+            "file_bytes": file_bytes,
+            "version": version,
+        }))
     }
 }
 

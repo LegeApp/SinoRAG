@@ -9,23 +9,29 @@
 //             (term_id, doc_id, weight) records into posting buckets.
 //   Phase 4 — Posting merge: for each posting bucket, sort by (term_id, doc_id)
 //             and emit a contiguous posting list per term.
+//   Save  —   write the file directly from the build's local Vecs (we never
+//             construct an in-memory `TfidfIndex` of an entire corpus).
 //
 // On-disk format ("SGTFIDF2", version 2): header (512 B) + vocab table +
 // IDF array + per-doc row offsets + per-doc row lengths + row blob +
 // postings blob. See header constant ranges below.
+//
+// Query side: `TfidfIndex::open` mmaps the file. Every accessor is a slice
+// into the mmap; no full-file copy. Loading a multi-GB index costs O(1) RAM.
 
 use crate::document_table::DocumentTable;
 use crate::tfidf::ngram::{char_ngram_hashes, char_ngram_hashes_all, char_ngrams};
 use anyhow::Result;
-#[allow(unused_imports)]
+use memmap2::Mmap;
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use xxhash_rust::xxh3::xxh3_64;
 
 pub type DocId = u32;
@@ -37,14 +43,10 @@ pub type TermId = u32;
 
 const MAGIC_TFIDF_V2: &[u8; 8] = b"SGTFIDF2";
 const HEADER_SIZE: usize = 512;
-/// Bytes per VocabEntry: u64 + u32 + u32 + u64 + u32
-const VOCAB_ENTRY_SIZE: usize = 28;
-/// Bytes per row entry: term_id u32 + weight f32
-const ROW_ENTRY_SIZE: usize = 8;
-/// Bytes per posting entry: doc_id u32 + weight f32
-const POSTING_ENTRY_SIZE: usize = 8;
-/// Bytes per posting bucket record: term_id u32 + doc_id u32 + weight f32
-const POSTING_BUCKET_RECORD_SIZE: usize = 12;
+const VOCAB_ENTRY_SIZE: usize = 28;       // u64 + u32 + u32 + u64 + u32
+const ROW_ENTRY_SIZE: usize = 8;          // term_id u32 + weight f32
+const POSTING_ENTRY_SIZE: usize = 8;      // doc_id u32 + weight f32
+const POSTING_BUCKET_RECORD_SIZE: usize = 12; // term_id u32 + doc_id u32 + weight f32
 
 const HDR_VOCAB_COUNT:    std::ops::Range<usize> = 10..14;
 const HDR_DOC_COUNT:      std::ops::Range<usize> = 14..18;
@@ -109,160 +111,76 @@ pub struct SharedNgram {
     pub candidate_weight: f32,
 }
 
+/// Mmap-backed TF-IDF index. All sections are accessed by slicing into the
+/// mmap; no copies of the row blob / postings blob are kept in RAM.
 pub struct TfidfIndex {
-    pub params: TfidfParams,
-    pub doc_table_fingerprint: String,
-    /// Sorted by term_hash. `vocab[term_id as usize]` is the entry for that term.
-    pub vocab: Vec<VocabEntry>,
-    /// IDF for each term, indexed by term_id.
-    pub idf: Vec<f32>,
-    pub doc_count: usize,
-    /// Byte offset into row_blob for each doc; u64::MAX means "no terms".
-    pub row_offsets: Vec<u64>,
-    /// Number of ROW_ENTRY_SIZE entries per doc.
-    pub row_lengths: Vec<u32>,
-    /// Packed (term_id u32, weight f32) entries, sorted by term_id within each doc.
-    pub row_blob: Vec<u8>,
-    /// Packed (doc_id u32, weight f32) posting entries per term.
-    pub postings_blob: Vec<u8>,
+    params: TfidfParams,
+    doc_table_fingerprint: String,
+    vocab_count: usize,
+    doc_count: usize,
+    vocab_off: usize,
+    idf_off: usize,
+    row_offsets_off: usize,
+    row_lengths_off: usize,
+    row_blob_off: usize,
+    row_blob_len: usize,
+    postings_blob_off: usize,
+    postings_blob_len: usize,
+    mmap: Arc<Mmap>,
 }
 
 // ---------------------------------------------------------------------------
-// Save / Load
+// Open + accessors
 // ---------------------------------------------------------------------------
 
 impl TfidfIndex {
-    pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("index.tmp");
-        let mut f = BufWriter::new(File::create(&tmp)?);
-
-        let vocab_count = self.vocab.len() as u32;
-        let doc_count = self.doc_count as u32;
-        let row_blob_len = self.row_blob.len() as u64;
-        let postings_blob_len = self.postings_blob.len() as u64;
-
-        let vocab_off     = HEADER_SIZE as u64;
-        let idf_off       = vocab_off + vocab_count as u64 * VOCAB_ENTRY_SIZE as u64;
-        let row_off_off   = idf_off + vocab_count as u64 * 4;
-        let row_len_off   = row_off_off + doc_count as u64 * 8;
-        let row_blob_off  = row_len_off + doc_count as u64 * 4;
-        let post_blob_off = row_blob_off + row_blob_len;
-
-        let mut hdr = vec![0u8; HEADER_SIZE];
-        hdr[0..8].copy_from_slice(MAGIC_TFIDF_V2);
-        hdr[8..10].copy_from_slice(&2u16.to_le_bytes());
-        hdr[HDR_VOCAB_COUNT].copy_from_slice(&vocab_count.to_le_bytes());
-        hdr[HDR_DOC_COUNT].copy_from_slice(&doc_count.to_le_bytes());
-        hdr[HDR_MIN_NGRAM].copy_from_slice(&(self.params.min_ngram as u16).to_le_bytes());
-        hdr[HDR_MAX_NGRAM].copy_from_slice(&(self.params.max_ngram as u16).to_le_bytes());
-        hdr[HDR_MIN_DF].copy_from_slice(&self.params.min_df.to_le_bytes());
-        hdr[HDR_MAX_FEATURES].copy_from_slice(&(self.params.max_features as u32).to_le_bytes());
-        hdr[HDR_MAX_DF_RATIO].copy_from_slice(&self.params.max_df_ratio.to_le_bytes());
-
-        let fp = self.doc_table_fingerprint.as_bytes();
-        let n = fp.len().min(HDR_FP.len() - 1);
-        hdr[HDR_FP.start..HDR_FP.start + n].copy_from_slice(&fp[..n]);
-
-        hdr[HDR_VOCAB_OFF].copy_from_slice(&vocab_off.to_le_bytes());
-        hdr[HDR_IDF_OFF].copy_from_slice(&idf_off.to_le_bytes());
-        hdr[HDR_ROW_OFFSETS].copy_from_slice(&row_off_off.to_le_bytes());
-        hdr[HDR_ROW_LENGTHS].copy_from_slice(&row_len_off.to_le_bytes());
-        hdr[HDR_ROW_BLOB_OFF].copy_from_slice(&row_blob_off.to_le_bytes());
-        hdr[HDR_ROW_BLOB_LEN].copy_from_slice(&row_blob_len.to_le_bytes());
-        hdr[HDR_POST_BLOB_OFF].copy_from_slice(&post_blob_off.to_le_bytes());
-        hdr[HDR_POST_BLOB_LEN].copy_from_slice(&postings_blob_len.to_le_bytes());
-        f.write_all(&hdr)?;
-
-        for e in &self.vocab {
-            f.write_all(&e.term_hash.to_le_bytes())?;
-            f.write_all(&e.term_id.to_le_bytes())?;
-            f.write_all(&e.df.to_le_bytes())?;
-            f.write_all(&e.postings_offset.to_le_bytes())?;
-            f.write_all(&e.postings_count.to_le_bytes())?;
-        }
-        for &v in &self.idf {
-            f.write_all(&v.to_le_bytes())?;
-        }
-        for &o in &self.row_offsets {
-            f.write_all(&o.to_le_bytes())?;
-        }
-        for &l in &self.row_lengths {
-            f.write_all(&l.to_le_bytes())?;
-        }
-        f.write_all(&self.row_blob)?;
-        f.write_all(&self.postings_blob)?;
-        f.flush()?;
-        drop(f);
-        fs::rename(&tmp, path)?;
-        Ok(())
+    /// Open by mmapping the index file. Constant RAM cost regardless of size.
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        Self::from_mmap(mmap)
     }
 
+    /// Backwards-compat alias. Prefer `open`.
     pub fn load(path: &Path) -> Result<Self> {
-        let data = fs::read(path)?;
-        if data.len() < HEADER_SIZE {
+        Self::open(path)
+    }
+
+    fn from_mmap(mmap: Mmap) -> Result<Self> {
+        if mmap.len() < HEADER_SIZE {
             anyhow::bail!("TF-IDF index too small");
         }
-        if &data[0..8] != MAGIC_TFIDF_V2 {
+        if &mmap[0..8] != MAGIC_TFIDF_V2 {
             anyhow::bail!("invalid TF-IDF magic");
         }
-        let version = u16::from_le_bytes([data[8], data[9]]);
+        let version = u16::from_le_bytes([mmap[8], mmap[9]]);
         if version != 2 {
             anyhow::bail!("unsupported TF-IDF version: {}", version);
         }
 
-        let vocab_count  = u32::from_le_bytes(data[HDR_VOCAB_COUNT].try_into()?) as usize;
-        let doc_count    = u32::from_le_bytes(data[HDR_DOC_COUNT].try_into()?) as usize;
-        let min_ngram    = u16::from_le_bytes(data[HDR_MIN_NGRAM].try_into()?) as usize;
-        let max_ngram    = u16::from_le_bytes(data[HDR_MAX_NGRAM].try_into()?) as usize;
-        let min_df       = u32::from_le_bytes(data[HDR_MIN_DF].try_into()?);
-        let max_features = u32::from_le_bytes(data[HDR_MAX_FEATURES].try_into()?) as usize;
-        let max_df_ratio = f32::from_le_bytes(data[HDR_MAX_DF_RATIO].try_into()?);
-        let fp_end = data[HDR_FP].iter().position(|&b| b == 0).unwrap_or(HDR_FP.len());
+        let vocab_count  = u32::from_le_bytes(mmap[HDR_VOCAB_COUNT].try_into()?) as usize;
+        let doc_count    = u32::from_le_bytes(mmap[HDR_DOC_COUNT].try_into()?) as usize;
+        let min_ngram    = u16::from_le_bytes(mmap[HDR_MIN_NGRAM].try_into()?) as usize;
+        let max_ngram    = u16::from_le_bytes(mmap[HDR_MAX_NGRAM].try_into()?) as usize;
+        let min_df       = u32::from_le_bytes(mmap[HDR_MIN_DF].try_into()?);
+        let max_features = u32::from_le_bytes(mmap[HDR_MAX_FEATURES].try_into()?) as usize;
+        let max_df_ratio = f32::from_le_bytes(mmap[HDR_MAX_DF_RATIO].try_into()?);
+        let fp_end = mmap[HDR_FP].iter().position(|&b| b == 0).unwrap_or(HDR_FP.len());
         let doc_table_fingerprint =
-            String::from_utf8_lossy(&data[HDR_FP.start..HDR_FP.start + fp_end]).to_string();
-        let row_blob_len = u64::from_le_bytes(data[HDR_ROW_BLOB_LEN].try_into()?) as usize;
-        let post_blob_len = u64::from_le_bytes(data[HDR_POST_BLOB_LEN].try_into()?) as usize;
+            String::from_utf8_lossy(&mmap[HDR_FP.start..HDR_FP.start + fp_end]).to_string();
 
-        let mut pos = HEADER_SIZE;
-        macro_rules! take {
-            ($n:expr, $section:literal) => {{
-                if pos + $n > data.len() {
-                    anyhow::bail!("truncated {} section", $section);
-                }
-                let s = &data[pos..pos + $n];
-                pos += $n;
-                s
-            }};
-        }
+        let vocab_off       = u64::from_le_bytes(mmap[HDR_VOCAB_OFF].try_into()?) as usize;
+        let idf_off         = u64::from_le_bytes(mmap[HDR_IDF_OFF].try_into()?) as usize;
+        let row_offsets_off = u64::from_le_bytes(mmap[HDR_ROW_OFFSETS].try_into()?) as usize;
+        let row_lengths_off = u64::from_le_bytes(mmap[HDR_ROW_LENGTHS].try_into()?) as usize;
+        let row_blob_off    = u64::from_le_bytes(mmap[HDR_ROW_BLOB_OFF].try_into()?) as usize;
+        let row_blob_len    = u64::from_le_bytes(mmap[HDR_ROW_BLOB_LEN].try_into()?) as usize;
+        let postings_blob_off = u64::from_le_bytes(mmap[HDR_POST_BLOB_OFF].try_into()?) as usize;
+        let postings_blob_len = u64::from_le_bytes(mmap[HDR_POST_BLOB_LEN].try_into()?) as usize;
 
-        let mut vocab = Vec::with_capacity(vocab_count);
-        for _ in 0..vocab_count {
-            let e = take!(VOCAB_ENTRY_SIZE, "vocab");
-            vocab.push(VocabEntry {
-                term_hash:       u64::from_le_bytes(e[0..8].try_into()?),
-                term_id:         u32::from_le_bytes(e[8..12].try_into()?),
-                df:              u32::from_le_bytes(e[12..16].try_into()?),
-                postings_offset: u64::from_le_bytes(e[16..24].try_into()?),
-                postings_count:  u32::from_le_bytes(e[24..28].try_into()?),
-            });
+        if postings_blob_off + postings_blob_len > mmap.len() {
+            anyhow::bail!("TF-IDF sections exceed file length");
         }
-        let mut idf = Vec::with_capacity(vocab_count);
-        for _ in 0..vocab_count {
-            idf.push(f32::from_le_bytes(take!(4, "idf").try_into()?));
-        }
-        let mut row_offsets = Vec::with_capacity(doc_count);
-        for _ in 0..doc_count {
-            row_offsets.push(u64::from_le_bytes(take!(8, "row_offsets").try_into()?));
-        }
-        let mut row_lengths = Vec::with_capacity(doc_count);
-        for _ in 0..doc_count {
-            row_lengths.push(u32::from_le_bytes(take!(4, "row_lengths").try_into()?));
-        }
-        let row_blob = take!(row_blob_len, "row_blob").to_vec();
-        let postings_blob = take!(post_blob_len, "postings_blob").to_vec();
 
         let params = TfidfParams {
             min_ngram,
@@ -277,40 +195,69 @@ impl TfidfIndex {
         Ok(Self {
             params,
             doc_table_fingerprint,
-            vocab,
-            idf,
+            vocab_count,
             doc_count,
-            row_offsets,
-            row_lengths,
-            row_blob,
-            postings_blob,
+            vocab_off,
+            idf_off,
+            row_offsets_off,
+            row_lengths_off,
+            row_blob_off,
+            row_blob_len,
+            postings_blob_off,
+            postings_blob_len,
+            mmap: Arc::new(mmap),
         })
     }
-}
 
-// ---------------------------------------------------------------------------
-// Query API — similar/shared/info
-// ---------------------------------------------------------------------------
+    pub fn params(&self) -> &TfidfParams { &self.params }
+    pub fn doc_count(&self) -> usize { self.doc_count }
+    pub fn vocab_count(&self) -> usize { self.vocab_count }
+    pub fn doc_table_fingerprint(&self) -> &str { &self.doc_table_fingerprint }
 
-impl TfidfIndex {
-    /// Decode a single document's row into (term_id, weight) pairs. Returns
-    /// an empty vec if the doc has no terms.
+    pub fn vocab_entry(&self, term_id: TermId) -> VocabEntry {
+        let off = self.vocab_off + (term_id as usize) * VOCAB_ENTRY_SIZE;
+        let s = &self.mmap[off..off + VOCAB_ENTRY_SIZE];
+        VocabEntry {
+            term_hash:       u64::from_le_bytes(s[0..8].try_into().unwrap()),
+            term_id:         u32::from_le_bytes(s[8..12].try_into().unwrap()),
+            df:              u32::from_le_bytes(s[12..16].try_into().unwrap()),
+            postings_offset: u64::from_le_bytes(s[16..24].try_into().unwrap()),
+            postings_count:  u32::from_le_bytes(s[24..28].try_into().unwrap()),
+        }
+    }
+
+    fn idf_at(&self, term_id: TermId) -> f32 {
+        let off = self.idf_off + (term_id as usize) * 4;
+        f32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap())
+    }
+
+    fn row_offset_at(&self, doc_id: DocId) -> u64 {
+        let off = self.row_offsets_off + (doc_id as usize) * 8;
+        u64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap())
+    }
+
+    fn row_length_at(&self, doc_id: DocId) -> u32 {
+        let off = self.row_lengths_off + (doc_id as usize) * 4;
+        u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap())
+    }
+
+    /// Decode a single document's row into (term_id, weight) pairs.
     pub fn row_entries(&self, doc_id: DocId) -> Vec<(TermId, f32)> {
         let idx = doc_id as usize;
         if idx >= self.doc_count {
             return Vec::new();
         }
-        let off = self.row_offsets[idx];
+        let off = self.row_offset_at(doc_id);
         if off == u64::MAX {
             return Vec::new();
         }
-        let len = self.row_lengths[idx] as usize;
-        let base = off as usize;
+        let len = self.row_length_at(doc_id) as usize;
+        let base = self.row_blob_off + off as usize;
         let mut out = Vec::with_capacity(len);
         for i in 0..len {
             let e = base + i * ROW_ENTRY_SIZE;
-            let tid = u32::from_le_bytes(self.row_blob[e..e + 4].try_into().unwrap());
-            let w   = f32::from_le_bytes(self.row_blob[e + 4..e + 8].try_into().unwrap());
+            let tid = u32::from_le_bytes(self.mmap[e..e + 4].try_into().unwrap());
+            let w   = f32::from_le_bytes(self.mmap[e + 4..e + 8].try_into().unwrap());
             out.push((tid, w));
         }
         out
@@ -330,16 +277,16 @@ impl TfidfIndex {
 
         let mut scores: FxHashMap<DocId, f32> = FxHashMap::default();
         for (tid, seed_w) in row {
-            let ve = &self.vocab[tid as usize];
-            let p_base = ve.postings_offset as usize;
+            let ve = self.vocab_entry(tid);
+            let p_base = self.postings_blob_off + ve.postings_offset as usize;
             let p_count = ve.postings_count as usize;
             for j in 0..p_count {
                 let p = p_base + j * POSTING_ENTRY_SIZE;
-                let cand_doc = u32::from_le_bytes(self.postings_blob[p..p + 4].try_into().unwrap());
+                let cand_doc = u32::from_le_bytes(self.mmap[p..p + 4].try_into().unwrap());
                 if cand_doc == doc_id {
                     continue;
                 }
-                let cand_w = f32::from_le_bytes(self.postings_blob[p + 4..p + 8].try_into().unwrap());
+                let cand_w = f32::from_le_bytes(self.mmap[p + 4..p + 8].try_into().unwrap());
                 *scores.entry(cand_doc).or_insert(0.0) += seed_w * cand_w;
             }
         }
@@ -354,8 +301,7 @@ impl TfidfIndex {
     }
 
     /// Shared n-grams between seed and candidate, with TF-IDF contributions.
-    /// Requires the seed text so we can recover n-gram strings (the index only
-    /// stores hashes).
+    /// Requires the seed text so we can recover n-gram strings from hashes.
     pub fn shared_ngrams_with_seed_text(
         &self,
         seed_doc: DocId,
@@ -369,21 +315,19 @@ impl TfidfIndex {
             return Vec::new();
         }
 
-        // Map hash → first-seen n-gram string for the seed, so we can label shares.
         let mut hash_to_str: FxHashMap<u64, String> = FxHashMap::default();
         for gram in char_ngrams(seed_text, self.params.min_ngram, self.params.max_ngram) {
             let h = xxh3_64(gram.as_bytes());
             hash_to_str.entry(h).or_insert(gram);
         }
 
-        // Sorted-list intersection on term_ids.
         let mut shared: Vec<SharedNgram> = Vec::new();
         let (mut i, mut j) = (0usize, 0usize);
         while i < seed_row.len() && j < cand_row.len() {
             match seed_row[i].0.cmp(&cand_row[j].0) {
                 std::cmp::Ordering::Equal => {
                     let tid = seed_row[i].0;
-                    let term_hash = self.vocab[tid as usize].term_hash;
+                    let term_hash = self.vocab_entry(tid).term_hash;
                     if let Some(ngram) = hash_to_str.get(&term_hash) {
                         let sw = seed_row[i].1;
                         let cw = cand_row[j].1;
@@ -408,9 +352,6 @@ impl TfidfIndex {
         shared
     }
 
-    /// Count shared n-grams of at least `min_gram_len` characters between two
-    /// documents. Hashes alone don't carry length, so we recover lengths by
-    /// re-tokenising the seed text.
     pub fn long_gram_shared_count_with_seed_text(
         &self,
         seed_doc: DocId,
@@ -442,7 +383,7 @@ impl TfidfIndex {
             match seed_row[i].0.cmp(&cand_row[j].0) {
                 std::cmp::Ordering::Equal => {
                     let tid = seed_row[i].0;
-                    if long_hashes.contains(&self.vocab[tid as usize].term_hash) {
+                    if long_hashes.contains(&self.vocab_entry(tid).term_hash) {
                         count += 1;
                     }
                     i += 1;
@@ -456,10 +397,10 @@ impl TfidfIndex {
     }
 
     pub fn info_payload(&self) -> serde_json::Value {
-        let row_nnz: usize = self.row_lengths.iter().map(|&l| l as usize).sum();
-        let postings_nnz: usize = self.postings_blob.len() / POSTING_ENTRY_SIZE;
+        let postings_nnz = self.postings_blob_len / POSTING_ENTRY_SIZE;
+        let row_nnz = self.row_blob_len / ROW_ENTRY_SIZE;
         let docs = self.doc_count;
-        let cols = self.vocab.len();
+        let cols = self.vocab_count;
         let density = if docs == 0 || cols == 0 {
             0.0
         } else {
@@ -474,8 +415,8 @@ impl TfidfIndex {
             "postings_nnz": postings_nnz,
             "density": round_f64(density, 8),
             "features": cols,
-            "row_blob_bytes": self.row_blob.len(),
-            "postings_blob_bytes": self.postings_blob.len(),
+            "row_blob_bytes": self.row_blob_len,
+            "postings_blob_bytes": self.postings_blob_len,
             "params": {
                 "analyzer": self.params.analyzer,
                 "ngram_range": [self.params.min_ngram, self.params.max_ngram],
@@ -487,14 +428,56 @@ impl TfidfIndex {
             "doc_table_fingerprint": self.doc_table_fingerprint,
         })
     }
+
+    /// Header-only read for `info` on huge files. Avoids mmapping the whole
+    /// file (cheap either way, but explicit and matches phrase-index `header_info`).
+    pub fn header_info(path: &Path) -> Result<serde_json::Value> {
+        let mut file = File::open(path)?;
+        let mut hdr = [0u8; HEADER_SIZE];
+        file.read_exact(&mut hdr)?;
+        if &hdr[0..8] != MAGIC_TFIDF_V2 {
+            anyhow::bail!("invalid TF-IDF magic");
+        }
+        let version = u16::from_le_bytes([hdr[8], hdr[9]]);
+        if version != 2 {
+            anyhow::bail!("unsupported TF-IDF version: {}", version);
+        }
+        let vocab_count  = u32::from_le_bytes(hdr[HDR_VOCAB_COUNT].try_into()?) as usize;
+        let doc_count    = u32::from_le_bytes(hdr[HDR_DOC_COUNT].try_into()?) as usize;
+        let min_ngram    = u16::from_le_bytes(hdr[HDR_MIN_NGRAM].try_into()?) as usize;
+        let max_ngram    = u16::from_le_bytes(hdr[HDR_MAX_NGRAM].try_into()?) as usize;
+        let min_df       = u32::from_le_bytes(hdr[HDR_MIN_DF].try_into()?);
+        let max_features = u32::from_le_bytes(hdr[HDR_MAX_FEATURES].try_into()?) as usize;
+        let max_df_ratio = f32::from_le_bytes(hdr[HDR_MAX_DF_RATIO].try_into()?);
+        let fp_end = hdr[HDR_FP].iter().position(|&b| b == 0).unwrap_or(HDR_FP.len());
+        let doc_table_fingerprint =
+            String::from_utf8_lossy(&hdr[HDR_FP.start..HDR_FP.start + fp_end]).to_string();
+        let row_blob_len  = u64::from_le_bytes(hdr[HDR_ROW_BLOB_LEN].try_into()?);
+        let post_blob_len = u64::from_le_bytes(hdr[HDR_POST_BLOB_LEN].try_into()?);
+        let file_bytes = std::fs::metadata(path)?.len();
+        Ok(serde_json::json!({
+            "schema": "sinorag-tfidf-v2",
+            "version": version,
+            "documents": doc_count,
+            "features": vocab_count,
+            "row_blob_bytes": row_blob_len,
+            "postings_blob_bytes": post_blob_len,
+            "file_bytes": file_bytes,
+            "params": {
+                "ngram_range": [min_ngram, max_ngram],
+                "min_df": min_df,
+                "max_df": max_df_ratio,
+                "max_features": max_features,
+            },
+            "doc_table_fingerprint": doc_table_fingerprint,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Free helpers — operate on raw text, no index needed
 // ---------------------------------------------------------------------------
 
-/// Greedy long-substring matcher over a pair of texts. Returns up to `limit`
-/// distinct substrings of length ≥ `min_len`, longest first.
 pub fn long_common_substrings(a: &str, b: &str, min_len: usize, limit: usize) -> Vec<String> {
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut matches = Vec::new();
@@ -612,7 +595,7 @@ impl BucketWriterCache {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TEMP_DIR: &str =
-    "/mnt/Samsung980_1TB/Rust-projects/not-rust-projects/ReadZen/GraphDiscovery/tmp_tfidf_v2";
+    "/mnt/Samsung980_1TB/Rust-projects/not-rust-projects/ReadZen/GraphDiscovery/data/derived/_tmp_tfidf";
 
 pub fn build(
     parquet_path: PathBuf,
@@ -780,7 +763,6 @@ pub fn build(
                     let text = text_arr.value(i);
                     let Some(&doc_id) = doc_table.passage_id_map.get(pid) else { continue };
 
-                    // Real TF counts (non-deduplicating).
                     let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
                     for h in char_ngram_hashes_all(text, params.min_ngram, params.max_ngram) {
                         if let Some(&tid) = term_to_id.get(&h) {
@@ -800,7 +782,6 @@ pub fn build(
                         })
                         .collect();
 
-                    // L2 normalise so dot product == cosine.
                     let norm: f32 = row.iter().map(|(_, w)| w * w).sum::<f32>().sqrt();
                     if norm > 0.0 {
                         for (_, w) in row.iter_mut() {
@@ -882,25 +863,108 @@ pub fn build(
     );
 
     // -----------------------------------------------------------------------
-    // Save
+    // Save — write directly from build's local Vecs (no in-memory `TfidfIndex`).
     // -----------------------------------------------------------------------
     eprintln!("\n[Save] Writing index...");
-    let index = TfidfIndex {
-        params,
-        doc_table_fingerprint,
-        vocab: vocab_entries,
-        idf,
+    write_index_file(
+        &out_path,
+        &params,
+        &doc_table_fingerprint,
+        &vocab_entries,
+        &idf,
         doc_count,
-        row_offsets,
-        row_lengths,
-        row_blob,
-        postings_blob,
-    };
-    index.save(&out_path)?;
+        &row_offsets,
+        &row_lengths,
+        &row_blob,
+        &postings_blob,
+    )?;
 
     let _ = fs::remove_dir_all(&temp_dir);
     eprintln!("\n=== Complete ===");
     eprintln!("Output: {}", out_path.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Free function: write the on-disk index from the builder's in-memory state
+// ---------------------------------------------------------------------------
+
+fn write_index_file(
+    path: &Path,
+    params: &TfidfParams,
+    doc_table_fingerprint: &str,
+    vocab: &[VocabEntry],
+    idf: &[f32],
+    doc_count: usize,
+    row_offsets: &[u64],
+    row_lengths: &[u32],
+    row_blob: &[u8],
+    postings_blob: &[u8],
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("index.tmp");
+    let mut f = BufWriter::new(File::create(&tmp)?);
+
+    let vocab_count = vocab.len() as u32;
+    let doc_count_u32 = doc_count as u32;
+    let row_blob_len = row_blob.len() as u64;
+    let postings_blob_len = postings_blob.len() as u64;
+
+    let vocab_off     = HEADER_SIZE as u64;
+    let idf_off       = vocab_off + vocab_count as u64 * VOCAB_ENTRY_SIZE as u64;
+    let row_off_off   = idf_off + vocab_count as u64 * 4;
+    let row_len_off   = row_off_off + doc_count as u64 * 8;
+    let row_blob_off  = row_len_off + doc_count as u64 * 4;
+    let post_blob_off = row_blob_off + row_blob_len;
+
+    let mut hdr = vec![0u8; HEADER_SIZE];
+    hdr[0..8].copy_from_slice(MAGIC_TFIDF_V2);
+    hdr[8..10].copy_from_slice(&2u16.to_le_bytes());
+    hdr[HDR_VOCAB_COUNT].copy_from_slice(&vocab_count.to_le_bytes());
+    hdr[HDR_DOC_COUNT].copy_from_slice(&doc_count_u32.to_le_bytes());
+    hdr[HDR_MIN_NGRAM].copy_from_slice(&(params.min_ngram as u16).to_le_bytes());
+    hdr[HDR_MAX_NGRAM].copy_from_slice(&(params.max_ngram as u16).to_le_bytes());
+    hdr[HDR_MIN_DF].copy_from_slice(&params.min_df.to_le_bytes());
+    hdr[HDR_MAX_FEATURES].copy_from_slice(&(params.max_features as u32).to_le_bytes());
+    hdr[HDR_MAX_DF_RATIO].copy_from_slice(&params.max_df_ratio.to_le_bytes());
+
+    let fp = doc_table_fingerprint.as_bytes();
+    let n = fp.len().min(HDR_FP.len() - 1);
+    hdr[HDR_FP.start..HDR_FP.start + n].copy_from_slice(&fp[..n]);
+
+    hdr[HDR_VOCAB_OFF].copy_from_slice(&vocab_off.to_le_bytes());
+    hdr[HDR_IDF_OFF].copy_from_slice(&idf_off.to_le_bytes());
+    hdr[HDR_ROW_OFFSETS].copy_from_slice(&row_off_off.to_le_bytes());
+    hdr[HDR_ROW_LENGTHS].copy_from_slice(&row_len_off.to_le_bytes());
+    hdr[HDR_ROW_BLOB_OFF].copy_from_slice(&row_blob_off.to_le_bytes());
+    hdr[HDR_ROW_BLOB_LEN].copy_from_slice(&row_blob_len.to_le_bytes());
+    hdr[HDR_POST_BLOB_OFF].copy_from_slice(&post_blob_off.to_le_bytes());
+    hdr[HDR_POST_BLOB_LEN].copy_from_slice(&postings_blob_len.to_le_bytes());
+    f.write_all(&hdr)?;
+
+    for e in vocab {
+        f.write_all(&e.term_hash.to_le_bytes())?;
+        f.write_all(&e.term_id.to_le_bytes())?;
+        f.write_all(&e.df.to_le_bytes())?;
+        f.write_all(&e.postings_offset.to_le_bytes())?;
+        f.write_all(&e.postings_count.to_le_bytes())?;
+    }
+    for &v in idf {
+        f.write_all(&v.to_le_bytes())?;
+    }
+    for &o in row_offsets {
+        f.write_all(&o.to_le_bytes())?;
+    }
+    for &l in row_lengths {
+        f.write_all(&l.to_le_bytes())?;
+    }
+    f.write_all(row_blob)?;
+    f.write_all(postings_blob)?;
+    f.flush()?;
+    drop(f);
+    fs::rename(&tmp, path)?;
     Ok(())
 }
 

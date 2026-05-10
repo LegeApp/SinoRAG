@@ -1580,7 +1580,7 @@ pub fn run(
     // Validate TF-IDF index fingerprint if it exists
     if tfidf_index.exists() {
         let index = TfidfIndex::load(&tfidf_index)?;
-        let index_fingerprint = index.doc_table_fingerprint.clone();
+        let index_fingerprint = index.doc_table_fingerprint().to_string();
         if !index_fingerprint.is_empty() {
             let handle = tokio::runtime::Handle::current();
             let store = handle.block_on(DataFusionStore::open(&parquet))?;

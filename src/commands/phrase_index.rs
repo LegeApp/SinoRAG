@@ -18,8 +18,9 @@ pub fn build(
 }
 
 pub fn info(index_path: PathBuf) -> Result<()> {
-    let index = PhraseIndex::load(&index_path)?;
-    println!("{}", serde_json::to_string_pretty(&index.info_payload())?);
+    // Header-only read so `info` works on multi-GB indexes without loading them.
+    let payload = PhraseIndex::header_info(&index_path)?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 

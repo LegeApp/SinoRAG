@@ -10,8 +10,9 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 pub fn info(index_path: PathBuf) -> Result<()> {
-    let index = TfidfIndex::load(&index_path)?;
-    println!("{}", serde_json::to_string_pretty(&index.info_payload())?);
+    // Header-only read — works on multi-GB indexes too.
+    let payload = TfidfIndex::header_info(&index_path)?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
