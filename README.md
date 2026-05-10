@@ -1,6 +1,6 @@
-# SinoRAGD
+# SinoRAG
 
-**SinoRAGD** is a local-first research tool for Chinese Buddhist and classical Chinese corpora.
+**SinoRAG** is a local-first research tool for Chinese Buddhist and classical Chinese corpora.
 
 It ingests TEI/XML and corpus exchange files into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, catalog browsing, and LLM-agent research workflows.
 
@@ -8,7 +8,7 @@ The goal is simple:
 
 > Let an LLM agent research Chinese source texts with tools instead of guessing from memory.
 
-SinoRAGD is built for evidence-backed workflows: exact Chinese citations, passage IDs, source metadata, search results, similarity candidates, and generated research artifacts that can be reviewed later.
+SinoRAG is built for evidence-backed workflows: exact Chinese citations, passage IDs, source metadata, search results, similarity candidates, and generated research artifacts that can be reviewed later.
 
 ---
 
@@ -210,7 +210,7 @@ sinoragd similar \
 
 ## MCP server
 
-SinoRAGD includes an MCP server so LLM agents can call research tools directly.
+SinoRAG includes an MCP server so LLM agents can call research tools directly.
 
 ```bash
 sinoragd mcp \
@@ -234,7 +234,7 @@ agent writes answer/report with citations
 
 ## LLM-assisted research
 
-SinoRAGD is not meant to replace a scholar or translator. It is meant to make an agent’s work inspectable.
+SinoRAG is not meant to replace a scholar or translator. It is meant to make an agent’s work inspectable.
 
 Generated reports should preserve:
 
@@ -250,7 +250,7 @@ Generated reports should preserve:
 
 ## ReadZen integration idea
 
-SinoRAGD can generate research artifacts that other tools organize.
+SinoRAG can generate research artifacts that other tools organize.
 
 A clean division is:
 
@@ -315,7 +315,7 @@ cargo run --release -- --help
 
 ## Status
 
-SinoRAGD is experimental but usable.
+SinoRAG is experimental but usable.
 
 Current focus:
 
