@@ -1,303 +1,223 @@
 # SinoRAG
 
-**SinoRAG** is a local-first research tool for Chinese Buddhist and classical Chinese corpora.
+**SinoRAG** is a local-first research backend for Chinese Buddhist and classical Chinese corpora.
 
-It ingests TEI/XML and corpus exchange files into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, catalog browsing, and LLM-agent research workflows.
-
-The goal is simple:
+It ingests TEI/XML, Kanripo, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, catalog browsing, and LLM-agent research workflows via MCP.
 
 > Let an LLM agent research Chinese source texts with tools instead of guessing from memory.
 
-SinoRAG is built for evidence-backed workflows: exact Chinese citations, passage IDs, source metadata, search results, similarity candidates, and generated research artifacts that can be reviewed later.
+---
+
+## Quick start
+
+```bash
+# 1. Ingest a corpus (one-time, slow)
+sinoragd ingest cbeta /path/to/cbeta/xml-p5
+
+# 2. Check what's built and what's next
+sinoragd status
+
+# 3. Build optional heavy indexes when needed
+sinoragd index phrase   # exact CJK phrase search (hours, several GB)
+sinoragd index tfidf    # similarity / frontier discovery (hours, ~1–2 GB)
+
+# 4. Start the MCP server for agent access
+sinoragd mcp
+```
+
+`sinoragd --help` shows the full 4-step flow. All research and analysis tools are exposed as MCP tools — agents call them through the MCP server rather than directly.
 
 ---
 
 ## What it does
 
-- Ingests CBETA-style TEI/XML into Parquet passage data
-- Supports optional Kanripo and custom corpus ingestion
-- Provides exact phrase search over normalized Chinese text
-- Builds a document table for stable `doc_id <-> passage_id` mapping
-- Builds catalog indexes for corpus/work navigation
-- Builds TF-IDF indexes for similarity and reuse discovery
-- Supports memory-mapped phrase index experiments for large corpora
-- Exposes tools through MCP for LLM agents
+- Ingests CBETA TEI/XML, Kanripo plain-text, CEF JSON-lines, and Terebess HTML corpora
+- Builds a Parquet passage store partitioned by `source_corpus`
+- Provides exact phrase search over normalized Chinese text (`phrase_v2.index`)
+- Builds a document table for stable `doc_id ↔ passage_id` mapping
+- Builds catalog indexes for corpus/work/section navigation
+- Builds TF-IDF indexes for similarity and textual reuse discovery
+- Exposes all research tools through MCP for LLM agents
 - Produces structured JSON output for reports, graph generation, and downstream apps
-
----
-
-## Why this exists
-
-General LLMs are useful, but they should not be trusted to “remember” the Buddhist canon or infer textual history without evidence.
-
-SinoRAG gives agents a local research backend:
-
-```text
-user question
-  -> agent calls SinoRAG tools
-  -> SinoRAG searches the corpus
-  -> agent receives exact passages + metadata
-  -> report cites the source text
-````
-
-This is especially useful for questions like:
-
-* “Where is the first loaded-corpus occurrence of this phrase?”
-* “What passages are textually similar to this one?”
-* “Where does this Chan/Zen saying appear?”
-* “Which works cite or reuse this formula?”
-* “What source passages support this graph edge?”
-
----
-
-## Data model
-
-SinoRAG separates source text from derived indexes:
-
-```text
-passages.parquet      canonical passage database
-doc_table.bin         stable doc_id / passage_id mapping
-catalog.index         corpus/work/outline navigation
-phrase_v2.index       exact phrase candidate index
-tfidf.index           similarity index
-registry.sqlite       optional mutable research state
-```
-
-The intended long-term shape is:
-
-```text
-one canonical text store
-many compact reference indexes
-no repeated full-text copies
-```
 
 ---
 
 ## Supported corpora
 
-### CBETA TEI/XML
+| Source | Command | Input |
+|---|---|---|
+| CBETA TEI/XML | `ingest cbeta <PATH>` | CBETA root (containing `xml-p5/`) or `xml-p5/` directly |
+| Kanripo | `ingest kanripo <PATH>` | Kanripo `texts/` root |
+| CEF JSON-lines | `ingest cef <FILE>` | `.jsonl` file in Corpus Exchange Format |
+| Terebess HTML | `ingest terebess <DIR>` | Directory of SingleFile-saved HTML pages |
 
-CBETA-style TEI/XML is the primary target.
+Multiple corpora can be ingested into the same store — each lands in a separate `source_corpus=<name>` Parquet partition.
 
-```bash
-sinoragd ingest \
-  --corpus /path/to/cbeta/xml-p5 \
-  --out data/passages.parquet
-```
+---
 
-### Kanripo
+## User workflow
 
-Kanripo support is experimental and can require a large amount of disk space.
-
-```bash
-sinoragd ingest \
-  --kanripo-input /path/to/kanripo \
-  --out data/passages.parquet
-```
-
-### Custom corpora
-
-Custom Chinese corpora can be converted into the SinoRAG Corpus Exchange Format.
+### Step 1 — Ingest
 
 ```bash
-sinoragd cef-init --out my-corpus
-# edit corpus.toml, works.jsonl, passages.jsonl
-
-sinoragd ingest-cef \
-  --input my-corpus \
-  --out data/passages.parquet
+sinoragd ingest cbeta /path/to/cbeta/xml-p5
+sinoragd ingest kanripo /path/to/kanripo        # optional, append
 ```
 
-Minimum custom format:
+Use `--out <DIR>` to set a custom data root (default: `data/`).
+Use `--resume auto` to continue an interrupted run.
+Use `--sorting-data-dir` for CBETA period-rank ordering.
+
+### Step 2 — Check status
+
+```bash
+sinoragd status
+```
+
+Reports what's ingested, which indexes are present, estimated cost for the missing optional ones, and suggested next steps.
+
+### Step 3 — Build optional indexes
+
+These are not required to start the MCP server. Build them when the tools that depend on them are needed.
+
+```bash
+# Exact phrase search (canonical-source, first-attestation, phrase-history, …)
+sinoragd index phrase
+
+# Similarity / frontier discovery (similar, frontier, …)
+sinoragd index tfidf
+```
+
+Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
+
+### Step 4 — Start the MCP server
+
+```bash
+sinoragd mcp
+```
+
+All research and analysis tools are exposed via MCP. Agents connect here rather than calling commands directly.
+
+---
+
+## Data model
 
 ```text
-corpus.toml
-works.jsonl
-passages.jsonl
+data/
+  passages.parquet/
+    source_corpus=cbeta/      ← partitioned by corpus
+    source_corpus=kanripo/
+  derived/
+    doc_table.bin             stable doc_id / passage_id mapping
+    catalog.index             corpus / work / outline navigation
+    phrase_v2.index           exact phrase candidate index  (optional)
+    tfidf.index               similarity index              (optional)
+    registry.sqlite           mutable research state        (auto-created)
 ```
 
 ---
 
-## Basic workflow
+## Tool dependency map
 
-### 1. Build passage database
+Which artifacts each tool needs:
 
-```bash
-sinoragd ingest \
-  --corpus /path/to/cbeta/xml-p5 \
-  --out data/passages.parquet
-```
+| Tool | parquet | doc_table | catalog | phrase_index | tfidf | Notes |
+|---|---|---|---|---|---|---|
+| `passage` | ✓ | — | — | — | — | |
+| `search` | ✓ | — | — | optional | — | phrase_index speeds exact match |
+| `expand-context` | ✓ | — | — | — | — | pure parquet window |
+| `expand-context-adaptive` | ✓ | — | ✓ | — | — | catalog for node climbing |
+| `find-first-mention` | ✓ | ✓ | — | optional | — | phrase_index greatly speeds it up |
+| `trace-term-usage` | ✓ | ✓ | — | optional | — | |
+| `phrase-history` | ✓ | ✓ | — | optional | — | |
+| `first-attestation` | ✓ | ✓ | — | optional | — | |
+| `outline-search` | ✓ | ✓ | ✓ | optional | — | |
+| `cluster-hits` | ✓ | ✓ | ✓ | optional | — | |
+| `absence-check` | ✓ | ✓ | ✓ | optional | — | |
+| `collocation-search` | ✓ | ✓ | — | optional | — | no catalog needed |
+| `compare-usage` | ✓ | ✓ | ✓ | — | — | |
+| `similar` / `similar-batch` | ✓ | ✓ | — | — | ✓ | |
+| `frontier` / `research-packet` | ✓ | ✓ | optional | optional | optional | |
+| `query-expand-terms` | — | — | — | — | — | zero corpus deps |
 
-### 2. Build document table
-
-```bash
-sinoragd doc-table-build \
-  --parquet data/passages.parquet \
-  --out data/doc_table.bin
-```
-
-### 3. Build catalog index
-
-```bash
-sinoragd catalog-index-build \
-  --parquet data/passages.parquet \
-  --out derived/catalog.index
-```
-
-### 4. Build phrase index
-
-```bash
-sinoragd phrase-index-build-v2 \
-  --parquet data/passages.parquet \
-  --doc-table data/doc_table.bin \
-  --out derived/phrase_v2.index \
-  --gram-len 4 \
-  --buckets 2048 \
-  --temp-dir /path/to/large/temp
-```
-
-Use a real disk-backed temp directory for large builds. Avoid `/tmp` if it is RAM-backed.
-
-### 5. Build TF-IDF index
-
-```bash
-sinoragd tfidf-build \
-  --parquet data/passages.parquet \
-  --doc-table data/doc_table.bin \
-  --out derived/tfidf.index \
-  --min-ngram 5 \
-  --max-ngram 8 \
-  --min-df 5 \
-  --max-features 200000
-```
-
-For very large corpora, prefer sharded builds.
-
----
-
-## Search examples
-
-### Exact phrase search
-
-```bash
-sinoragd phrase-index-search \
-  --phrase "如是我聞" \
-  --parquet data/passages.parquet \
-  --doc-table data/doc_table.bin \
-  --phrase-index derived/phrase_v2.index
-```
-
-### SQL-style passage search
-
-```bash
-sinoragd search \
-  --parquet data/passages.parquet \
-  --phrase "平常心是道" \
-  --limit 20
-```
-
-### Similar passages
-
-```bash
-sinoragd similar \
-  --parquet data/passages.parquet \
-  --index derived/tfidf.index \
-  --seed "T/T48/T48n2005.xml#p001" \
-  --limit 20
-```
+**Minimum viable MCP server** (just `passage`, `search`, `expand-context`): ingest only, no heavy indexes required.
 
 ---
 
 ## MCP server
 
-SinoRAG includes an MCP server so LLM agents can call research tools directly.
-
 ```bash
+sinoragd mcp
+# or with explicit paths:
 sinoragd mcp \
   --parquet data/passages.parquet \
-  --doc-table data/doc_table.bin \
-  --phrase-index derived/phrase_v2.index \
-  --tfidf-index derived/tfidf.index \
-  --catalog-index derived/catalog.index
+  --tfidf-index data/derived/tfidf.index \
+  --catalog-index data/derived/catalog.index
 ```
 
-The intended agent pattern is:
+Agent pattern:
 
 ```text
 agent receives user question
-agent calls SinoRAG tools
-SinoRAG returns structured evidence
-agent writes answer/report with citations
+  → agent calls SinoRAG MCP tools
+  → SinoRAG returns exact passages + metadata
+  → agent writes answer/report with citations
+```
+
+Research tools that require indexes not yet built will return a clear error rather than silently failing. The `status` command tells you what's missing before you start.
+
+---
+
+## Custom corpora (CEF)
+
+```bash
+# Create a skeleton CEF directory
+sinoragd cef-init --out my-corpus
+# Edit: corpus.toml, works.jsonl, passages.jsonl
+
+# Validate before ingesting
+sinoragd cef-validate --input my-corpus
+
+# Ingest
+sinoragd ingest cef my-corpus/passages.jsonl
 ```
 
 ---
 
 ## LLM-assisted research
 
-SinoRAG is not meant to replace a scholar or translator. It is meant to make an agent’s work inspectable.
+SinoRAG is not meant to replace a scholar or translator — it makes an agent's work inspectable.
 
-Generated reports should preserve:
+Generated artifacts should preserve:
 
-* exact Chinese source text
-* passage IDs
-* source work metadata
-* search method
-* confidence / review state
-* candidate graph edges
-* rejected or weak evidence where relevant
+- exact Chinese source text and passage IDs
+- source work metadata (canon, period, author, title)
+- search method and confidence
+- candidate graph edges and rejected evidence
 
 ---
 
-## ReadZen integration idea
-
-SinoRAG can generate research artifacts that other tools organize.
-
-A clean division is:
+## ReadZen integration
 
 ```text
 SinoRAG generates evidence.
 ReadZen organizes and displays it beside source texts.
 ```
 
-Possible outputs:
-
-```text
-research_bundle/
-  artifact_index.jsonl
-  source_attachments.jsonl
-  reports/
-  graphs/
-  dossiers/
-```
-
-This allows generated reports, diagrams, phrase histories, and lineage outputs to be attached to the CBETA documents and passages they cite.
+SinoRAG can export research bundles (`export-readzen`, `graph-build`, `report-build`) consumable by ReadZen to attach generated reports, phrase histories, and lineage diagrams to the CBETA passages they cite.
 
 ---
 
 ## Performance notes
 
-Large corpora need disk-aware indexing.
-
-Recommendations:
-
-* Use release builds.
-* Put temp files on a fast SSD.
-* Avoid RAM-backed `/tmp` for phrase or TF-IDF builds.
-* Use sharded TF-IDF for very large corpora.
-* Prefer `doc_id` references over repeated passage ID strings.
-* Memory-mapped indexes are preferred for large read-only retrieval structures.
-
-Build with:
-
-```bash
-cargo build --release
-```
+- Use release builds: `cargo build --release`
+- Put `--temp-dir` on a fast SSD; avoid RAM-backed `/tmp` for phrase or TF-IDF builds
+- Indexes are mmap-backed — O(1) RAM at query time regardless of index size
+- `doc_id` integer references are preferred over repeated passage ID strings in all index structures
 
 ---
 
 ## Install
-
-From source:
 
 ```bash
 git clone https://github.com/yourname/sinoragd
@@ -305,35 +225,14 @@ cd sinoragd
 cargo install --path .
 ```
 
-Or run directly:
-
-```bash
-cargo run --release -- --help
-```
-
 ---
 
 ## Status
 
-SinoRAG is experimental but usable.
-
-Current focus:
-
-* scalable phrase index v2
-* memory-conscious TF-IDF indexing
-* stable corpus exchange format
-* MCP agent integration
-* ReadZen-compatible research bundles
-* better translation/glossing workflows for Classical Chinese
-
-Expect schema and command names to change while the project stabilizes.
+Experimental but usable. Expect index schemas and hidden command names to change while the project stabilizes. The four user-facing commands (`ingest`, `status`, `index`, `mcp`) are stable.
 
 ---
 
 ## License
 
 AGPL-3.0
-
-````
-
-
