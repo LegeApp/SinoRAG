@@ -241,6 +241,74 @@ pub enum Command {
         #[arg(long)]
         pack_id: Option<String>,
     },
+    /// Pick the smallest catalog node that contains the seed passage and
+    /// fits the char budget; return every passage inside it.
+    ExpandContextAdaptive {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        catalog: PathBuf,
+        #[arg(long)]
+        passage_id: String,
+        #[arg(long, default_value_t = 8000)]
+        max_chars: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Earliest attestation of a phrase, ordered by period_rank.
+    FindFirstMention {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long = "scope-canon")]
+        scope_canon: Vec<String>,
+        #[arg(long = "scope-period")]
+        scope_period: Vec<String>,
+        #[arg(long = "scope-source-work-id")]
+        scope_source_work_id: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Phrase frequency aggregated by period / canon / author / work, with
+    /// representative passages per group.
+    TraceTermUsage {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value = "period")]
+        group_by: String,
+        #[arg(long, default_value_t = 2000)]
+        limit_total: usize,
+        #[arg(long, default_value_t = 5)]
+        limit_per_group: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Variants / orthographic flips / aliases for a seed phrase.
+    QueryExpandTerms {
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value = "all")]
+        mode: String,
+        #[arg(long = "person-alias")]
+        person_alias: Vec<String>,
+        #[arg(long, default_value_t = 10)]
+        max: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Build a research packet: a zip of curated primary-source material
     /// (tool outputs + cited passages) for a downstream agent. SinoRAG does
     /// not write the report itself; it assembles the dossier.

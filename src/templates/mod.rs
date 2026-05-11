@@ -9,6 +9,7 @@ pub mod markdown_report;
 pub mod readzen_collection;
 pub mod research_packet;
 pub mod timeline_graph;
+pub mod variants;
 
 use anyhow::Result;
 use serde_json::{json, Value};

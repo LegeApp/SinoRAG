@@ -2,6 +2,10 @@ pub mod build_pack;
 pub mod canonical_source;
 pub mod catalog_index;
 pub mod document_table;
+pub mod expand_context_adaptive;
+pub mod find_first_mention;
+pub mod query_expand_terms;
+pub mod trace_term_usage;
 pub mod expand_context;
 pub mod cef;
 pub mod export;
@@ -205,6 +209,24 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::IngestTerebess { input, out_parquet, images_dir, min_body_chars } =>
             ingest_terebess::run(input, out_parquet, images_dir, min_body_chars),
         Command::BuildPack { pack, pack_id } => build_pack::run(pack, pack_id),
+        Command::ExpandContextAdaptive { parquet, catalog, passage_id, max_chars, out } =>
+            expand_context_adaptive::run(parquet, catalog, passage_id, max_chars, out).await,
+        Command::FindFirstMention {
+            parquet, phrase_index, doc_table, phrase,
+            scope_canon, scope_period, scope_source_work_id, limit, out
+        } => find_first_mention::run(
+            parquet, phrase_index, doc_table, phrase,
+            scope_canon, scope_period, scope_source_work_id, limit, out,
+        ).await,
+        Command::TraceTermUsage {
+            parquet, phrase_index, doc_table, phrase,
+            group_by, limit_total, limit_per_group, out
+        } => trace_term_usage::run(
+            parquet, phrase_index, doc_table, phrase,
+            group_by, limit_total, limit_per_group, out,
+        ).await,
+        Command::QueryExpandTerms { phrase, mode, person_alias, max, out } =>
+            query_expand_terms::run(phrase, mode, person_alias, max, out),
         Command::ResearchPacketBuild {
             pack, out, recipe, brief, keep_temp,
             topic, notes, phrase, seed_passage, person, person_alias,
