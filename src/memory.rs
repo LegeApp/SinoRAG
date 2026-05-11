@@ -313,3 +313,30 @@ pub fn recommended_thread_count(per_thread_memory_gb: f64) -> usize {
         num_cpus::get()
     }
 }
+
+/// Pick a phrase / tfidf bucket count for the corpus + memory budget.
+///
+/// Rough heuristic. Each DF/posting record is ~12–16 bytes. We want
+/// per-bucket files small enough to sort in memory during Phase 2:
+/// `target_records_per_bucket = budget / 16 / safety`. Total records
+/// scales roughly with parquet file count × per-file char volume; we
+/// approximate `total = parquet_files × 200_000` (a few hundred MB of
+/// CJK text per part file is typical). bucket_count is the next power
+/// of two that brings `total / bucket_count` under target. Clamped to
+/// `[64, 8192]`.
+pub fn bucket_count_for_corpus(parquet_file_count: usize, memory_budget_bytes: Option<u64>) -> usize {
+    let budget = memory_budget_bytes
+        .map(|b| b as f64)
+        .or_else(|| system_memory_info().map(|m| (m.available_physical_bytes as f64) * 0.6))
+        .unwrap_or(4.0 * 1024.0 * 1024.0 * 1024.0); // 4 GB fallback
+
+    const BYTES_PER_RECORD: f64 = 16.0;
+    const SAFETY: f64 = 4.0; // multiple passes over a bucket during sort
+    let target_records_per_bucket = (budget / BYTES_PER_RECORD / SAFETY).max(100_000.0);
+
+    let parquet_files = parquet_file_count.max(1) as f64;
+    let estimated_total = parquet_files * 200_000.0; // records/file estimate
+    let raw = (estimated_total / target_records_per_bucket).ceil() as usize;
+    let pow2 = raw.next_power_of_two().max(64);
+    pow2.min(8192)
+}

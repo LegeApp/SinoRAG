@@ -13,6 +13,9 @@ pub async fn run(
     kanripo_input: Option<PathBuf>,
     sorting_data_dir: Option<PathBuf>,
     out: Option<PathBuf>,
+    out_jsonl: PathBuf,
+    out_parquet: PathBuf,
+    zen_only: bool,
     build_phrase_index: bool,
     phrase_index_out: PathBuf,
     phrase_gram_len: usize,
@@ -21,56 +24,34 @@ pub async fn run(
     catalog_index_out: Option<PathBuf>,
     phrase_max_memory: Option<u64>,
 ) -> Result<()> {
-    let out = out.unwrap_or_else(|| PathBuf::from("GraphDiscovery/Runs/rust"));
-    
+    let out = out.unwrap_or_else(|| PathBuf::from("data"));
+
     if corpus.is_none() && kanripo_input.is_none() {
         anyhow::bail!("ingest requires at least one of --corpus or --kanripo-input");
     }
-
-    let out_jsonl = out.join("passages.jsonl");
-    let out_parquet = out.join("passages.parquet");
-    let zen_only = false;
 
     if let Some(parent) = out_jsonl.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Check for resume checkpoint
+    // Resume is currently unsafe: per-corpus part indices are reset to 0
+    // and `File::create` would overwrite existing parquet parts. Refuse
+    // to proceed until the Phase D staging-directory resume lands.
     let checkpoint_path = out_parquet.join(".ingest_checkpoint.json");
-    let mut processed_files: HashSet<String> = HashSet::new();
-    let mut resume_mode = false;
-
     if checkpoint_path.exists() {
-        println!("Found checkpoint file, attempting resume...");
-        if let Ok(checkpoint_content) = std::fs::read_to_string(&checkpoint_path) {
-            if let Ok(checkpoint) = serde_json::from_str::<serde_json::Value>(&checkpoint_content) {
-                if let Some(files) = checkpoint.get("processed_files").and_then(|v| v.as_array()) {
-                    for file in files {
-                        if let Some(f) = file.as_str() {
-                            processed_files.insert(f.to_string());
-                        }
-                    }
-                    resume_mode = true;
-                    println!("Resuming from checkpoint, {} files already processed", processed_files.len());
-                }
-            }
-        }
+        anyhow::bail!(
+            "Ingest checkpoint found at {}. Resume is currently unsafe (would \
+             overwrite existing parquet parts). Delete the checkpoint and the \
+             parquet directory, then re-ingest from scratch — or wait for the \
+             staging-directory resume (Phase D).",
+            checkpoint_path.display()
+        );
     }
+    let mut processed_files: HashSet<String> = HashSet::new();
 
-    // If not resuming, reset the parquet directory
-    if !resume_mode {
-        storage::reset_parquet_dir(&out_parquet)?;
-    }
+    storage::reset_parquet_dir(&out_parquet)?;
 
-    let file = if resume_mode {
-        // Append to existing JSONL
-        File::options()
-            .append(true)
-            .open(&out_jsonl)?
-    } else {
-        // Create new JSONL
-        File::create(&out_jsonl)?
-    };
+    let file = File::create(&out_jsonl)?;
     let mut jsonl = BufWriter::new(file);
     
     // Separate batches per source_corpus for partitioned writing
@@ -124,12 +105,6 @@ pub async fn run(
         pb.set_message("Processing CBETA XML files");
 
         for (xml_path, rel_path) in paths {
-            // Skip if already processed in resume mode
-            if resume_mode && processed_files.contains(&rel_path) {
-                pb.inc(1);
-                continue;
-            }
-
             let meta = metadata.get(&rel_path).cloned().unwrap_or_default();
             if zen_only && !meta.traditions.iter().any(|t| t == "Chan/Zen") {
                 pb.inc(1);
@@ -258,15 +233,23 @@ pub async fn run(
         crate::commands::document_table::build(out_parquet.clone(), doc_table_path.clone(), None)?;
     }
 
+    // Count parquet files so the bucket-count heuristic has an input.
+    let parquet_file_count = crate::phrase_index::parquet_files(&out_parquet)
+        .map(|v| v.len())
+        .unwrap_or(0);
+
     if build_phrase_index {
         println!("\n=== Building phrase index ===");
-        let _ = phrase_max_memory; // reserved for future tuning of bucket count
+        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, phrase_max_memory);
+        println!("  buckets: {} (parquet files: {}, memory budget: {})",
+            buckets, parquet_file_count,
+            phrase_max_memory.map(|b| format!("{} MB", b / 1024 / 1024)).unwrap_or_else(|| "default".into()));
         crate::phrase_index::build(
             out_parquet.clone(),
             doc_table_path.clone(),
             phrase_index_out.clone(),
             phrase_gram_len,
-            2048,
+            buckets,
             None,
         )?;
         println!("wrote {}", phrase_index_out.display());
@@ -276,12 +259,13 @@ pub async fn run(
         println!("\n=== Building TF-IDF index ===");
         let tfidf_out_path = tfidf_out.unwrap_or_else(|| out.join("tfidf.index"));
         let params = crate::tfidf::index::TfidfParams::default_v2();
+        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, phrase_max_memory);
         crate::tfidf::index::build(
             out_parquet.clone(),
             doc_table_path.clone(),
             tfidf_out_path.clone(),
             params,
-            2048,
+            buckets,
             None,
         )?;
         println!("wrote {}", tfidf_out_path.display());
@@ -294,7 +278,7 @@ pub async fn run(
             out_parquet.clone(),
             catalog_index_out.clone(),
             None,  // debug_json
-            None,  // doc_table - will use default location
+            Some(doc_table_path.clone()),
         )?;
     }
 

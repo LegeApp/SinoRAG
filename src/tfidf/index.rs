@@ -618,8 +618,8 @@ impl BucketWriterCache {
 // Build entry point
 // ---------------------------------------------------------------------------
 
-const DEFAULT_TEMP_DIR: &str =
-    "/mnt/Samsung980_1TB/Rust-projects/SinoRAG/data/derived/_tmp_tfidf";
+// Default temp dir is derived from the output index path
+// (`<out>.work/`). Set inside `build()` when `temp_dir` is None.
 
 pub fn build(
     parquet_path: PathBuf,
@@ -629,7 +629,11 @@ pub fn build(
     bucket_count: usize,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
-    let temp_dir = temp_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_TEMP_DIR));
+    let temp_dir = temp_dir.unwrap_or_else(|| {
+        let mut p = out_path.as_os_str().to_os_string();
+        p.push(".work");
+        PathBuf::from(p)
+    });
 
     eprintln!("=== TF-IDF builder ===");
     eprintln!("Parquet : {}", parquet_path.display());
