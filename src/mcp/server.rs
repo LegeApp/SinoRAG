@@ -412,7 +412,7 @@ fn default_schema_type() -> String {
 impl GraphDiscoveryServer {
     #[tool(
         name = "search",
-        description = "Full-text search over CBETA + Kanripo passages with optional phrase, tradition, period, origin, canon, author, title, and catalog index scope filters (source_work_id, heading_path_prefix)."
+        description = "Search CBETA + Kanripo passages with optional filters."
     )]
     pub async fn search_tool(
         &self,
@@ -491,7 +491,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "prior_work",
-        description = "Registry-tracked prior work for a seed passage id (uses the local registry SQLite)."
+        description = "Registry prior work for a seed passage."
     )]
     pub async fn prior_work_tool(
         &self,
@@ -508,7 +508,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "phrase_status",
-        description = "Registry-tracked usage status for a phrase (which works have already cited it)."
+        description = "Registry usage status for a phrase."
     )]
     pub async fn phrase_status_tool(
         &self,
@@ -544,7 +544,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "get_research_template",
-        description = "Get a structured markdown research output template with paragraph sections, citations, and optional diagrams for formatting answers."
+        description = "Get markdown research template with sections and citations."
     )]
     pub async fn get_research_template_tool(
         &self,
@@ -593,7 +593,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "similar_passages",
-        description = "Find passages textually similar to a seed passage using TF-IDF similarity. Useful for finding related passages even when wording changes."
+        description = "Find passages similar to seed via TF-IDF scoring."
     )]
     pub async fn similar_passages_tool(
         &self,
@@ -632,7 +632,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "frontier",
-        description = "Find frontier passages and phrase frontiers from a seed passage. Combines similar passages with phrase-based exploration to discover related content."
+        description = "Find frontier passages from seed via similarity and phrases."
     )]
     pub async fn frontier_tool(
         &self,
@@ -690,7 +690,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "classify_query",
-        description = "Classify a research query and return a research plan with recommended tools and approach."
+        description = "Classify query and return research plan with tools."
     )]
     pub async fn classify_query_tool(
         &self,
@@ -716,7 +716,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "research_first_attestation",
-        description = "Workflow tool for first attestation research. Internally calls primitives and returns structured research results with evidence classification and confidence assessment."
+        description = "First attestation research with structured evidence results."
     )]
     pub async fn research_first_attestation_tool(
         &self,
@@ -826,7 +826,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "research_phrase_genesis",
-        description = "Workflow tool for phrase genesis research (origin of sayings, where they come from). Internally calls primitives and returns structured research results with evidence classification and confidence assessment."
+        description = "Phrase genesis research with structured evidence results."
     )]
     pub async fn research_phrase_genesis_tool(
         &self,
@@ -972,7 +972,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "resolve_entity",
-        description = "Resolve a person or entity name to find candidates with Chinese aliases. Useful for finding mentions of masters, monks, or other figures with multiple name variants."
+        description = "Resolve entity name to candidates with Chinese aliases."
     )]
     pub async fn resolve_entity_tool(
         &self,
@@ -1025,7 +1025,7 @@ impl GraphDiscoveryServer {
     // Catalog index tools
     #[tool(
         name = "catalog_overview",
-        description = "Get an overview of the corpus catalog index including total works, nodes, and metadata statistics. This provides a structural map of the corpus for faster navigation and filtering."
+        description = "Corpus catalog overview with work and node stats."
     )]
     pub async fn catalog_overview_tool(
         &self,
@@ -1039,7 +1039,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "list_works",
-        description = "List works in the corpus catalog with optional filters for tradition, period, canon, and author. Returns work metadata including title, author, period, and passage counts."
+        description = "List works with tradition, period, canon, author filters."
     )]
     pub async fn list_works_tool(
         &self,
@@ -1086,7 +1086,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "work_outline",
-        description = "Get the hierarchical outline tree structure for a work or node. Shows the structural organization (sections, headings) of a work up to a specified depth."
+        description = "Hierarchical outline tree for work or catalog node."
     )]
     pub async fn work_outline_tool(
         &self,
@@ -1112,7 +1112,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "section_scope",
-        description = "Get the scope and passage filters for a specific node in the catalog. Returns node metadata and filter criteria for querying passages within that section."
+        description = "Scope and passage filters for catalog node."
     )]
     pub async fn section_scope_tool(
         &self,
@@ -1142,7 +1142,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "expand_context",
-        description = "Expand context around a passage ID. Returns the center passage plus specified number of passages before and after."
+        description = "Expand context around a passage ID."
     )]
     pub async fn expand_context_tool(
         &self,
@@ -1165,7 +1165,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "expand_hit",
-        description = "Expand context for a hit ID from a previous search result packet. Loads the packet, resolves the hit to a passage ID, and expands context."
+        description = "Expand context for hit from search result packet."
     )]
     pub async fn expand_hit_tool(
         &self,
@@ -1196,7 +1196,7 @@ impl GraphDiscoveryServer {
 
     #[tool(
         name = "cef_schema",
-        description = "Get schema information for the GraphDiscovery Corpus Exchange Format (GD-CEF). Returns field definitions, required fields, and examples."
+        description = "GD-CEF schema with field definitions and examples."
     )]
     pub async fn cef_schema_tool(
         &self,
@@ -1264,7 +1264,7 @@ rights_id = "CC-BY-SA-4.0""#
 
     #[tool(
         name = "cef_validate",
-        description = "Validate a GD-CEF corpus directory. Checks required files, field presence, data consistency, and CJK content."
+        description = "Validate GD-CEF corpus directory."
     )]
     pub async fn cef_validate_tool(
         &self,
@@ -1278,7 +1278,7 @@ rights_id = "CC-BY-SA-4.0""#
 
     #[tool(
         name = "cef_guide",
-        description = "Get guidance for converting datasets to GD-CEF format. Provides step-by-step instructions, best practices, and examples for different conversion topics."
+        description = "GD-CEF conversion guidance and best practices."
     )]
     pub async fn cef_guide_tool(
         &self,

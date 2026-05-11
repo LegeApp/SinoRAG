@@ -16,32 +16,53 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::fs::File;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // PassageRow — what the builder needs per passage. One row per parquet record
 // that resolves to a doc_id in the DocumentTable.
 // ---------------------------------------------------------------------------
 
+// PassageRow holds interned Arc<str> for the high-cardinality-but-repeating
+// fields (canon/work/main_title/period/etc). At 2.3M+ rows the row-vector
+// dominates memory; sharing strings via a RwLock<FxHashMap<String,Arc<str>>>
+// shrinks peak RSS by ~5–10×.
 #[derive(Debug, Clone)]
 struct PassageRow {
     doc_id: DocId,
-    source_corpus: String,
-    canon: String,
-    canon_name: String,
-    source_work_id: String,
-    source_rel_path: String,
-    div_path: String,
-    heading: String,
-    main_title: String,
-    author: String,
-    period: String,
+    source_corpus: Arc<str>,
+    canon: Arc<str>,
+    canon_name: Arc<str>,
+    source_work_id: Arc<str>,
+    source_rel_path: Arc<str>,
+    div_path: Arc<str>,
+    heading: Arc<str>,
+    main_title: Arc<str>,
+    author: Arc<str>,
+    period: Arc<str>,
     period_rank: i32,
-    origin: String,
-    traditions: Vec<String>,
+    origin: Arc<str>,
+    traditions: Vec<Arc<str>>,
     cjk_char_count: u32,
-    from_lb: String,
-    to_lb: String,
+    from_lb: Arc<str>,
+    to_lb: Arc<str>,
+}
+
+// A plain (unsynchronized) string interner used per-scan-unit.
+// Sequential mode: one instance shared across all files.
+// Parallel mode: one instance per file (no locking, no contention).
+type LocalInterner = FxHashMap<String, Arc<str>>;
+
+fn intern(map: &mut LocalInterner, s: &str) -> Arc<str> {
+    if let Some(a) = map.get(s) {
+        return a.clone();
+    }
+    let a: Arc<str> = Arc::from(s);
+    map.insert(s.to_string(), a.clone());
+    a
 }
 
 // ---------------------------------------------------------------------------
@@ -65,23 +86,87 @@ pub fn build(
     let doc_table = DocumentTable::load(&doc_table_path)?;
     let dt_fp = doc_table.source_fingerprint.clone();
 
+    // On Linux: raise OOM score so the kernel targets this process first if
+    // RAM runs low, rather than freezing the whole desktop/shell. Also lower
+    // CPU niceness so UI threads stay responsive during the scan.
+    #[cfg(target_os = "linux")]
+    linux_lower_process_priority();
+
     let files = parquet_files(&parquet_path)?;
     println!("Found {} parquet files", files.len());
 
-    println!("[1/3] scanning parquet…");
-    let partials: Vec<Vec<PassageRow>> = files
-        .par_iter()
-        .map(|p| scan_file(p, &doc_table))
-        .collect::<Result<Vec<_>>>()?;
-    let mut rows: Vec<PassageRow> = partials.into_iter().flatten().collect();
-    println!("[1/3] {} passage rows", rows.len());
+    // Default to sequential (par=1) to avoid lock contention and memory
+    // pressure. Set SINORAG_CATALOG_PAR=N to enable parallelism.
+    let par = std::env::var("SINORAG_CATALOG_PAR")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(1);
+
+    // When parallel, cap threads by available RAM (each scan thread can hold
+    // a large parquet batch + row vec; ~500 MB/thread is a conservative bound).
+    let par = if par > 1 {
+        let mem_cap = crate::memory::recommended_thread_count(0.5);
+        let safe = par.min(mem_cap);
+        if safe < par {
+            println!("  note: capped parallelism from {par} to {safe} based on available RAM");
+        }
+        safe
+    } else {
+        1
+    };
+    println!("[1/3] scanning parquet… (parallelism={par})");
+
+    let total = files.len();
+    let mut rows: Vec<PassageRow> = Vec::new();
+
+    if par == 1 {
+        // Sequential: single local interner shared across all files — no locking.
+        let mut interner = LocalInterner::default();
+        for (i, path) in files.iter().enumerate() {
+            let partial = scan_file(path, &doc_table, &mut interner)?;
+            rows.extend(partial);
+            print!("\r  {}/{} files, {} rows…", i + 1, total, rows.len());
+            let _ = std::io::stdout().flush();
+        }
+        println!();
+        println!(
+            "[1/3] {} passage rows ({} interned strings)",
+            rows.len(),
+            interner.len()
+        );
+    } else {
+        // Parallel: each file gets its own local interner — no shared lock.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(par)
+            .stack_size(4 * 1024 * 1024)
+            .build()
+            .context("build scan thread pool")?;
+        let partials: Vec<Vec<PassageRow>> = pool.install(|| {
+            files
+                .par_iter()
+                .map(|p| {
+                    let mut interner = LocalInterner::default();
+                    let partial = scan_file(p, &doc_table, &mut interner)?;
+                    let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if done % 10 == 0 || done == total {
+                        eprintln!("  {done}/{total} files scanned");
+                    }
+                    Ok(partial)
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        rows = partials.into_iter().flatten().collect();
+        println!("[1/3] {} passage rows", rows.len());
+    }
 
     println!("[2/3] sorting by (corpus, canon, work, source_rel_path, doc_id)…");
     rows.sort_by(|a, b| {
-        a.source_corpus.cmp(&b.source_corpus)
-            .then_with(|| a.canon.cmp(&b.canon))
-            .then_with(|| a.source_work_id.cmp(&b.source_work_id))
-            .then_with(|| a.source_rel_path.cmp(&b.source_rel_path))
+        a.source_corpus.as_ref().cmp(b.source_corpus.as_ref())
+            .then_with(|| a.canon.as_ref().cmp(b.canon.as_ref()))
+            .then_with(|| a.source_work_id.as_ref().cmp(b.source_work_id.as_ref()))
+            .then_with(|| a.source_rel_path.as_ref().cmp(b.source_rel_path.as_ref()))
             .then_with(|| a.doc_id.cmp(&b.doc_id))
     });
 
@@ -107,12 +192,17 @@ pub fn build(
 // Per-file scan
 // ---------------------------------------------------------------------------
 
-fn scan_file(file_path: &PathBuf, doc_table: &DocumentTable) -> Result<Vec<PassageRow>> {
+fn scan_file(
+    file_path: &PathBuf,
+    doc_table: &DocumentTable,
+    interner: &mut LocalInterner,
+) -> Result<Vec<PassageRow>> {
     let file = File::open(file_path)
         .with_context(|| format!("open {}", file_path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let reader = builder.build()?;
 
+    let empty: Arc<str> = intern(interner, "");
     let mut rows: Vec<PassageRow> = Vec::new();
     for batch in reader {
         let batch = batch?;
@@ -127,22 +217,22 @@ fn scan_file(file_path: &PathBuf, doc_table: &DocumentTable) -> Result<Vec<Passa
 
             rows.push(PassageRow {
                 doc_id,
-                source_corpus:   cols.source_corpuses.value(i).to_string(),
-                canon:           cols.canons.value(i).to_string(),
-                canon_name:      cols.canon_names.value(i).to_string(),
-                source_work_id:  cols.source_work_ids.value(i).to_string(),
-                source_rel_path: cols.source_rel_paths.value(i).to_string(),
-                div_path:        cols.div_paths.value(i).to_string(),
-                heading:         cols.headings.value(i).to_string(),
-                main_title:      cols.main_titles.value(i).to_string(),
-                author:          cols.authors.value(i).to_string(),
-                period:          cols.periods.value(i).to_string(),
+                source_corpus:   intern(interner, cols.source_corpuses.value(i)),
+                canon:           intern(interner, cols.canons.value(i)),
+                canon_name:      intern(interner, cols.canon_names.value(i)),
+                source_work_id:  intern(interner, cols.source_work_ids.value(i)),
+                source_rel_path: intern(interner, cols.source_rel_paths.value(i)),
+                div_path:        intern(interner, cols.div_paths.value(i)),
+                heading:         intern(interner, cols.headings.value(i)),
+                main_title:      intern(interner, cols.main_titles.value(i)),
+                author:          intern(interner, cols.authors.value(i)),
+                period:          intern(interner, cols.periods.value(i)),
                 period_rank:     if cols.period_ranks.is_null(i) { 0 } else { cols.period_ranks.value(i) },
-                origin:          cols.origins.value(i).to_string(),
-                traditions:      parse_traditions(cols.traditions.value(i)),
+                origin:          intern(interner, cols.origins.value(i)),
+                traditions:      parse_traditions(cols.traditions.value(i), interner),
                 cjk_char_count:  cjk_chars,
-                from_lb:         opt_str(cols.from_lbs, i),
-                to_lb:           opt_str(cols.to_lbs, i),
+                from_lb:         opt_intern_local(cols.from_lbs, i, interner, &empty),
+                to_lb:           opt_intern_local(cols.to_lbs, i, interner, &empty),
             });
         }
     }
@@ -162,28 +252,28 @@ fn build_catalog_from_passages(rows: &[PassageRow], dt_fp: String) -> CorpusCata
     // of (kind, key, node_id) so aggregation can roll up at close.
     let mut idx = 0usize;
     while idx < rows.len() {
-        let corpus = &rows[idx].source_corpus;
-        let corpus_end = idx + count_run(&rows[idx..], |r| r.source_corpus == *corpus);
+        let corpus = rows[idx].source_corpus.clone();
+        let corpus_end = idx + count_run(&rows[idx..], |r| r.source_corpus == corpus);
         let corpus_node = catalog.push_node(OutlineNode::leaf(
             OutlineNodeKind::Corpus,
             None,
-            corpus.clone(),
-            corpus.clone(),
+            corpus.to_string(),
+            corpus.to_string(),
             String::new(),
             String::new(),
         ));
 
         let mut j = idx;
         while j < corpus_end {
-            let canon = &rows[j].canon;
-            let canon_end = j + count_run(&rows[j..corpus_end], |r| r.canon == *canon);
+            let canon = rows[j].canon.clone();
+            let canon_end = j + count_run(&rows[j..corpus_end], |r| r.canon == canon);
             let canon_label = if rows[j].canon_name.is_empty() {
-                if canon.is_empty() { "(no canon)".to_string() } else { canon.clone() }
-            } else { rows[j].canon_name.clone() };
+                if canon.is_empty() { "(no canon)".to_string() } else { canon.to_string() }
+            } else { rows[j].canon_name.to_string() };
             let canon_node = catalog.push_node(OutlineNode::leaf(
                 OutlineNodeKind::Canon,
                 Some(corpus_node),
-                rows[j].source_corpus.clone(),
+                rows[j].source_corpus.to_string(),
                 String::new(),
                 String::new(),
                 canon_label,
@@ -192,31 +282,32 @@ fn build_catalog_from_passages(rows: &[PassageRow], dt_fp: String) -> CorpusCata
 
             let mut k = j;
             while k < canon_end {
-                let work_id = &rows[k].source_work_id;
-                let work_end = k + count_run(&rows[k..canon_end], |r| r.source_work_id == *work_id);
+                let work_id = rows[k].source_work_id.clone();
+                let work_end = k + count_run(&rows[k..canon_end], |r| r.source_work_id == work_id);
                 let work_label = if rows[k].main_title.is_empty() {
-                    work_id.clone()
-                } else { rows[k].main_title.clone() };
+                    work_id.to_string()
+                } else { rows[k].main_title.to_string() };
                 let work_node = catalog.push_node(OutlineNode::leaf(
                     OutlineNodeKind::Work,
                     Some(canon_node),
-                    rows[k].source_corpus.clone(),
-                    work_id.clone(),
+                    rows[k].source_corpus.to_string(),
+                    work_id.to_string(),
                     String::new(),
                     work_label,
                 ));
                 catalog.add_child(canon_node, work_node);
 
                 // Record the WorkRecord (one per work_id).
-                let traditions = rows[k].traditions.clone();
+                let traditions: Vec<String> =
+                    rows[k].traditions.iter().map(|t| t.to_string()).collect();
                 let work_idx = catalog.works.len();
-                catalog.work_id_map.insert(work_id.clone(), work_idx);
+                catalog.work_id_map.insert(work_id.to_string(), work_idx);
 
                 // Collect rel-paths the work spans.
                 let mut rel_paths: HashSet<String> = HashSet::new();
                 for r in &rows[k..work_end] {
                     if !r.source_rel_path.is_empty() {
-                        rel_paths.insert(r.source_rel_path.clone());
+                        rel_paths.insert(r.source_rel_path.to_string());
                     }
                 }
                 let mut rel_paths: Vec<String> = rel_paths.into_iter().collect();
@@ -242,15 +333,15 @@ fn build_catalog_from_passages(rows: &[PassageRow], dt_fp: String) -> CorpusCata
                 work_node_mut.cjk_char_count = c_count;
 
                 catalog.works.push(WorkRecord {
-                    work_id: work_id.clone(),
-                    source_corpus: rows[k].source_corpus.clone(),
-                    canon: rows[k].canon.clone(),
-                    canon_name: rows[k].canon_name.clone(),
-                    main_title: rows[k].main_title.clone(),
-                    author: rows[k].author.clone(),
-                    period: rows[k].period.clone(),
+                    work_id: work_id.to_string(),
+                    source_corpus: rows[k].source_corpus.to_string(),
+                    canon: rows[k].canon.to_string(),
+                    canon_name: rows[k].canon_name.to_string(),
+                    main_title: rows[k].main_title.to_string(),
+                    author: rows[k].author.to_string(),
+                    period: rows[k].period.to_string(),
                     period_rank: rows[k].period_rank,
-                    origin: rows[k].origin.clone(),
+                    origin: rows[k].origin.to_string(),
                     traditions,
                     source_rel_paths: rel_paths,
                     root_node: work_node,
@@ -291,15 +382,15 @@ fn build_div_subtree(catalog: &mut CorpusCatalogIndex, parent: NodeId, rows: &[P
     // when a passage falls back into a previously-opened branch.
     let mut path_nodes: FxHashMap<String, NodeId> = FxHashMap::default();
 
-    let rel_path_node_label = rows[0].source_rel_path.clone();
+    let rel_path_node_label = rows[0].source_rel_path.to_string();
     // A subtree root specifically for this source_rel_path so a single
     // multi-file work doesn't flatten everything into a single div tree.
     let file_node = catalog.push_node(OutlineNode::leaf(
         OutlineNodeKind::Division,
         Some(parent),
-        rows[0].source_corpus.clone(),
-        rows[0].source_work_id.clone(),
-        rows[0].source_rel_path.clone(),
+        rows[0].source_corpus.to_string(),
+        rows[0].source_work_id.to_string(),
+        rows[0].source_rel_path.to_string(),
         rel_path_node_label,
     ));
     catalog.add_child(parent, file_node);
@@ -307,11 +398,11 @@ fn build_div_subtree(catalog: &mut CorpusCatalogIndex, parent: NodeId, rows: &[P
 
     let mut i = 0usize;
     while i < rows.len() {
-        let div_path = &rows[i].div_path;
-        let run_end = i + count_run(&rows[i..], |r| r.div_path == *div_path);
+        let div_path = rows[i].div_path.clone();
+        let run_end = i + count_run(&rows[i..], |r| r.div_path == div_path);
 
         // Ensure all ancestor Division nodes exist along this div_path.
-        let leaf_node = ensure_path(catalog, file_node, &mut path_nodes, div_path, &rows[i]);
+        let leaf_node = ensure_path(catalog, file_node, &mut path_nodes, &div_path, &rows[i]);
 
         // Emit a PassageRange leaf under leaf_node for this contiguous run.
         let first = rows[i].doc_id;
@@ -319,25 +410,25 @@ fn build_div_subtree(catalog: &mut CorpusCatalogIndex, parent: NodeId, rows: &[P
         let passage_count = (run_end - i) as u32;
         let cjk: u32 = rows[i..run_end].iter().map(|r| r.cjk_char_count).sum();
         let label = if rows[i].heading.is_empty() {
-            div_path.clone()
-        } else { rows[i].heading.clone() };
+            div_path.to_string()
+        } else { rows[i].heading.to_string() };
 
         let mut range_node = OutlineNode::leaf(
             OutlineNodeKind::PassageRange,
             Some(leaf_node),
-            rows[i].source_corpus.clone(),
-            rows[i].source_work_id.clone(),
-            rows[i].source_rel_path.clone(),
+            rows[i].source_corpus.to_string(),
+            rows[i].source_work_id.to_string(),
+            rows[i].source_rel_path.to_string(),
             label,
         );
-        range_node.heading_path = div_path.clone();
-        range_node.div_path = div_path.clone();
+        range_node.heading_path = div_path.to_string();
+        range_node.div_path = div_path.to_string();
         range_node.first_doc_id = Some(first);
         range_node.last_doc_id = Some(last);
         range_node.passage_count = passage_count;
         range_node.cjk_char_count = cjk;
-        range_node.from_lb = if rows[i].from_lb.is_empty() { None } else { Some(rows[i].from_lb.clone()) };
-        range_node.to_lb   = if rows[run_end-1].to_lb.is_empty() { None } else { Some(rows[run_end-1].to_lb.clone()) };
+        range_node.from_lb = if rows[i].from_lb.is_empty() { None } else { Some(rows[i].from_lb.to_string()) };
+        range_node.to_lb   = if rows[run_end-1].to_lb.is_empty() { None } else { Some(rows[run_end-1].to_lb.to_string()) };
         let range_id = catalog.push_node(range_node);
         catalog.add_child(leaf_node, range_id);
 
@@ -378,9 +469,9 @@ fn ensure_path(
         let mut node = OutlineNode::leaf(
             OutlineNodeKind::Division,
             Some(cur),
-            sample_row.source_corpus.clone(),
-            sample_row.source_work_id.clone(),
-            sample_row.source_rel_path.clone(),
+            sample_row.source_corpus.to_string(),
+            sample_row.source_work_id.to_string(),
+            sample_row.source_rel_path.to_string(),
             seg.to_string(),
         );
         node.heading_path = joined.clone();
@@ -502,8 +593,38 @@ fn i32_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
     batch.column(idx).as_any().downcast_ref::<Int32Array>()
         .ok_or_else(|| anyhow!("{name} is not Int32Array"))
 }
-fn opt_str(arr: &StringArray, i: usize) -> String {
-    if arr.is_null(i) { String::new() } else { arr.value(i).to_string() }
+fn opt_intern_local(arr: &StringArray, i: usize, interner: &mut LocalInterner, empty: &Arc<str>) -> Arc<str> {
+    if arr.is_null(i) { empty.clone() } else { intern(interner, arr.value(i)) }
+}
+
+// ---------------------------------------------------------------------------
+// Linux process-priority helpers
+// ---------------------------------------------------------------------------
+
+/// Lower this process's OOM-kill score and CPU niceness so a long parquet scan
+/// doesn't freeze the system when memory is tight.
+///
+/// * `/proc/self/oom_score_adj = 500` — makes the kernel prefer killing us
+///   over system daemons and GUI processes when RAM is exhausted.
+/// * `renice +10` — keeps CPU scheduling cooperative; non-root users can always
+///   raise their own nice value, so this requires no special permissions.
+///
+/// Both operations are best-effort: silent failure is acceptable.
+#[cfg(target_os = "linux")]
+fn linux_lower_process_priority() {
+    // OOM score: 500 is "kill me before most user processes but after kernel
+    // threads". Range is -1000 (unkillable) to 1000 (kill first).
+    let _ = std::fs::write("/proc/self/oom_score_adj", "500\n");
+
+    // Lower CPU priority via `renice`. Non-root users can only raise the nice
+    // value (lower priority), never lower it below their current level, so
+    // this is always safe without sudo.
+    let pid = std::process::id();
+    let _ = std::process::Command::new("renice")
+        .args(["+10", "-p", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 // ---------------------------------------------------------------------------
@@ -517,8 +638,12 @@ fn is_cjk(ch: char) -> bool {
         || ('\u{20000}'..='\u{2a6df}').contains(&ch)
 }
 
-fn parse_traditions(s: &str) -> Vec<String> {
-    s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+fn parse_traditions(s: &str, interner: &mut LocalInterner) -> Vec<Arc<str>> {
+    s.split(',')
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| intern(interner, t))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
