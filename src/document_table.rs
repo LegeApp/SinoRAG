@@ -239,6 +239,36 @@ impl DocumentTable {
     }
 }
 
+/// How well an index's `doc_table_fingerprint` matches the doc_table on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexCoverage {
+    /// Index fingerprint == current doc_table fingerprint. Covers every doc_id.
+    Full,
+    /// Index fingerprint == lineage `base_fingerprint`. Covers `0..base_doc_count`;
+    /// higher doc_ids exist in the doc_table but not in this index.
+    Base { base_doc_count: u32 },
+}
+
+/// Decide whether an index header's `index_fingerprint` is compatible with
+/// the doc_table on disk. Returns `Some(Full|Base)` if compatible, `None`
+/// if mismatched.
+pub fn match_index_fingerprint(
+    doc_table: &DocumentTable,
+    doc_table_path: &Path,
+    index_fingerprint: &str,
+) -> Result<Option<IndexCoverage>> {
+    if index_fingerprint == doc_table.source_fingerprint {
+        return Ok(Some(IndexCoverage::Full));
+    }
+    if let Some(lineage) = DocTableLineage::load_if_present(doc_table_path)? {
+        if index_fingerprint == lineage.base_fingerprint {
+            return Ok(Some(IndexCoverage::Base { base_doc_count: lineage.base_doc_count }));
+        }
+    }
+    Ok(None)
+}
+
 // ---------------------------------------------------------------------------
 // internals
 // ---------------------------------------------------------------------------

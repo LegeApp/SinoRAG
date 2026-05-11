@@ -6,7 +6,7 @@
 //! whose fingerprint disagrees with the DocumentTable on disk.
 
 use crate::catalog_index::CorpusCatalogIndex;
-use crate::document_table::DocumentTable;
+use crate::document_table::{match_index_fingerprint, DocumentTable, IndexCoverage};
 use crate::pack::{
     self, IndexRef, IndexSet, Pack, PackManifest,
     DEFAULT_CATALOG, DEFAULT_DOC_TABLE, DEFAULT_PHRASE, DEFAULT_TFIDF,
@@ -74,20 +74,31 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
     let phrase_path = pack_root.join(DEFAULT_PHRASE);
     let phrase_present = phrase_path.exists();
     let mut phrase_info_holder: Option<serde_json::Value> = None;
+    let mut phrase_coverage: Option<IndexCoverage> = None;
     if phrase_present {
         eprintln!("[3/5] Validating phrase index...");
         let info = PhraseIndex::header_info(&phrase_path)
             .with_context(|| format!("read header {}", phrase_path.display()))?;
         let fp = info.get("doc_table_fingerprint").and_then(|v| v.as_str()).unwrap_or("");
-        if fp != dt_fp {
-            return Err(anyhow!(
-                "phrase index fingerprint {} != doc_table {}. Rebuild phrase index.",
-                short(fp), short(&dt_fp)
-            ));
+        match match_index_fingerprint(&doc_table, &doc_table_path, fp)? {
+            Some(IndexCoverage::Full) => {
+                eprintln!("      OK (full coverage): {} grams, {} postings bytes",
+                    info.get("num_grams").and_then(|v| v.as_u64()).unwrap_or(0),
+                    info.get("postings_bytes").and_then(|v| v.as_u64()).unwrap_or(0));
+                phrase_coverage = Some(IndexCoverage::Full);
+            }
+            Some(IndexCoverage::Base { base_doc_count }) => {
+                eprintln!("      OK (lineage match): covers doc_ids 0..{} of {}; rebuild to extend",
+                    base_doc_count, doc_table.passage_ids.len());
+                phrase_coverage = Some(IndexCoverage::Base { base_doc_count });
+            }
+            None => {
+                return Err(anyhow!(
+                    "phrase index fingerprint {} matches neither current doc_table {} nor lineage base. Rebuild phrase index.",
+                    short(fp), short(&dt_fp)
+                ));
+            }
         }
-        eprintln!("      OK: {} grams, {} postings bytes",
-            info.get("num_grams").and_then(|v| v.as_u64()).unwrap_or(0),
-            info.get("postings_bytes").and_then(|v| v.as_u64()).unwrap_or(0));
         phrase_info_holder = Some(info);
     } else {
         eprintln!("[3/5] phrase index not present (skipping)");
@@ -97,24 +108,37 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
     let tfidf_path = pack_root.join(DEFAULT_TFIDF);
     let tfidf_present = tfidf_path.exists();
     let mut tfidf_info_holder: Option<serde_json::Value> = None;
+    let mut tfidf_coverage: Option<IndexCoverage> = None;
     if tfidf_present {
         eprintln!("[4/5] Validating TF-IDF index...");
         let info = TfidfIndex::header_info(&tfidf_path)
             .with_context(|| format!("read header {}", tfidf_path.display()))?;
         let fp = info.get("doc_table_fingerprint").and_then(|v| v.as_str()).unwrap_or("");
-        if fp != dt_fp {
-            return Err(anyhow!(
-                "TF-IDF index fingerprint {} != doc_table {}. Rebuild TF-IDF.",
-                short(fp), short(&dt_fp)
-            ));
+        match match_index_fingerprint(&doc_table, &doc_table_path, fp)? {
+            Some(IndexCoverage::Full) => {
+                eprintln!("      OK (full coverage): {} docs, {} features",
+                    info.get("documents").and_then(|v| v.as_u64()).unwrap_or(0),
+                    info.get("features").and_then(|v| v.as_u64()).unwrap_or(0));
+                tfidf_coverage = Some(IndexCoverage::Full);
+            }
+            Some(IndexCoverage::Base { base_doc_count }) => {
+                eprintln!("      OK (lineage match): covers doc_ids 0..{} of {}; rebuild to extend",
+                    base_doc_count, doc_table.passage_ids.len());
+                tfidf_coverage = Some(IndexCoverage::Base { base_doc_count });
+            }
+            None => {
+                return Err(anyhow!(
+                    "TF-IDF index fingerprint {} matches neither current doc_table {} nor lineage base. Rebuild TF-IDF.",
+                    short(fp), short(&dt_fp)
+                ));
+            }
         }
-        eprintln!("      OK: {} docs, {} features",
-            info.get("documents").and_then(|v| v.as_u64()).unwrap_or(0),
-            info.get("features").and_then(|v| v.as_u64()).unwrap_or(0));
         tfidf_info_holder = Some(info);
     } else {
         eprintln!("[4/5] TF-IDF index not present (skipping)");
     }
+    // Coverage is recorded by the registry populator + manifest below.
+    let _ = (&phrase_coverage, &tfidf_coverage);
 
     // --- registry + manifest ---------------------------------------------
     eprintln!("[5/5] Populating registry + writing manifest...");
