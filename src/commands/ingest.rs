@@ -255,7 +255,7 @@ pub async fn run(
     let doc_table_path = out.join("doc_table.bin");
     if (build_phrase_index || build_tfidf) && !doc_table_path.exists() {
         println!("\n=== Building doc table ===");
-        crate::commands::document_table::build(out_parquet.clone(), doc_table_path.clone())?;
+        crate::commands::document_table::build(out_parquet.clone(), doc_table_path.clone(), None)?;
     }
 
     if build_phrase_index {

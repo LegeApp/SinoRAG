@@ -8,6 +8,7 @@ pub mod export;
 pub mod first_attestation;
 pub mod frontier;
 pub mod ingest;
+pub mod ingest_terebess;
 pub mod kanripo;
 pub mod passage;
 pub mod person_history;
@@ -195,7 +196,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             doc_table,
         } => catalog_index::build(parquet, out, debug_json, doc_table),
         Command::CatalogIndexInfo { index } => catalog_index::info(index),
-        Command::DocTableBuild { parquet, out } => document_table::build(parquet, out),
+        Command::DocTableBuild { parquet, out, append_to } => document_table::build(parquet, out, append_to),
+        Command::IngestTerebess { input, out_parquet, images_dir, min_body_chars } =>
+            ingest_terebess::run(input, out_parquet, images_dir, min_body_chars),
         Command::BuildPack { pack, pack_id } => build_pack::run(pack, pack_id),
         Command::ResearchPacketBuild {
             pack, out, recipe, brief, keep_temp,

@@ -205,6 +205,25 @@ pub enum Command {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin")]
         out: PathBuf,
+        /// Append mode: load this existing doc_table, preserve all its
+        /// doc_id assignments, and append any passage_ids in `--parquet`
+        /// not already present. Writes a sidecar `<out>.lineage.json`.
+        #[arg(long)]
+        append_to: Option<PathBuf>,
+    },
+    /// Ingest terebess.hu Zen biography pages (SingleFile-saved HTML).
+    /// Filters 403/404 placeholders, strips site chrome, extracts body text +
+    /// main image (written to images_dir), writes parquet under
+    /// `source_corpus=terebess/`.
+    IngestTerebess {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value = "data/passages.parquet")]
+        out_parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/terebess_images")]
+        images_dir: PathBuf,
+        #[arg(long, default_value_t = 500)]
+        min_body_chars: usize,
     },
     /// Stitch already-built artifacts (doc_table.bin, catalog.index,
     /// phrase_v2.index, tfidf.index) into a pack: validate fingerprints,

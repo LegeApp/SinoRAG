@@ -50,6 +50,9 @@ pub struct PassageBatch {
     period_rank: Vec<i32>,
     zh: Vec<String>,
     normalized_zh: Vec<String>,
+    /// Per-passage corpus-specific metadata as JSON. Nullable; null for CBETA
+    /// rows, populated by non-TEI ingesters (e.g. terebess).
+    metadata_json: Vec<Option<String>>,
 }
 
 impl PassageBatch {
@@ -94,6 +97,17 @@ impl PassageBatch {
         self.period_rank.push(passage.period_rank);
         self.zh.push(passage.zh.clone());
         self.normalized_zh.push(passage.normalized_zh.clone());
+        self.metadata_json.push(None);
+        Ok(())
+    }
+
+    /// Variant of `push` that also records corpus-specific metadata as JSON.
+    /// Used by non-TEI ingesters whose extra fields don't fit the typed schema.
+    pub fn push_with_metadata(&mut self, passage: &PassageRecord, metadata_json: Option<String>) -> Result<()> {
+        self.push(passage)?;
+        // Replace the trailing None we just pushed.
+        let last = self.metadata_json.len() - 1;
+        self.metadata_json[last] = metadata_json;
         Ok(())
     }
 
@@ -196,6 +210,7 @@ impl PassageBatch {
             Arc::new(Int32Array::from(self.period_rank.clone())),
             Arc::new(StringArray::from(self.zh.clone())),
             Arc::new(StringArray::from(self.normalized_zh.clone())),
+            Arc::new(StringArray::from(self.metadata_json.clone())),
         ];
         Ok(RecordBatch::try_new(schema, arrays)?)
     }
@@ -239,5 +254,8 @@ fn passage_schema() -> Arc<Schema> {
         Field::new("period_rank", DataType::Int32, false),
         Field::new("zh", DataType::Utf8, false),
         Field::new("normalized_zh", DataType::Utf8, false),
+        // Corpus-specific extras (e.g. terebess source_url + main_image_path).
+        // Nullable so existing CBETA partitions read cleanly with null here.
+        Field::new("metadata_json", DataType::Utf8, true),
     ]))
 }

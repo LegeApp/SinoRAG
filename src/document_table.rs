@@ -1,9 +1,20 @@
+//! DocumentTable: canonical `doc_id ↔ passage_id` mapping.
+//!
+//! Two construction modes:
+//! - `from_parquet`: build from scratch. doc_ids assigned in sorted
+//!   passage_id order (stable, deterministic).
+//! - `append_from_parquet`: extend an existing DocumentTable in place.
+//!   Existing passages keep their doc_ids exactly; new passages get appended
+//!   ids starting at `existing.passage_ids.len()`. The lineage record
+//!   (`base_fingerprint` / `base_doc_count`) is written to a sidecar
+//!   `<path>.lineage.json` so the binary layout of `doc_table.bin` doesn't
+//!   change — existing on-disk indexes built against the predecessor remain
+//!   loadable as long as the validator accepts the base fingerprint.
+
 use crate::phrase_index::parquet_files;
 use anyhow::{anyhow, Result};
 use arrow::array::{Array, StringArray};
-use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,13 +32,58 @@ pub struct DocumentTable {
     pub passage_ids: Vec<String>,
     pub passage_id_map: FxHashMap<String, DocId>,
 
-    // Optional acceleration fields (for catalog/TF-IDF)
+    // Optional acceleration fields
     pub source_work_ids: Vec<u32>,
     pub period_ranks: Vec<i32>,
 
-    // Work string table (for catalog work_id references)
+    // Work string table
     pub work_strings: Vec<String>,
     pub work_id_map: FxHashMap<String, u32>,
+}
+
+/// Lineage info stored alongside `doc_table.bin` as `doc_table.bin.lineage.json`.
+/// Optional; absent for first-time builds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocTableLineage {
+    pub schema: String,
+    /// Fingerprint of the predecessor doc table this one extends.
+    pub base_fingerprint: String,
+    /// Count of doc_ids inherited from the predecessor. New passages have
+    /// `doc_id >= base_doc_count`.
+    pub base_doc_count: u32,
+}
+
+impl DocTableLineage {
+    pub fn new(base_fingerprint: String, base_doc_count: u32) -> Self {
+        Self {
+            schema: "readzen-doc-table-lineage-v1".to_string(),
+            base_fingerprint,
+            base_doc_count,
+        }
+    }
+    pub fn sidecar_path(doc_table_path: &Path) -> PathBuf {
+        let mut s = doc_table_path.as_os_str().to_os_string();
+        s.push(".lineage.json");
+        PathBuf::from(s)
+    }
+    pub fn load_if_present(doc_table_path: &Path) -> Result<Option<Self>> {
+        let p = Self::sidecar_path(doc_table_path);
+        if !p.exists() { return Ok(None); }
+        let bytes = std::fs::read(&p)?;
+        let v: Self = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow!("parse {}: {}", p.display(), e))?;
+        Ok(Some(v))
+    }
+    pub fn write(&self, doc_table_path: &Path) -> Result<()> {
+        let p = Self::sidecar_path(doc_table_path);
+        std::fs::write(p, serde_json::to_vec_pretty(self)?)?;
+        Ok(())
+    }
+    pub fn delete_if_present(doc_table_path: &Path) -> Result<()> {
+        let p = Self::sidecar_path(doc_table_path);
+        if p.exists() { std::fs::remove_file(p)?; }
+        Ok(())
+    }
 }
 
 impl DocumentTable {
@@ -44,133 +100,106 @@ impl DocumentTable {
         }
     }
 
+    /// Build from scratch. doc_ids assigned in sorted-passage_id order.
     pub fn from_parquet(parquet_path: &Path) -> Result<Self> {
-        let files = parquet_files(parquet_path)?;
-        eprintln!("Found {} parquet files", files.len());
+        let scan = scan_parquet(parquet_path)?;
+        eprintln!("Total passages scanned: {}", scan.passage_ids.len());
 
-        let mut doc_table = Self::new();
-        let mut all_passage_ids: Vec<String> = Vec::new();
-        let mut all_source_work_ids: Vec<String> = Vec::new();
-        let mut all_period_ranks: Vec<i32> = Vec::new();
-
-        for file_path in files {
-            let file = File::open(&file_path)?;
-            let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-            let reader = builder.build()?;
-
-            for batch_result in reader {
-                let batch = batch_result?;
-
-                // Get passage_id column
-                let passage_id_col = batch
-                    .schema()
-                    .column_with_name("passage_id")
-                    .ok_or_else(|| anyhow!("Column 'passage_id' not found in Parquet"))?
-                    .0;
-                let passage_ids = batch
-                    .column(passage_id_col)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| anyhow!("passage_id column is not StringArray"))?;
-
-                // Get source_work_id column
-                let source_work_id_col = batch
-                    .schema()
-                    .column_with_name("source_work_id")
-                    .ok_or_else(|| anyhow!("Column 'source_work_id' not found in Parquet"))?
-                    .0;
-                let source_work_ids = batch
-                    .column(source_work_id_col)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| anyhow!("source_work_id column is not StringArray"))?;
-
-                // Get period_rank column
-                let period_rank_col = batch
-                    .schema()
-                    .column_with_name("period_rank")
-                    .ok_or_else(|| anyhow!("Column 'period_rank' not found in Parquet"))?
-                    .0;
-                let period_ranks = batch
-                    .column(period_rank_col)
-                    .as_any()
-                    .downcast_ref::<arrow::array::Int32Array>()
-                    .ok_or_else(|| anyhow!("period_rank column is not Int32Array"))?;
-
-                for i in 0..batch.num_rows() {
-                    if passage_ids.is_null(i) {
-                        continue;
-                    }
-
-                    all_passage_ids.push(passage_ids.value(i).to_string());
-                    all_source_work_ids.push(source_work_ids.value(i).to_string());
-                    all_period_ranks.push(if period_ranks.is_null(i) { 0 } else { period_ranks.value(i) });
-                }
+        let mut indices: Vec<usize> = (0..scan.passage_ids.len()).collect();
+        indices.sort_by(|a, b| scan.passage_ids[*a].cmp(&scan.passage_ids[*b]));
+        let mut seen: FxHashMap<&str, ()> = FxHashMap::default();
+        let mut keep: Vec<usize> = Vec::with_capacity(indices.len());
+        for i in &indices {
+            let pid: &str = &scan.passage_ids[*i];
+            if !seen.contains_key(pid) {
+                seen.insert(pid, ());
+                keep.push(*i);
             }
         }
+        let passage_ids: Vec<String> = keep.iter().map(|i| scan.passage_ids[*i].clone()).collect();
+        let work_names:  Vec<String> = keep.iter().map(|i| scan.source_work_ids[*i].clone()).collect();
+        let periods:     Vec<i32>    = keep.iter().map(|i| scan.period_ranks[*i]).collect();
 
-        eprintln!("Total passages: {}", all_passage_ids.len());
+        let (work_strings, work_id_map, work_id_u32) = build_work_table(&work_names);
+        let passage_id_map: FxHashMap<String, DocId> = passage_ids.iter().enumerate()
+            .map(|(idx, pid)| (pid.clone(), idx as DocId)).collect();
+        let fingerprint = fingerprint_passage_ids(&passage_ids, None);
 
-        // Sort passage_ids to ensure stable doc_id assignment
-        all_passage_ids.sort();
-        all_passage_ids.dedup();
+        let dt = Self {
+            schema: "readzen-document-table-v1".to_string(),
+            source_fingerprint: fingerprint,
+            passage_ids,
+            passage_id_map,
+            source_work_ids: work_id_u32,
+            period_ranks: periods,
+            work_strings,
+            work_id_map,
+        };
+        eprintln!("DocumentTable built: {} passages, {} unique works",
+            dt.passage_ids.len(), dt.work_strings.len());
+        Ok(dt)
+    }
 
-        // Build passage_id -> doc_id map
-        let passage_id_map: FxHashMap<String, DocId> = all_passage_ids
-            .iter()
-            .enumerate()
-            .map(|(idx, pid)| (pid.clone(), idx as DocId))
+    /// Extend `base` with any passages in `parquet_path` not already in
+    /// `base.passage_id_map`. Existing doc_ids are preserved exactly.
+    pub fn append_from_parquet(base: &DocumentTable, parquet_path: &Path) -> Result<Self> {
+        let scan = scan_parquet(parquet_path)?;
+        eprintln!("Scanned {} rows; base has {} passages",
+            scan.passage_ids.len(), base.passage_ids.len());
+
+        let mut new_indices: Vec<usize> = (0..scan.passage_ids.len())
+            .filter(|i| !base.passage_id_map.contains_key(&scan.passage_ids[*i]))
             .collect();
+        new_indices.sort_by(|a, b| scan.passage_ids[*a].cmp(&scan.passage_ids[*b]));
+        let mut seen: FxHashMap<&str, ()> = FxHashMap::default();
+        let mut keep: Vec<usize> = Vec::new();
+        for i in &new_indices {
+            let pid: &str = &scan.passage_ids[*i];
+            if !seen.contains_key(pid) {
+                seen.insert(pid, ());
+                keep.push(*i);
+            }
+        }
+        eprintln!("Appending {} new passages", keep.len());
 
-        // Build work string table
-        let mut unique_work_ids: Vec<String> = all_source_work_ids.clone();
-        unique_work_ids.sort();
-        unique_work_ids.dedup();
+        // Merge: base first, then new (preserves base doc_ids).
+        let mut passage_ids: Vec<String> = Vec::with_capacity(base.passage_ids.len() + keep.len());
+        passage_ids.extend_from_slice(&base.passage_ids);
+        for i in &keep { passage_ids.push(scan.passage_ids[*i].clone()); }
 
-        let work_id_map: FxHashMap<String, u32> = unique_work_ids
-            .iter()
-            .enumerate()
-            .map(|(idx, wid)| (wid.clone(), idx as u32))
-            .collect();
-
-        // Map source_work_ids to u32
-        let source_work_ids_u32: Vec<u32> = all_source_work_ids
-            .iter()
-            .map(|wid| *work_id_map.get(wid).unwrap_or(&0))
-            .collect();
-
-        // Re-align period_ranks with sorted passage_ids
-        let mut aligned_period_ranks: Vec<i32> = vec![0; all_passage_ids.len()];
-        let mut passage_to_period: FxHashMap<String, i32> = FxHashMap::default();
-
-        for (pid, pr) in all_passage_ids.iter().zip(all_period_ranks.iter()) {
-            passage_to_period.insert(pid.clone(), *pr);
+        let mut work_strings = base.work_strings.clone();
+        let mut work_id_map  = base.work_id_map.clone();
+        let mut source_work_ids = base.source_work_ids.clone();
+        let mut period_ranks    = base.period_ranks.clone();
+        for i in &keep {
+            let wname = &scan.source_work_ids[*i];
+            let wid = match work_id_map.get(wname) {
+                Some(v) => *v,
+                None => {
+                    let id = work_strings.len() as u32;
+                    work_id_map.insert(wname.clone(), id);
+                    work_strings.push(wname.clone());
+                    id
+                }
+            };
+            source_work_ids.push(wid);
+            period_ranks.push(scan.period_ranks[*i]);
         }
 
-        for (idx, pid) in all_passage_ids.iter().enumerate() {
-            aligned_period_ranks[idx] = *passage_to_period.get(pid).unwrap_or(&0);
-        }
+        let passage_id_map: FxHashMap<String, DocId> = passage_ids.iter().enumerate()
+            .map(|(idx, pid)| (pid.clone(), idx as DocId)).collect();
+        let fingerprint = fingerprint_passage_ids(&passage_ids, Some(&base.source_fingerprint));
 
-        // Calculate fingerprint
-        let mut hasher = Sha256::new();
-        for pid in &all_passage_ids {
-            hasher.update(pid.as_bytes());
-            hasher.update(b"\0");
-        }
-        let fingerprint = format!("{:x}", hasher.finalize());
-
-        doc_table.source_fingerprint = fingerprint;
-        doc_table.passage_ids = all_passage_ids;
-        doc_table.passage_id_map = passage_id_map;
-        doc_table.source_work_ids = source_work_ids_u32;
-        doc_table.period_ranks = aligned_period_ranks;
-        doc_table.work_strings = unique_work_ids;
-        doc_table.work_id_map = work_id_map;
-
-        eprintln!("DocumentTable built: {} passages, {} unique works", 
-                  doc_table.passage_ids.len(), doc_table.work_strings.len());
-
-        Ok(doc_table)
+        Ok(Self {
+            schema: "readzen-document-table-v1".to_string(),
+            source_fingerprint: fingerprint,
+            passage_ids,
+            passage_id_map,
+            source_work_ids,
+            period_ranks,
+            work_strings,
+            work_id_map,
+        })
     }
 
     pub fn doc_id(&self, passage_id: &str) -> Option<DocId> {
@@ -190,15 +219,15 @@ impl DocumentTable {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let bytes = bincode::serialize(self)?;
-        std::fs::write(path, bytes)?;
+        std::fs::write(path, bincode::serialize(self)?)?;
         Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        let doc_table: Self = bincode::deserialize(&bytes)?;
-        Ok(doc_table)
+        let dt: Self = bincode::deserialize(&bytes)
+            .map_err(|e| anyhow!("deserialize {}: {}", path.display(), e))?;
+        Ok(dt)
     }
 
     pub fn save_atomic(&self, path: &Path) -> Result<()> {
@@ -208,4 +237,70 @@ impl DocumentTable {
         std::fs::rename(&temp_path, path)?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// internals
+// ---------------------------------------------------------------------------
+
+struct ParquetScan {
+    passage_ids: Vec<String>,
+    source_work_ids: Vec<String>,
+    period_ranks: Vec<i32>,
+}
+
+fn scan_parquet(parquet_path: &Path) -> Result<ParquetScan> {
+    let files = parquet_files(parquet_path)?;
+    eprintln!("Found {} parquet files", files.len());
+    let mut pids = Vec::<String>::new();
+    let mut wids = Vec::<String>::new();
+    let mut prs  = Vec::<i32>::new();
+    for file_path in files {
+        let f = File::open(&file_path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(f)?;
+        let reader = builder.build()?;
+        for batch in reader {
+            let batch = batch?;
+            let passage_col = batch.schema().column_with_name("passage_id")
+                .ok_or_else(|| anyhow!("Column 'passage_id' missing"))?.0;
+            let work_col = batch.schema().column_with_name("source_work_id")
+                .ok_or_else(|| anyhow!("Column 'source_work_id' missing"))?.0;
+            let period_col = batch.schema().column_with_name("period_rank")
+                .ok_or_else(|| anyhow!("Column 'period_rank' missing"))?.0;
+            let pid_arr = batch.column(passage_col).as_any().downcast_ref::<StringArray>()
+                .ok_or_else(|| anyhow!("passage_id not StringArray"))?;
+            let work_arr = batch.column(work_col).as_any().downcast_ref::<StringArray>()
+                .ok_or_else(|| anyhow!("source_work_id not StringArray"))?;
+            let period_arr = batch.column(period_col).as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .ok_or_else(|| anyhow!("period_rank not Int32Array"))?;
+            for i in 0..batch.num_rows() {
+                if pid_arr.is_null(i) { continue; }
+                pids.push(pid_arr.value(i).to_string());
+                wids.push(if work_arr.is_null(i) { String::new() } else { work_arr.value(i).to_string() });
+                prs.push(if period_arr.is_null(i) { 0 } else { period_arr.value(i) });
+            }
+        }
+    }
+    Ok(ParquetScan { passage_ids: pids, source_work_ids: wids, period_ranks: prs })
+}
+
+fn build_work_table(work_names: &[String]) -> (Vec<String>, FxHashMap<String, u32>, Vec<u32>) {
+    let mut unique: Vec<String> = work_names.to_vec();
+    unique.sort();
+    unique.dedup();
+    let map: FxHashMap<String, u32> = unique.iter().enumerate()
+        .map(|(i, w)| (w.clone(), i as u32)).collect();
+    let ids: Vec<u32> = work_names.iter().map(|w| *map.get(w).unwrap_or(&0)).collect();
+    (unique, map, ids)
+}
+
+fn fingerprint_passage_ids(passage_ids: &[String], base: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    if let Some(b) = base { hasher.update(b.as_bytes()); hasher.update(b"\n"); }
+    for pid in passage_ids {
+        hasher.update(pid.as_bytes());
+        hasher.update(b"\0");
+    }
+    format!("{:x}", hasher.finalize())
 }

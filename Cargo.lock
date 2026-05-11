@@ -3194,6 +3194,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "base64",
  "bincode",
  "cbeta-pdf-creator",
  "chrono",
