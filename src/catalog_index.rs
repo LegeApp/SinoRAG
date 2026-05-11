@@ -75,7 +75,7 @@ pub enum OutlineNodeKind {
 impl CorpusCatalogIndex {
     pub fn new() -> Self {
         Self {
-            schema: "readzen-corpus-catalog-v2".to_string(),
+            schema: "readzen-corpus-catalog-v3".to_string(),
             source_fingerprint: None,
             doc_table_fingerprint: None,
             works: Vec::new(),
@@ -138,5 +138,52 @@ impl CorpusCatalogIndex {
                 .filter_map(|&child_id| self.get_node(child_id))
                 .collect()
         )
+    }
+
+    /// Push a node with the right node_id stamped on it. Returns the assigned id.
+    pub fn push_node(&mut self, mut node: OutlineNode) -> NodeId {
+        let id = self.nodes.len() as NodeId;
+        node.node_id = id;
+        self.nodes.push(node);
+        id
+    }
+
+    /// Append `child` to `parent`'s children list.
+    pub fn add_child(&mut self, parent: NodeId, child: NodeId) {
+        if let Some(p) = self.nodes.get_mut(parent as usize) {
+            p.children.push(child);
+        }
+    }
+}
+
+impl OutlineNode {
+    /// Minimal node constructor for the builder. node_id is stamped in by
+    /// `CorpusCatalogIndex::push_node`.
+    pub fn leaf(
+        kind: OutlineNodeKind,
+        parent_id: Option<NodeId>,
+        source_corpus: String,
+        work_id: String,
+        source_rel_path: String,
+        label: String,
+    ) -> Self {
+        Self {
+            node_id: 0,
+            parent_id,
+            children: Vec::new(),
+            source_corpus,
+            work_id,
+            source_rel_path,
+            node_kind: kind,
+            label,
+            heading_path: String::new(),
+            div_path: String::new(),
+            first_doc_id: None,
+            last_doc_id: None,
+            passage_count: 0,
+            cjk_char_count: 0,
+            from_lb: None,
+            to_lb: None,
+        }
     }
 }
