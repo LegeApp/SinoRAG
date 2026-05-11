@@ -20,10 +20,13 @@
 // into the mmap; no full-file copy. Loading a multi-GB index costs O(1) RAM.
 
 use crate::document_table::DocumentTable;
-use crate::tfidf::ngram::{char_ngram_hashes, char_ngram_hashes_all, char_ngrams};
+use crate::tfidf::ngram::{
+    char_ngram_hashes, char_ngram_hashes_all_into, char_ngram_hashes_into, char_ngrams,
+};
 use anyhow::Result;
 use memmap2::Mmap;
 use ordered_float::OrderedFloat;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -31,7 +34,10 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use xxhash_rust::xxh3::xxh3_64;
 
 pub type DocId = u32;
@@ -94,7 +100,7 @@ impl TfidfParams {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct VocabEntry {
     pub term_hash: u64,
     pub term_id: TermId,
@@ -510,6 +516,24 @@ pub fn long_common_substrings(a: &str, b: &str, min_len: usize, limit: usize) ->
 // External-sort builder helpers
 // ---------------------------------------------------------------------------
 
+/// Stable resume key for a parquet file: the last two path components
+/// (partition + filename), e.g. `source_corpus=kanripo/part-000123.parquet`.
+/// Invariant to absolute/relative invocation and to moves of the corpus root.
+fn progress_key(p: &Path) -> String {
+    let comps: Vec<String> = p
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    match comps.len() {
+        0 => String::new(),
+        1 => comps[0].clone(),
+        n => format!("{}/{}", comps[n - 2], comps[n - 1]),
+    }
+}
+
 struct BucketWriterCache {
     temp_dir: PathBuf,
     max_open: usize,
@@ -595,7 +619,7 @@ impl BucketWriterCache {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TEMP_DIR: &str =
-    "/mnt/Samsung980_1TB/Rust-projects/not-rust-projects/ReadZen/GraphDiscovery/data/derived/_tmp_tfidf";
+    "/mnt/Samsung980_1TB/Rust-projects/SinoRAG/data/derived/_tmp_tfidf";
 
 pub fn build(
     parquet_path: PathBuf,
@@ -618,15 +642,34 @@ pub fn build(
     eprintln!("Buckets : {}", bucket_count);
     eprintln!("Temp dir: {}", temp_dir.display());
 
-    if temp_dir.exists() {
+    // Phase marker paths — checked to determine whether to resume or start fresh.
+    let phase1_done    = temp_dir.join("phase1.done");
+    let phase1_prog    = temp_dir.join("phase1_progress.txt");
+    let phase2_vocab   = temp_dir.join("phase2.vocab.bin");
+    let phase2_idf_f   = temp_dir.join("phase2.idf.bin");
+    let phase2_termid  = temp_dir.join("phase2.termid.bin");
+
+    let resuming = phase1_done.exists()
+        || phase1_prog.exists()
+        || phase2_vocab.exists();
+
+    if resuming {
+        eprintln!("Resume mode: detected partial run in {}", temp_dir.display());
+    } else if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
     }
+
     fs::create_dir_all(&temp_dir)?;
-    let df_dir = temp_dir.join("df_buckets");
+    let df_dir   = temp_dir.join("df_buckets");
     let post_dir = temp_dir.join("post_buckets");
-    fs::create_dir_all(&df_dir)?;
+    if !phase1_done.exists() {
+        fs::create_dir_all(&df_dir)?;
+    }
     fs::create_dir_all(&post_dir)?;
 
+    // -----------------------------------------------------------------------
+    // Phase 0 — load doc table
+    // -----------------------------------------------------------------------
     eprintln!("\n[Phase 0] Loading doc table...");
     let doc_table = DocumentTable::load(&doc_table_path)?;
     let doc_table_fingerprint = doc_table.source_fingerprint.clone();
@@ -637,222 +680,393 @@ pub fn build(
     eprintln!("  {} parquet file(s)", files.len());
 
     // -----------------------------------------------------------------------
-    // Phase 1 — DF bucket writes
+    // Phase 1 — DF bucket writes (parallel, resumable)
     // -----------------------------------------------------------------------
-    eprintln!("\n[Phase 1] DF buckets...");
-    {
-        let mut writers = BucketWriterCache::new(df_dir.clone(), 64);
-        let mut processed = 0usize;
-        for fp in &files {
-            processed += 1;
-            if processed % 100 == 0 {
-                eprintln!("  {}/{}", processed, files.len());
+    if phase1_done.exists() {
+        eprintln!("\n[Phase 1] Skipping (complete)");
+    } else {
+        eprintln!("\n[Phase 1] DF buckets...");
+
+        // Use a stable key (last 2 path segments, e.g.
+        // `source_corpus=kanripo/part-000123.parquet`) so resume survives
+        // relative/absolute invocations and corpus-root moves.
+        let mut completed: FxHashSet<String> = FxHashSet::default();
+        if phase1_prog.exists() {
+            for line in fs::read_to_string(&phase1_prog)?.lines() {
+                if !line.is_empty() {
+                    completed.insert(progress_key(Path::new(line)));
+                }
             }
+            eprintln!("  Resume: {}/{} files already processed", completed.len(), files.len());
+        }
+        let pending: Vec<&PathBuf> = files
+            .iter()
+            .filter(|f| !completed.contains(&progress_key(f)))
+            .collect();
+
+        let nthreads = rayon::current_num_threads();
+        // Reserve ~300 handles for OS + parquet readers; distribute the rest
+        // across threads.  Assumes the common default ulimit of 1024.
+        // Running `ulimit -n 65536` before the binary removes this constraint.
+        let handles_per_thread = (700usize / nthreads.max(1)).max(4).min(64);
+        eprintln!(
+            "  {} pending files on {} threads ({} handles/thread)",
+            pending.len(), nthreads, handles_per_thread
+        );
+        for t in 0..nthreads {
+            fs::create_dir_all(df_dir.join(format!("t{}", t)))?;
+        }
+
+        let counter  = AtomicUsize::new(completed.len());
+        let total    = files.len();
+        let prog_f   = Mutex::new(OpenOptions::new().create(true).append(true).open(&phase1_prog)?);
+        let min_n    = params.min_ngram;
+        let max_n    = params.max_ngram;
+
+        pending.par_iter().try_for_each(|fp| -> Result<()> {
+            let t = rayon::current_thread_index().unwrap_or(0);
+            let mut w = BucketWriterCache::new(df_dir.join(format!("t{}", t)), handles_per_thread);
+
             let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
-            let reader = builder.build()?;
+            let reader  = builder.build()?;
             for batch in reader {
                 let batch = batch?;
-                let (passage_ids, text_arr) = extract_columns(&batch)?;
+                let (pids, texts) = extract_columns(&batch)?;
+                let mut hash_buf: Vec<u64> = Vec::new();
                 for i in 0..batch.num_rows() {
-                    let pid = passage_ids.value(i);
-                    let text = text_arr.value(i);
-                    if let Some(&doc_id) = doc_table.passage_id_map.get(pid) {
-                        for hash in char_ngram_hashes(text, params.min_ngram, params.max_ngram) {
-                            let bucket = (hash as usize) % bucket_count;
-                            writers.write_df_record(bucket, hash, doc_id)?;
+                    if let Some(&doc_id) = doc_table.passage_id_map.get(pids.value(i)) {
+                        char_ngram_hashes_into(texts.value(i), min_n, max_n, &mut hash_buf);
+                        for &hash in &hash_buf {
+                            w.write_df_record((hash as usize) % bucket_count, hash, doc_id)?;
                         }
                     }
                 }
             }
+            w.flush_all()?;
+
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 100 == 0 || n == total {
+                eprintln!("  {}/{}", n, total);
+            }
+            writeln!(prog_f.lock().unwrap(), "{}", progress_key(fp))?;
+            Ok(())
+        })?;
+
+        // Merge per-thread bucket files into the shared bucket files.
+        eprintln!("  Merging {} threads × {} buckets...", nthreads, bucket_count);
+        for bucket_idx in 0..bucket_count {
+            let main = df_dir.join(format!("bucket-{:04}.bin", bucket_idx));
+            let mut out = OpenOptions::new().create(true).append(true).open(&main)?;
+            for t in 0..nthreads {
+                let src = df_dir.join(format!("t{}/bucket-{:04}.bin", t, bucket_idx));
+                if src.exists() {
+                    let data = fs::read(&src)?;
+                    if !data.is_empty() {
+                        out.write_all(&data)?;
+                    }
+                    fs::remove_file(&src)?;
+                }
+            }
         }
-        writers.flush_all()?;
+        for t in 0..nthreads {
+            let _ = fs::remove_dir(df_dir.join(format!("t{}", t)));
+        }
+        fs::write(&phase1_done, b"")?;
+        eprintln!("  Phase 1 complete.");
     }
 
     // -----------------------------------------------------------------------
-    // Phase 2 — build vocabulary
+    // Phase 2 — build vocabulary (parallel, resumable)
     // -----------------------------------------------------------------------
-    eprintln!("\n[Phase 2] Building vocabulary...");
-    let mut term_df: HashMap<u64, u32> = HashMap::new();
-    for bucket_idx in 0..bucket_count {
-        let path = df_dir.join(format!("bucket-{:04}.bin", bucket_idx));
-        if !path.exists() {
-            continue;
-        }
-        let raw = fs::read(&path)?;
-        let n = raw.len() / 12;
-        let mut records: Vec<(u64, u32)> = Vec::with_capacity(n);
-        for k in 0..n {
-            let base = k * 12;
-            let h  = u64::from_le_bytes(raw[base..base + 8].try_into()?);
-            let id = u32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
-            records.push((h, id));
-        }
-        records.sort_unstable();
-        records.dedup();
-        for (h, _) in records {
-            *term_df.entry(h).or_insert(0) += 1;
-        }
-    }
-    let _ = fs::remove_dir_all(&df_dir);
-
-    let max_df_count = if params.max_df_ratio <= 0.0 {
-        doc_count as u32
+    let (mut vocab_entries, idf, term_to_id) = if phase2_vocab.exists() {
+        eprintln!("\n[Phase 2] Loading saved vocabulary...");
+        let ve: Vec<VocabEntry>       = bincode::deserialize(&fs::read(&phase2_vocab)?)?;
+        let iv: Vec<f32>              = bincode::deserialize(&fs::read(&phase2_idf_f)?)?;
+        let ti: HashMap<u64, TermId>  = bincode::deserialize(&fs::read(&phase2_termid)?)?;
+        eprintln!("  {} terms loaded", ve.len());
+        (ve, iv, ti)
     } else {
-        ((doc_count as f32) * params.max_df_ratio).floor().max(1.0) as u32
+        eprintln!("\n[Phase 2] Building vocabulary...");
+
+        // Each bucket's hashes are disjoint (hash % bucket_count == bucket_idx),
+        // so bucket DF maps can be merged with extend (no key collision).
+        let bucket_dfs: Vec<Vec<(u64, u32)>> = (0..bucket_count)
+            .into_par_iter()
+            .map(|bucket_idx| -> Result<Vec<(u64, u32)>> {
+                let path = df_dir.join(format!("bucket-{:04}.bin", bucket_idx));
+                if !path.exists() {
+                    return Ok(Vec::new());
+                }
+                let raw = fs::read(&path)?;
+                let n = raw.len() / 12;
+                let mut records: Vec<(u64, u32)> = Vec::with_capacity(n);
+                for k in 0..n {
+                    let base = k * 12;
+                    let h  = u64::from_le_bytes(raw[base..base + 8].try_into()?);
+                    let id = u32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
+                    records.push((h, id));
+                }
+                records.sort_unstable();
+                records.dedup();
+                // Count distinct doc_ids per hash = DF for that n-gram.
+                let mut local: Vec<(u64, u32)> = Vec::new();
+                let mut i = 0;
+                while i < records.len() {
+                    let h = records[i].0;
+                    let mut j = i;
+                    while j < records.len() && records[j].0 == h {
+                        j += 1;
+                    }
+                    local.push((h, (j - i) as u32));
+                    i = j;
+                }
+                Ok(local)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let _ = fs::remove_dir_all(&df_dir);
+
+        let total_terms: usize = bucket_dfs.iter().map(|v| v.len()).sum();
+        let mut term_df: HashMap<u64, u32> = HashMap::with_capacity(total_terms);
+        for local in bucket_dfs {
+            term_df.extend(local);
+        }
+
+        let max_df_count = if params.max_df_ratio <= 0.0 {
+            doc_count as u32
+        } else {
+            ((doc_count as f32) * params.max_df_ratio).floor().max(1.0) as u32
+        };
+        let mut vocab: Vec<(u64, u32)> = term_df
+            .into_iter()
+            .filter(|(_, df)| *df >= params.min_df && *df <= max_df_count)
+            .collect();
+        eprintln!("  {} terms pass filters", vocab.len());
+        vocab.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        if params.max_features > 0 && vocab.len() > params.max_features {
+            vocab.truncate(params.max_features);
+        }
+        vocab.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        eprintln!("  Final vocab: {}", vocab.len());
+
+        let idf: Vec<f32> = vocab
+            .iter()
+            .map(|(_, df)| {
+                let df = *df as f32;
+                ((doc_count as f32 - df + 0.5) / (df + 0.5) + 1.0).ln()
+            })
+            .collect();
+
+        let term_to_id: HashMap<u64, TermId> = vocab
+            .iter()
+            .enumerate()
+            .map(|(i, (h, _))| (*h, i as TermId))
+            .collect();
+
+        let vocab_entries: Vec<VocabEntry> = vocab
+            .iter()
+            .enumerate()
+            .map(|(i, (h, df))| VocabEntry {
+                term_hash: *h,
+                term_id: i as TermId,
+                df: *df,
+                postings_offset: 0,
+                postings_count: 0,
+            })
+            .collect();
+
+        // Save for resume — if Phase 3+ gets interrupted, we reload these.
+        fs::write(&phase2_vocab,  bincode::serialize(&vocab_entries)?)?;
+        fs::write(&phase2_idf_f,  bincode::serialize(&idf)?)?;
+        fs::write(&phase2_termid, bincode::serialize(&term_to_id)?)?;
+
+        (vocab_entries, idf, term_to_id)
     };
-    let mut vocab: Vec<(u64, u32)> = term_df
-        .into_iter()
-        .filter(|(_, df)| *df >= params.min_df && *df <= max_df_count)
-        .collect();
-    eprintln!("  Unique terms passing filters: {}", vocab.len());
-    vocab.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-    if params.max_features > 0 && vocab.len() > params.max_features {
-        vocab.truncate(params.max_features);
-    }
-    vocab.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    eprintln!("  Final vocab size: {}", vocab.len());
-
-    let idf: Vec<f32> = vocab
-        .iter()
-        .map(|(_, df)| {
-            let df = *df as f32;
-            ((doc_count as f32 - df + 0.5) / (df + 0.5) + 1.0).ln()
-        })
-        .collect();
-
-    let term_to_id: HashMap<u64, TermId> = vocab
-        .iter()
-        .enumerate()
-        .map(|(i, (h, _))| (*h, i as TermId))
-        .collect();
-
-    let mut vocab_entries: Vec<VocabEntry> = vocab
-        .iter()
-        .enumerate()
-        .map(|(i, (h, df))| VocabEntry {
-            term_hash: *h,
-            term_id: i as TermId,
-            df: *df,
-            postings_offset: 0,
-            postings_count: 0,
-        })
-        .collect();
 
     // -----------------------------------------------------------------------
-    // Phase 3 — rows + posting bucket writes
+    // Phase 3 — rows + posting bucket writes (parallel)
     // -----------------------------------------------------------------------
     eprintln!("\n[Phase 3] Rows + posting buckets...");
-    let mut row_offsets: Vec<u64> = vec![u64::MAX; doc_count];
-    let mut row_lengths: Vec<u32> = vec![0u32; doc_count];
-    let mut row_blob: Vec<u8> = Vec::new();
-    {
-        let mut writers = BucketWriterCache::new(post_dir.clone(), 64);
-        let mut processed = 0usize;
-        for fp in &files {
-            processed += 1;
-            if processed % 100 == 0 {
-                eprintln!("  {}/{}", processed, files.len());
+    let nthreads = rayon::current_num_threads();
+    let handles_per_thread = (700usize / nthreads.max(1)).max(4).min(64);
+    for t in 0..nthreads {
+        fs::create_dir_all(post_dir.join(format!("t{}", t)))?;
+    }
+
+    // A dedicated writer thread assembles the row_blob so parallel compute
+    // threads never contend on it.  Channel is bounded to apply back-pressure.
+    let (row_tx, row_rx) = std::sync::mpsc::sync_channel::<(DocId, Vec<u8>)>(8192);
+    let writer_handle = {
+        let mut row_offsets = vec![u64::MAX; doc_count];
+        let mut row_lengths = vec![0u32; doc_count];
+        let mut row_blob: Vec<u8> = Vec::new();
+        std::thread::spawn(move || {
+            for (doc_id, bytes) in row_rx {
+                row_offsets[doc_id as usize] = row_blob.len() as u64;
+                row_lengths[doc_id as usize] = (bytes.len() / ROW_ENTRY_SIZE) as u32;
+                row_blob.extend_from_slice(&bytes);
             }
-            let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
-            let reader = builder.build()?;
-            for batch in reader {
-                let batch = batch?;
-                let (passage_ids, text_arr) = extract_columns(&batch)?;
-                for i in 0..batch.num_rows() {
-                    let pid = passage_ids.value(i);
-                    let text = text_arr.value(i);
-                    let Some(&doc_id) = doc_table.passage_id_map.get(pid) else { continue };
+            (row_offsets, row_lengths, row_blob)
+        })
+    };
 
-                    let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
-                    for h in char_ngram_hashes_all(text, params.min_ngram, params.max_ngram) {
-                        if let Some(&tid) = term_to_id.get(&h) {
-                            *term_counts.entry(tid).or_insert(0) += 1;
-                        }
-                    }
-                    if term_counts.is_empty() {
-                        continue;
-                    }
+    let counter3 = AtomicUsize::new(0usize);
+    let total3   = files.len();
+    let min_n    = params.min_ngram;
+    let max_n    = params.max_ngram;
 
-                    let total_tf: u32 = term_counts.values().sum();
-                    let mut row: Vec<(TermId, f32)> = term_counts
-                        .iter()
-                        .map(|(&tid, &c)| {
-                            let tf = c as f32 / total_tf as f32;
-                            (tid, tf * idf[tid as usize])
-                        })
-                        .collect();
+    // try_for_each_with clones row_tx once per rayon worker; when it returns,
+    // all clones are dropped and the channel closes, ending the writer loop.
+    files.par_iter().try_for_each_with(row_tx, |tx, fp| -> Result<()> {
+        let t = rayon::current_thread_index().unwrap_or(0);
+        let mut post_w = BucketWriterCache::new(post_dir.join(format!("t{}", t)), handles_per_thread);
 
-                    let norm: f32 = row.iter().map(|(_, w)| w * w).sum::<f32>().sqrt();
-                    if norm > 0.0 {
-                        for (_, w) in row.iter_mut() {
-                            *w /= norm;
-                        }
-                    }
-                    row.sort_unstable_by_key(|(tid, _)| *tid);
+        let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
+        let reader  = builder.build()?;
+        for batch in reader {
+            let batch = batch?;
+            let (pids, texts) = extract_columns(&batch)?;
+            let mut hash_buf: Vec<u64> = Vec::new();
+            for i in 0..batch.num_rows() {
+                let pid  = pids.value(i);
+                let text = texts.value(i);
+                let Some(&doc_id) = doc_table.passage_id_map.get(pid) else { continue };
 
-                    row_offsets[doc_id as usize] = row_blob.len() as u64;
-                    row_lengths[doc_id as usize] = row.len() as u32;
-                    for (tid, w) in &row {
-                        row_blob.extend_from_slice(&tid.to_le_bytes());
-                        row_blob.extend_from_slice(&w.to_le_bytes());
+                let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
+                char_ngram_hashes_all_into(text, min_n, max_n, &mut hash_buf);
+                for &h in &hash_buf {
+                    if let Some(&tid) = term_to_id.get(&h) {
+                        *term_counts.entry(tid).or_insert(0) += 1;
                     }
-                    for (tid, w) in &row {
-                        let bucket = (*tid as usize) % bucket_count;
-                        writers.write_posting_record(bucket, *tid, doc_id, *w)?;
+                }
+                if term_counts.is_empty() {
+                    continue;
+                }
+
+                let total_tf: u32 = term_counts.values().sum();
+                let mut row: Vec<(TermId, f32)> = term_counts
+                    .iter()
+                    .map(|(&tid, &c)| (tid, (c as f32 / total_tf as f32) * idf[tid as usize]))
+                    .collect();
+
+                let norm = row.iter().map(|(_, w)| w * w).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for (_, w) in row.iter_mut() {
+                        *w /= norm;
                     }
+                }
+                row.sort_unstable_by_key(|(tid, _)| *tid);
+
+                let mut row_bytes = Vec::with_capacity(row.len() * ROW_ENTRY_SIZE);
+                for (tid, w) in &row {
+                    row_bytes.extend_from_slice(&tid.to_le_bytes());
+                    row_bytes.extend_from_slice(&w.to_le_bytes());
+                }
+                tx.send((doc_id, row_bytes))
+                    .map_err(|e| anyhow::anyhow!("row channel closed: {}", e))?;
+
+                for (tid, w) in &row {
+                    post_w.write_posting_record((*tid as usize) % bucket_count, *tid, doc_id, *w)?;
                 }
             }
         }
-        writers.flush_all()?;
-    }
+        post_w.flush_all()?;
+
+        let n = counter3.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 100 == 0 || n == total3 {
+            eprintln!("  {}/{}", n, total3);
+        }
+        Ok(())
+    })?;
+
+    let (row_offsets, row_lengths, row_blob) = writer_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("row writer thread panicked"))?;
+
     eprintln!(
         "  Row blob: {} bytes ({:.1} MB)",
         row_blob.len(),
         row_blob.len() as f64 / 1e6
     );
 
+    // Merge per-thread posting bucket files.
+    eprintln!("  Merging posting thread buckets...");
+    for bucket_idx in 0..bucket_count {
+        let main = post_dir.join(format!("bucket-{:04}.bin", bucket_idx));
+        let mut out = OpenOptions::new().create(true).append(true).open(&main)?;
+        for t in 0..nthreads {
+            let src = post_dir.join(format!("t{}/bucket-{:04}.bin", t, bucket_idx));
+            if src.exists() {
+                let data = fs::read(&src)?;
+                if !data.is_empty() {
+                    out.write_all(&data)?;
+                }
+                fs::remove_file(&src)?;
+            }
+        }
+    }
+    for t in 0..nthreads {
+        let _ = fs::remove_dir(post_dir.join(format!("t{}", t)));
+    }
+
     // -----------------------------------------------------------------------
-    // Phase 4 — merge posting buckets
+    // Phase 4 — merge posting buckets (parallel)
     // -----------------------------------------------------------------------
     eprintln!("\n[Phase 4] Merging posting buckets...");
-    let mut postings_blob: Vec<u8> = Vec::new();
-    for bucket_idx in 0..bucket_count {
-        if bucket_idx % 256 == 0 {
-            eprintln!("  bucket {}/{}", bucket_idx, bucket_count);
-        }
-        let path = post_dir.join(format!("bucket-{:04}.bin", bucket_idx));
-        if !path.exists() {
-            continue;
-        }
-        let raw = fs::read(&path)?;
-        let n = raw.len() / POSTING_BUCKET_RECORD_SIZE;
-        let mut records: Vec<(TermId, DocId, f32)> = Vec::with_capacity(n);
-        for k in 0..n {
-            let b = k * POSTING_BUCKET_RECORD_SIZE;
-            let tid = u32::from_le_bytes(raw[b..b + 4].try_into()?);
-            let did = u32::from_le_bytes(raw[b + 4..b + 8].try_into()?);
-            let w   = f32::from_le_bytes(raw[b + 8..b + 12].try_into()?);
-            records.push((tid, did, w));
-        }
-        records.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
-        let mut i = 0usize;
-        while i < records.len() {
-            let tid = records[i].0;
-            let mut j = i;
-            while j < records.len() && records[j].0 == tid {
-                j += 1;
+    // Each bucket produces a sorted (term_id, count, postings_bytes) list.
+    // Buckets contain disjoint term_ids, so the final assembly is a simple
+    // sequential extend — no locking needed.
+    let bucket_results: Vec<Vec<(TermId, u32, Vec<u8>)>> = (0..bucket_count)
+        .into_par_iter()
+        .map(|bucket_idx| -> Result<Vec<(TermId, u32, Vec<u8>)>> {
+            if bucket_idx % 256 == 0 {
+                eprintln!("  bucket {}/{}", bucket_idx, bucket_count);
             }
-            let offset = postings_blob.len() as u64;
-            let count = (j - i) as u32;
-            for k in i..j {
-                let (_, did, w) = records[k];
-                postings_blob.extend_from_slice(&did.to_le_bytes());
-                postings_blob.extend_from_slice(&w.to_le_bytes());
+            let path = post_dir.join(format!("bucket-{:04}.bin", bucket_idx));
+            if !path.exists() {
+                return Ok(Vec::new());
             }
-            vocab_entries[tid as usize].postings_offset = offset;
-            vocab_entries[tid as usize].postings_count = count;
-            i = j;
+            let raw = fs::read(&path)?;
+            let n = raw.len() / POSTING_BUCKET_RECORD_SIZE;
+            let mut records: Vec<(TermId, DocId, f32)> = Vec::with_capacity(n);
+            for k in 0..n {
+                let base = k * POSTING_BUCKET_RECORD_SIZE;
+                let tid = u32::from_le_bytes(raw[base..base + 4].try_into()?);
+                let did = u32::from_le_bytes(raw[base + 4..base + 8].try_into()?);
+                let w   = f32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
+                records.push((tid, did, w));
+            }
+            records.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+            let mut out: Vec<(TermId, u32, Vec<u8>)> = Vec::new();
+            let mut i = 0;
+            while i < records.len() {
+                let tid = records[i].0;
+                let mut j = i;
+                while j < records.len() && records[j].0 == tid {
+                    j += 1;
+                }
+                let count = (j - i) as u32;
+                let mut bytes = Vec::with_capacity((j - i) * POSTING_ENTRY_SIZE);
+                for k in i..j {
+                    let (_, did, w) = records[k];
+                    bytes.extend_from_slice(&did.to_le_bytes());
+                    bytes.extend_from_slice(&w.to_le_bytes());
+                }
+                out.push((tid, count, bytes));
+                i = j;
+            }
+            Ok(out)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut postings_blob: Vec<u8> = Vec::new();
+    for bucket_data in bucket_results {
+        for (tid, count, bytes) in bucket_data {
+            vocab_entries[tid as usize].postings_offset = postings_blob.len() as u64;
+            vocab_entries[tid as usize].postings_count  = count;
+            postings_blob.extend_from_slice(&bytes);
         }
     }
     let _ = fs::remove_dir_all(&post_dir);

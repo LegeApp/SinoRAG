@@ -1,0 +1,14 @@
+{
+  "schema": "sinoragd-recipe-v1",
+  "name": "phrase-focused",
+  "description": "Phrase-only recipe for fast attestation work: search + history + first-attestation + timeline. No similarity or canonical-source passes.",
+  "full_work_threshold": 10,
+  "context_before": 3,
+  "context_after": 3,
+  "steps": [
+    {"tool": "phrase-index-search", "when": "phrase", "args": {"limit": 500}},
+    {"tool": "phrase-history",      "when": "phrase", "args": {"limit": 500, "include_variants": true}},
+    {"tool": "first-attestation",   "when": "phrase", "args": {"limit": 200}},
+    {"tool": "timeline",            "when": "phrase", "args": {"limit": 200, "include_variants": true}}
+  ]
+}

@@ -138,10 +138,255 @@ pub fn init_registry(db_path: &Path) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_work_seed ON work_items(seed_passage_id);
         CREATE INDEX IF NOT EXISTS idx_work_phrase ON work_items(normalized_phrase);
         CREATE INDEX IF NOT EXISTS idx_phrase_norm ON phrase_observations(normalized_phrase);
+
+        -- Pack identity layer. Per-document rows (`documents`, `doc_catalog`)
+        -- are intentionally omitted: at 40M docs the SQLite footprint would
+        -- exceed the existing doc_table.bin / catalog.doc_parent for no win.
+        -- doc_table.bin owns passage_id <-> doc_id; catalog.doc_parent owns
+        -- doc_id -> node_id. These tables only hold the small relational
+        -- metadata: works, catalog nodes, and index section descriptors.
+
+        CREATE TABLE IF NOT EXISTS pack_works (
+            work_id INTEGER PRIMARY KEY,          -- DocumentTable.work_id_map value
+            work_name TEXT NOT NULL UNIQUE,       -- source_work_id string
+            source_corpus TEXT,
+            canon TEXT,
+            canon_name TEXT,
+            main_title TEXT,
+            author TEXT,
+            period TEXT,
+            period_rank INTEGER,
+            origin TEXT,
+            traditions_json TEXT,
+            passage_count INTEGER,
+            cjk_char_count INTEGER,
+            root_node_id INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS pack_catalog_nodes (
+            node_id INTEGER PRIMARY KEY,
+            parent_id INTEGER,
+            node_kind TEXT NOT NULL,
+            work_id INTEGER,                      -- FK to pack_works.work_id
+            work_name TEXT,
+            label TEXT,
+            heading_path TEXT,
+            source_rel_path TEXT,
+            first_doc_id INTEGER,
+            last_doc_id INTEGER,
+            passage_count INTEGER,
+            cjk_char_count INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_pack_nodes_work ON pack_catalog_nodes(work_id);
+        CREATE INDEX IF NOT EXISTS idx_pack_nodes_parent ON pack_catalog_nodes(parent_id);
+
+        CREATE TABLE IF NOT EXISTS pack_index_sections (
+            index_name TEXT PRIMARY KEY,           -- 'phrase' | 'tfidf' | 'catalog' | 'doc_table'
+            index_type TEXT NOT NULL,
+            path TEXT NOT NULL,                    -- relative to pack root
+            schema_version INTEGER NOT NULL,
+            doc_table_fingerprint TEXT NOT NULL,
+            build_params_json TEXT,
+            file_bytes INTEGER,
+            created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS pack_phrase_index_meta (
+            index_name TEXT PRIMARY KEY,
+            gram_len INTEGER,
+            num_grams INTEGER,
+            postings_bytes INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS pack_tfidf_index_meta (
+            index_name TEXT PRIMARY KEY,
+            min_ngram INTEGER,
+            max_ngram INTEGER,
+            min_df INTEGER,
+            max_df_ratio REAL,
+            max_features INTEGER,
+            doc_count INTEGER,
+            vocab_count INTEGER,
+            row_blob_bytes INTEGER,
+            postings_blob_bytes INTEGER
+        );
         ",
     )
     .context("Failed to create registry tables")?;
 
+    Ok(())
+}
+
+/// Populate the identity layer (works, catalog nodes, index section metadata)
+/// from already-built pack artifacts. Idempotent: each table is fully replaced
+/// inside a single transaction.
+pub fn populate_identity_from_pack(
+    db_path: &Path,
+    doc_table: &crate::document_table::DocumentTable,
+    catalog: &crate::catalog_index::CorpusCatalogIndex,
+    phrase: Option<(&Path, &serde_json::Value)>,
+    tfidf:  Option<(&Path, &serde_json::Value)>,
+    pack_root: &Path,
+) -> Result<()> {
+    init_registry(db_path)?;
+    let mut con = Connection::open(db_path).context("open registry")?;
+    let tx = con.transaction()?;
+
+    tx.execute("DELETE FROM pack_works", [])?;
+    tx.execute("DELETE FROM pack_catalog_nodes", [])?;
+    tx.execute("DELETE FROM pack_index_sections", [])?;
+    tx.execute("DELETE FROM pack_phrase_index_meta", [])?;
+    tx.execute("DELETE FROM pack_tfidf_index_meta", [])?;
+
+    // --- works -----------------------------------------------------------
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO pack_works (work_id, work_name, source_corpus, canon, canon_name,
+                                     main_title, author, period, period_rank, origin,
+                                     traditions_json, passage_count, cjk_char_count, root_node_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        )?;
+        for w in &catalog.works {
+            let work_id_u32 = doc_table.work_id(&w.work_id);
+            let traditions_json = serde_json::to_string(&w.traditions).unwrap_or_else(|_| "[]".into());
+            // work_id_map may not contain catalog work_id if catalog and doc_table
+            // are out of sync; in that case fall back to row order via NULL.
+            match work_id_u32 {
+                Some(wid) => stmt.execute(params![
+                    wid as i64, w.work_id, w.source_corpus, w.canon, w.canon_name,
+                    w.main_title, w.author, w.period, w.period_rank, w.origin,
+                    traditions_json, w.passage_count, w.cjk_char_count, w.root_node as i64
+                ])?,
+                None => stmt.execute(params![
+                    rusqlite::types::Null,
+                    w.work_id, w.source_corpus, w.canon, w.canon_name,
+                    w.main_title, w.author, w.period, w.period_rank, w.origin,
+                    traditions_json, w.passage_count, w.cjk_char_count, w.root_node as i64
+                ])?,
+            };
+        }
+    }
+
+    // --- catalog nodes ---------------------------------------------------
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO pack_catalog_nodes (node_id, parent_id, node_kind, work_id, work_name,
+                                             label, heading_path, source_rel_path,
+                                             first_doc_id, last_doc_id, passage_count, cjk_char_count)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        )?;
+        for n in &catalog.nodes {
+            let work_id_u32 = doc_table.work_id(&n.work_id);
+            stmt.execute(params![
+                n.node_id as i64,
+                n.parent_id.map(|p| p as i64),
+                format!("{:?}", n.node_kind),
+                work_id_u32.map(|w| w as i64),
+                n.work_id,
+                n.label,
+                n.heading_path,
+                n.source_rel_path,
+                n.first_doc_id.map(|d| d as i64),
+                n.last_doc_id.map(|d| d as i64),
+                n.passage_count,
+                n.cjk_char_count,
+            ])?;
+        }
+    }
+
+    // --- index_sections + per-type meta ----------------------------------
+    let now = Utc::now().to_rfc3339();
+    let rel = |p: &Path| -> String {
+        p.strip_prefix(pack_root)
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.to_string_lossy().into_owned())
+    };
+
+    {
+        let mut sec = tx.prepare(
+            "INSERT INTO pack_index_sections
+               (index_name, index_type, path, schema_version,
+                doc_table_fingerprint, build_params_json, file_bytes, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        )?;
+
+        // doc_table itself as a section
+        let dt_path = pack_root.join(crate::pack::DEFAULT_DOC_TABLE);
+        let dt_bytes = fs::metadata(&dt_path).map(|m| m.len() as i64).unwrap_or(0);
+        sec.execute(params![
+            "doc_table", "doc_table", rel(&dt_path), 1i64,
+            doc_table.source_fingerprint, rusqlite::types::Null, dt_bytes, now
+        ])?;
+
+        // catalog
+        let cat_path = pack_root.join(crate::pack::DEFAULT_CATALOG);
+        let cat_bytes = fs::metadata(&cat_path).map(|m| m.len() as i64).unwrap_or(0);
+        let cat_fp = catalog.doc_table_fingerprint.clone()
+            .unwrap_or_else(|| doc_table.source_fingerprint.clone());
+        sec.execute(params![
+            "catalog", "catalog", rel(&cat_path), 2i64,
+            cat_fp, rusqlite::types::Null, cat_bytes, now
+        ])?;
+
+        if let Some((path, info)) = phrase {
+            let bytes = fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+            let fp = info.get("doc_table_fingerprint")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            sec.execute(params![
+                "phrase", "phrase", rel(path), 2i64,
+                fp, info.to_string(), bytes, now
+            ])?;
+        }
+        if let Some((path, info)) = tfidf {
+            let bytes = fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+            let fp = info.get("doc_table_fingerprint")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            sec.execute(params![
+                "tfidf", "tfidf", rel(path), 2i64,
+                fp, info.to_string(), bytes, now
+            ])?;
+        }
+    }
+
+    if let Some((_, info)) = phrase {
+        let gram_len = info.get("gram_len").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let num_grams = info.get("num_grams").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let postings_bytes = info.get("postings_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        tx.execute(
+            "INSERT INTO pack_phrase_index_meta (index_name, gram_len, num_grams, postings_bytes)
+             VALUES (?1,?2,?3,?4)",
+            params!["phrase", gram_len, num_grams, postings_bytes],
+        )?;
+    }
+
+    if let Some((_, info)) = tfidf {
+        let params_obj = info.get("params");
+        let (min_n, max_n) = params_obj
+            .and_then(|p| p.get("ngram_range"))
+            .and_then(|r| r.as_array())
+            .map(|a| (
+                a.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as i64,
+                a.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as i64,
+            ))
+            .unwrap_or((0, 0));
+        let min_df = params_obj.and_then(|p| p.get("min_df")).and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let max_df = params_obj.and_then(|p| p.get("max_df")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let max_features = params_obj.and_then(|p| p.get("max_features")).and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let docs = info.get("documents").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let feats = info.get("features").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let row_bytes  = info.get("row_blob_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let post_bytes = info.get("postings_blob_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        tx.execute(
+            "INSERT INTO pack_tfidf_index_meta
+               (index_name, min_ngram, max_ngram, min_df, max_df_ratio, max_features,
+                doc_count, vocab_count, row_blob_bytes, postings_blob_bytes)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params!["tfidf", min_n, max_n, min_df, max_df, max_features,
+                    docs, feats, row_bytes, post_bytes],
+        )?;
+    }
+
+    tx.commit()?;
     Ok(())
 }
 

@@ -83,17 +83,16 @@ pub fn build(parquet_path: PathBuf, out: PathBuf, debug_json: Option<PathBuf>, d
     let files = parquet_files(&parquet_path)?;
     println!("Found {} parquet files", files.len());
 
-    // Load DocumentTable
-    let doc_table_path = if let Some(ref dt) = doc_table_param {
-        dt.clone()
-    } else {
-        parquet_path.join("doc_table.bin")
-    };
-    let doc_table = if doc_table_path.exists() {
-        DocumentTable::load(&doc_table_path)?
-    } else {
-        anyhow::bail!("DocumentTable not found at {}. Run doc-table-build first.", doc_table_path.display());
-    };
+    // DocumentTable is required so the catalog can carry a matching fingerprint.
+    let doc_table_path = doc_table_param
+        .ok_or_else(|| anyhow!("--doc-table is required (path to derived/doc_table.bin)"))?;
+    if !doc_table_path.exists() {
+        anyhow::bail!(
+            "DocumentTable not found at {}. Run doc-table-build first.",
+            doc_table_path.display()
+        );
+    }
+    let doc_table = DocumentTable::load(&doc_table_path)?;
 
     // Memory safety check: require at least 2GB available
     check_memory_available(2.0)?;

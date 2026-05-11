@@ -1,0 +1,14 @@
+{
+  "schema": "sinoragd-recipe-v1",
+  "name": "full-genealogy",
+  "description": "Lineage-oriented: similarity from passage seeds + phrase tools for any phrase seeds. Lowers the full-work threshold to pull more source material.",
+  "full_work_threshold": 3,
+  "context_before": 8,
+  "context_after": 8,
+  "steps": [
+    {"tool": "phrase-index-search", "when": "phrase",  "args": {"limit": 300}},
+    {"tool": "phrase-history",      "when": "phrase",  "args": {"limit": 300, "include_variants": true}},
+    {"tool": "timeline",            "when": "phrase",  "args": {"limit": 300, "include_variants": true}},
+    {"tool": "similar",             "when": "passage", "args": {"limit": 50}}
+  ]
+}

@@ -35,15 +35,15 @@ pub enum Command {
         #[arg(long, default_value = "true")]
         build_tfidf: bool,
         /// Phrase index output path
-        #[arg(long, default_value = "derived/phrase.index")]
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
         phrase_index_out: PathBuf,
         /// Phrase index gram length
         #[arg(long, default_value = "4")]
         phrase_gram_len: usize,
         /// TF-IDF output path
-        #[arg(long, default_value = "derived/tfidf")]
+        #[arg(long, default_value = "data/derived/tfidf")]
         tfidf_out: Option<PathBuf>,
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         catalog_index_out: Option<PathBuf>,
         #[arg(long, value_parser = crate::memory::parse_memory_size, help = "Maximum memory to use for phrase index (e.g., 4G, 800M, default: auto-detect)")]
         phrase_max_memory: Option<u64>,
@@ -127,15 +127,15 @@ pub enum Command {
         limit: usize,
         #[arg(long)]
         out: Option<PathBuf>,
-        #[arg(long, default_value = "derived/registry.sqlite")]
+        #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
     },
     TfidfBuild {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/doc_table.bin")]
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 5)]
         min_ngram: usize,
@@ -153,15 +153,15 @@ pub enum Command {
         temp_dir: Option<PathBuf>,
     },
     TfidfInfo {
-        #[arg(long, default_value = "derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
     },
     PhraseIndexBuild {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/doc_table.bin")]
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "derived/phrase.index")]
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 4)]
         gram_len: usize,
@@ -171,13 +171,13 @@ pub enum Command {
         temp_dir: Option<PathBuf>,
     },
     PhraseIndexInfo {
-        #[arg(long, default_value = "derived/phrase.index")]
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
         index: PathBuf,
     },
     PhraseIndexSearch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/phrase.index")]
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
         index: PathBuf,
         #[arg(long)]
         phrase: String,
@@ -189,7 +189,7 @@ pub enum Command {
     CatalogIndexBuild {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         out: PathBuf,
         #[arg(long)]
         debug_json: Option<PathBuf>,
@@ -197,17 +197,68 @@ pub enum Command {
         doc_table: Option<PathBuf>,
     },
     CatalogIndexInfo {
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         index: PathBuf,
     },
     DocTableBuild {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/doc_table.bin")]
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
         out: PathBuf,
     },
+    /// Stitch already-built artifacts (doc_table.bin, catalog.index,
+    /// phrase_v2.index, tfidf.index) into a pack: validate fingerprints,
+    /// populate the registry identity tables, write manifest.json.
+    BuildPack {
+        /// Pack root (defaults to `data` directory layout).
+        #[arg(long, default_value = "data")]
+        pack: PathBuf,
+        /// Optional pack id; defaults to the root directory name.
+        #[arg(long)]
+        pack_id: Option<String>,
+    },
+    /// Build a research packet: a zip of curated primary-source material
+    /// (tool outputs + cited passages) for a downstream agent. SinoRAG does
+    /// not write the report itself; it assembles the dossier.
+    ResearchPacketBuild {
+        /// Pack root that owns the corpus + indexes.
+        #[arg(long, default_value = "data")]
+        pack: PathBuf,
+        /// Output zip path. Default: `data/research_packets/<topic>-<utc>.researchpacket.zip`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Bundled name (`academic-default`, `phrase-focused`, `full-genealogy`)
+        /// or a path to a custom recipe JSON.
+        #[arg(long, default_value = "academic-default")]
+        recipe: String,
+        /// Path to a brief JSON. Mutually exclusive with the per-seed flags below.
+        #[arg(long)]
+        brief: Option<PathBuf>,
+        /// Keep the staging directory for inspection.
+        #[arg(long)]
+        keep_temp: bool,
+        // ---- brief-from-flags (used when --brief is omitted) ----
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        phrase: Option<String>,
+        #[arg(long)]
+        seed_passage: Option<String>,
+        #[arg(long)]
+        person: Option<String>,
+        #[arg(long = "person-alias")]
+        person_alias: Vec<String>,
+        #[arg(long)]
+        work: Option<String>,
+        #[arg(long)]
+        canon: Option<String>,
+        #[arg(long)]
+        period: Option<String>,
+    },
     Works {
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         index: PathBuf,
         #[arg(long)]
         tradition: Option<String>,
@@ -221,7 +272,7 @@ pub enum Command {
         limit: usize,
     },
     Outline {
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         index: PathBuf,
         #[arg(long)]
         work: Option<String>,
@@ -231,7 +282,7 @@ pub enum Command {
         max_depth: usize,
     },
     Sections {
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         index: PathBuf,
         #[arg(long)]
         work: Option<String>,
@@ -239,7 +290,7 @@ pub enum Command {
         max_depth: usize,
     },
     Scope {
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         index: PathBuf,
         #[arg(long)]
         node: u32,
@@ -291,7 +342,7 @@ pub enum Command {
     Similar {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long)]
         seed: String,
@@ -309,7 +360,7 @@ pub enum Command {
     SimilarBatch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long)]
         seeds: PathBuf,
@@ -329,7 +380,7 @@ pub enum Command {
         seed: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long)]
         corpus: Option<PathBuf>,
@@ -339,19 +390,19 @@ pub enum Command {
         phrase_limit: usize,
         #[arg(long)]
         out: Option<PathBuf>,
-        #[arg(long, default_value = "derived/registry.sqlite")]
+        #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
     },
     Catalog {
         #[arg(long, default_value = "GraphDiscovery/Runs")]
         runs: PathBuf,
-        #[arg(long, default_value = "derived/registry.sqlite")]
+        #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
     },
     PriorWork {
         #[arg(long)]
         seed: String,
-        #[arg(long, default_value = "derived/registry.sqlite")]
+        #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -359,13 +410,13 @@ pub enum Command {
     PhraseStatus {
         #[arg(long)]
         phrase: String,
-        #[arg(long, default_value = "derived/registry.sqlite")]
+        #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
     WorkSummary {
-        #[arg(long, default_value = "derived/registry.sqlite")]
+        #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -385,7 +436,7 @@ pub enum Command {
     SeedPick {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/registry.sqlite")]
+        #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
         #[arg(long)]
         tradition: Vec<String>,
@@ -475,7 +526,7 @@ pub enum Command {
         phrase: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -489,10 +540,10 @@ pub enum Command {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
 
-        #[arg(long, default_value = "derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         tfidf_index: PathBuf,
 
-        #[arg(long, default_value = "derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index")]
         catalog_index: PathBuf,
 
         #[arg(long)]

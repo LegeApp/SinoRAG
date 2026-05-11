@@ -11,6 +11,7 @@ mod memory;
 mod models;
 mod normalize;
 mod catalog_index;
+mod pack;
 mod parquet_metadata;
 mod phrase_index;
 mod registry;
@@ -18,6 +19,7 @@ mod research;
 mod search_packet;
 mod storage;
 mod tei;
+mod templates;
 mod tfidf;
 
 use anyhow::Result;

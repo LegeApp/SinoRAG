@@ -1,3 +1,4 @@
+pub mod build_pack;
 pub mod canonical_source;
 pub mod catalog_index;
 pub mod document_table;
@@ -13,6 +14,7 @@ pub mod person_history;
 pub mod person_resolve;
 pub mod phrase_history;
 pub mod phrase_index;
+pub mod research_packet;
 pub mod search;
 pub mod seed_pick;
 pub mod similar_phrase;
@@ -194,6 +196,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => catalog_index::build(parquet, out, debug_json, doc_table),
         Command::CatalogIndexInfo { index } => catalog_index::info(index),
         Command::DocTableBuild { parquet, out } => document_table::build(parquet, out),
+        Command::BuildPack { pack, pack_id } => build_pack::run(pack, pack_id),
+        Command::ResearchPacketBuild {
+            pack, out, recipe, brief, keep_temp,
+            topic, notes, phrase, seed_passage, person, person_alias,
+            work, canon, period,
+        } => research_packet::build(
+            pack, out, recipe, brief, keep_temp,
+            topic, notes, phrase, seed_passage, person, person_alias,
+            work, canon, period,
+        ).await,
         Command::Works {
             index,
             tradition,
