@@ -28,6 +28,11 @@ pub enum Command {
         out_parquet: PathBuf,
         #[arg(long)]
         zen_only: bool,
+        /// Resume from a staging dir (`<out>/.staging/ingest-...`) or "auto"
+        /// to pick the freshest one. Without this flag, ingest always starts
+        /// a fresh staged run.
+        #[arg(long)]
+        resume: Option<PathBuf>,
         /// Build phrase index after ingestion
         #[arg(long, default_value = "true")]
         build_phrase_index: bool,
