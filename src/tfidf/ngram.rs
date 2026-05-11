@@ -81,10 +81,13 @@ fn is_cjk_ideograph(c: char) -> bool {
 
 fn low_value_ngram(s: &str) -> bool {
     let chars: Vec<char> = s.chars().collect();
+    low_value_ngram_chars(&chars)
+}
+
+fn low_value_ngram_chars(chars: &[char]) -> bool {
     if chars.is_empty() {
         return true;
     }
-    // All same character
     if chars.iter().all(|c| *c == chars[0]) {
         return true;
     }
@@ -97,4 +100,61 @@ fn low_value_ngram(s: &str) -> bool {
         }
     }
     false
+}
+
+/// Writes deduplicated n-gram hashes into `out` (clears first). Reuses `out`
+/// across calls to avoid repeated allocation.
+pub fn char_ngram_hashes_into(text: &str, min_n: usize, max_n: usize, out: &mut Vec<u64>) {
+    use std::collections::HashSet;
+    use xxhash_rust::xxh3::xxh3_64;
+    out.clear();
+    let chars: Vec<char> = text.chars().filter(|c| is_cjk_ideograph(*c)).collect();
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut buf = Vec::<u8>::with_capacity(max_n * 4);
+    for n in min_n..=max_n {
+        if chars.len() < n {
+            continue;
+        }
+        for i in 0..=(chars.len() - n) {
+            let window = &chars[i..i + n];
+            if low_value_ngram_chars(window) {
+                continue;
+            }
+            buf.clear();
+            for ch in window {
+                let mut tmp = [0u8; 4];
+                buf.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
+            }
+            let hash = xxh3_64(&buf);
+            if seen.insert(hash) {
+                out.push(hash);
+            }
+        }
+    }
+}
+
+/// Writes all n-gram hashes (including duplicates) into `out` (clears first).
+/// Reuses `out` across calls to avoid repeated allocation.
+pub fn char_ngram_hashes_all_into(text: &str, min_n: usize, max_n: usize, out: &mut Vec<u64>) {
+    use xxhash_rust::xxh3::xxh3_64;
+    out.clear();
+    let chars: Vec<char> = text.chars().filter(|c| is_cjk_ideograph(*c)).collect();
+    let mut buf = Vec::<u8>::with_capacity(max_n * 4);
+    for n in min_n..=max_n {
+        if chars.len() < n {
+            continue;
+        }
+        for i in 0..=(chars.len() - n) {
+            let window = &chars[i..i + n];
+            if low_value_ngram_chars(window) {
+                continue;
+            }
+            buf.clear();
+            for ch in window {
+                let mut tmp = [0u8; 4];
+                buf.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
+            }
+            out.push(xxh3_64(&buf));
+        }
+    }
 }
