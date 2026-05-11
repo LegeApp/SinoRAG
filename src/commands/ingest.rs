@@ -320,9 +320,14 @@ pub async fn run(
     println!("  kanripo {kanripo_count}");
 
     // -- Downstream builders --------------------------------------------
-    let doc_table_path = out.join("doc_table.bin");
-    if (build_phrase_index || build_tfidf) && !doc_table_path.exists() {
+    // doc_table.bin is always built — it's small, fast, and required by
+    // every later index build plus most MCP research tools.
+    let doc_table_path = out.join("derived").join("doc_table.bin");
+    if !doc_table_path.exists() {
         println!("\n=== Building doc table ===");
+        if let Some(parent) = doc_table_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         crate::commands::document_table::build(out_parquet.clone(), doc_table_path.clone(), None)?;
     }
 
@@ -363,7 +368,42 @@ pub async fn run(
         )?;
     }
 
+    let parquet_bytes = crate::commands::estimate::dir_size(&out_parquet);
+    print_next_steps(build_phrase_index, build_tfidf, parquet_bytes);
     Ok(())
+}
+
+/// Non-prominent footer after a successful ingest. Surfaces the optional
+/// heavy indexes (phrase, tfidf) without making them look mandatory, and
+/// points at `mcp` as the normal way to actually use the corpus.
+fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
+    use crate::commands::estimate::{phrase_index_estimate, tfidf_estimate};
+
+    let need_phrase = !built_phrase;
+    let need_tfidf  = !built_tfidf;
+
+    println!();
+    println!("Ingest complete. The corpus is usable as-is via the MCP server.");
+    println!();
+    if need_phrase || need_tfidf {
+        println!("Optional heavy indexes (build later if/when you need them):");
+        if need_phrase {
+            println!("  • phrase index  — exact CJK n-gram lookup (canonical-anchor search)");
+            println!("                    sinoragd index phrase");
+            println!("                    estimate: {}", phrase_index_estimate(parquet_bytes));
+        }
+        if need_tfidf {
+            println!("  • tf-idf index  — similarity / frontier discovery");
+            println!("                    sinoragd index tfidf");
+            println!("                    estimate: {}", tfidf_estimate(parquet_bytes));
+        }
+        println!();
+    }
+    println!("Start the MCP server:");
+    println!("  sinoragd mcp");
+    println!();
+    println!("Check what's built:");
+    println!("  sinoragd status");
 }
 
 /// Move staging partitions into their final home. Refuses to overwrite an

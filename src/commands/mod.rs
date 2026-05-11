@@ -6,6 +6,7 @@ pub mod cluster_hits;
 pub mod collocation_search;
 pub mod compare_usage;
 pub mod document_table;
+pub mod estimate;
 pub mod expand_context_adaptive;
 pub mod find_first_mention;
 pub mod outline_search;
@@ -28,19 +29,39 @@ pub mod research_packet;
 pub mod search;
 pub mod seed_pick;
 pub mod similar_phrase;
+pub mod status;
 pub mod tfidf;
 pub mod timeline;
 pub mod validate;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, IndexCommand};
 use anyhow::Result;
 use serde_json::json;
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Status { data } => status::run(data),
+        Command::Index { command } => match command {
+            IndexCommand::Phrase { parquet, doc_table, out, gram_len, buckets, temp_dir } =>
+                phrase_index::build(parquet, doc_table, out, gram_len, buckets, temp_dir),
+            IndexCommand::Tfidf {
+                parquet, doc_table, out,
+                min_ngram, max_ngram, min_df, max_df_ratio, max_features,
+                buckets, temp_dir,
+            } => {
+                let params = crate::tfidf::index::TfidfParams {
+                    min_ngram, max_ngram, min_df, max_df_ratio, max_features,
+                    dtype: "float32".to_string(),
+                    analyzer: "char".to_string(),
+                };
+                crate::tfidf::index::build(parquet, doc_table, out, params, buckets, temp_dir)
+            }
+            IndexCommand::PhraseInfo { index } => phrase_index::info(index),
+            IndexCommand::TfidfInfo  { index } => tfidf::info(index),
+        },
         Command::Ingest {
-            corpus,
-            kanripo_input,
+            source,
+            path,
             sorting_data_dir,
             out,
             out_jsonl,
@@ -54,23 +75,39 @@ pub async fn run(cli: Cli) -> Result<()> {
             tfidf_out,
             catalog_index_out,
             phrase_max_memory,
-        } => ingest::run(
-            corpus,
-            kanripo_input,
-            sorting_data_dir,
-            out,
-            out_jsonl,
-            out_parquet,
-            zen_only,
-            resume,
-            build_phrase_index,
-            phrase_index_out,
-            phrase_gram_len,
-            build_tfidf,
-            tfidf_out,
-            catalog_index_out,
-            phrase_max_memory,
-        ).await,
+        } => {
+            use crate::cli::IngestSource;
+            let (corpus, kanripo_input) = match source {
+                IngestSource::Cbeta => (Some(path), None),
+                IngestSource::Kanripo => (None, Some(path)),
+                IngestSource::Cef => {
+                    return cef::ingest(path, out_parquet).await;
+                }
+                IngestSource::Terebess => {
+                    let images_dir = out.as_ref()
+                        .map(|o| o.join("derived/terebess_images"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("data/derived/terebess_images"));
+                    return ingest_terebess::run(path, out_parquet, images_dir, 500);
+                }
+            };
+            ingest::run(
+                corpus,
+                kanripo_input,
+                sorting_data_dir,
+                out,
+                out_jsonl,
+                out_parquet,
+                zen_only,
+                resume,
+                build_phrase_index,
+                phrase_index_out,
+                phrase_gram_len,
+                build_tfidf,
+                tfidf_out,
+                catalog_index_out,
+                phrase_max_memory,
+            ).await
+        }
         Command::ExpandContext {
             parquet,
             passage_id,

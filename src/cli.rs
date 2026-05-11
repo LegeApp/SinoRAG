@@ -1,98 +1,357 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// Source corpus type for `ingest`.
+#[derive(Debug, Clone, ValueEnum)]
+pub enum IngestSource {
+    /// CBETA Buddhist canon TEI/XML corpus (xml-p5 layout).
+    Cbeta,
+    /// Kanripo plain-text classical Chinese repository.
+    Kanripo,
+    /// CEF (Corpus Exchange Format) JSON-lines file.
+    Cef,
+    /// Terebess.hu Zen biography pages (SingleFile-saved HTML).
+    Terebess,
+}
+
 #[derive(Debug, Parser)]
-#[command(name = "graphdiscovery")]
+#[command(name = "sinoragd")]
 #[command(version)]
+#[command(about = "SinoRAGD — Buddhist corpus research engine.\n\n\
+User flow:\n  \
+  1. sinoragd ingest <source> <path>   # build the corpus (one-time, slow)\n  \
+  2. sinoragd status                   # see what's built / what's next\n  \
+  3. sinoragd index phrase | tfidf     # optional heavy indexes\n  \
+  4. sinoragd mcp                      # start MCP server for agent access\n\n\
+Research/analysis tools (search, passage, similar, frontier, …) are exposed\n\
+as MCP tools and not listed at the top level. Agents call them via the MCP\n\
+server. Run `sinoragd help <COMMAND>` to see hidden commands.")]
+#[command(after_help = "Run `sinoragd mcp --help` for MCP server options.\nRun `sinoragd help <COMMAND>` for hidden command details.")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
+pub enum IndexCommand {
+    /// Build the phrase (n-gram) index for exact CJK phrase lookup.
+    ///
+    /// Required for canonical-anchor / first-attestation / phrase-history
+    /// MCP tools. Slow on large corpora — expect 1–3 hours on CBETA and
+    /// multiple GB on disk. Not required to start the MCP server.
+    Phrase {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        out: PathBuf,
+        #[arg(long, default_value_t = 4)]
+        gram_len: usize,
+        #[arg(long, default_value_t = 2048)]
+        buckets: usize,
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
+    },
+
+    /// Build the TF-IDF index for similarity / frontier discovery.
+    ///
+    /// Required for `similar`, `frontier`, and related MCP tools. Slow on
+    /// large corpora — expect 1–2 hours on CBETA and multiple GB on disk.
+    /// Not required to start the MCP server.
+    Tfidf {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/tfidf.index")]
+        out: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        min_ngram: usize,
+        #[arg(long, default_value_t = 8)]
+        max_ngram: usize,
+        #[arg(long, default_value_t = 5)]
+        min_df: u32,
+        #[arg(long, alias = "max-df", default_value_t = 0.05)]
+        max_df_ratio: f32,
+        #[arg(long, default_value_t = 200_000)]
+        max_features: usize,
+        #[arg(long, default_value_t = 2048)]
+        buckets: usize,
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
+    },
+
+    /// Print phrase-index metadata.
+    PhraseInfo {
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        index: PathBuf,
+    },
+
+    /// Print tf-idf-index metadata.
+    TfidfInfo {
+        #[arg(long, default_value = "data/derived/tfidf.index")]
+        index: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Show what's been ingested and which indexes are built under the data root.
+    ///
+    /// Cheap filesystem inspection — safe to run any time. Useful as the first
+    /// command after `ingest` to verify state and see suggested next steps.
+    Status {
+        /// Data root (default: data/).
+        #[arg(long, default_value = "data")]
+        data: PathBuf,
+    },
+
+    /// Build optional heavy indexes (phrase, tf-idf).
+    ///
+    /// These are not required to start the MCP server. Build them when the
+    /// research tools that depend on them are actually needed.
+    Index {
+        #[command(subcommand)]
+        command: IndexCommand,
+    },
+
+    /// Ingest a corpus into the passage store (passages.parquet).
+    ///
+    /// Usage:
+    ///   sinoragd ingest cbeta    <PATH>   # CBETA TEI xml-p5 root directory
+    ///   sinoragd ingest kanripo  <PATH>   # Kanripo texts/ root directory
+    ///   sinoragd ingest cef      <FILE>   # CEF .jsonl file
+    ///   sinoragd ingest terebess <DIR>    # Terebess HTML directory
+    ///
+    /// Ingest appends to existing parquet partitions — running cbeta and
+    /// kanripo separately is fine; they land in separate partitions.
+    /// Use --resume auto to continue an interrupted run.
     Ingest {
-        /// CBETA TEI corpus root (the directory that contains `xml-p5/`).
-        #[arg(long)]
-        corpus: Option<PathBuf>,
-        /// Kanripo plain-text repository clone (the directory that contains `texts/KR*/KR*/`).
-        #[arg(long)]
-        kanripo_input: Option<PathBuf>,
-        #[arg(long)]
-        sorting_data_dir: Option<PathBuf>,
+        /// Corpus type: cbeta, kanripo, cef, or terebess.
+        source: IngestSource,
+        /// Path to the corpus root directory or file.
+        path: PathBuf,
+        /// Output root directory (default: data/).
         #[arg(long)]
         out: Option<PathBuf>,
-        #[arg(long, default_value = "data/passages.jsonl")]
-        out_jsonl: PathBuf,
-        #[arg(long, default_value = "data/passages.parquet")]
-        out_parquet: PathBuf,
-        #[arg(long)]
-        zen_only: bool,
-        /// Resume from a staging dir (`<out>/.staging/ingest-...`) or "auto"
-        /// to pick the freshest one. Without this flag, ingest always starts
-        /// a fresh staged run.
+        /// Resume from a staging dir or "auto" to pick the freshest one.
         #[arg(long)]
         resume: Option<PathBuf>,
-        /// Build phrase index after ingestion (slow, >10h on large corpora)
+        /// CBETA only: path to sorting-data directory (provides period_rank ordering).
+        #[arg(long)]
+        sorting_data_dir: Option<PathBuf>,
+        /// Kanripo only: ingest Zen-lineage works only.
+        #[arg(long)]
+        zen_only: bool,
+        /// Build phrase index after ingestion (slow: several hours on large corpora).
         #[arg(long, default_value = "false")]
         build_phrase_index: bool,
-        /// Build TF-IDF index after ingestion (slow, >10h on large corpora)
+        /// Build TF-IDF index after ingestion (slow: several hours on large corpora).
         #[arg(long, default_value = "false")]
         build_tfidf: bool,
-        /// Phrase index output path
+        /// Phrase index output path.
         #[arg(long, default_value = "data/derived/phrase_v2.index")]
         phrase_index_out: PathBuf,
-        /// Phrase index gram length
+        /// Phrase index gram length.
         #[arg(long, default_value = "4")]
         phrase_gram_len: usize,
-        /// TF-IDF output path
+        /// TF-IDF output path.
         #[arg(long, default_value = "data/derived/tfidf")]
         tfidf_out: Option<PathBuf>,
         #[arg(long, default_value = "data/derived/catalog.index")]
         catalog_index_out: Option<PathBuf>,
-        #[arg(long, value_parser = crate::memory::parse_memory_size, help = "Maximum memory to use for phrase index (e.g., 4G, 800M, default: auto-detect)")]
+        #[arg(long, value_parser = crate::memory::parse_memory_size, help = "Maximum memory for phrase index build (e.g. 4G, 800M; default: auto-detect)")]
         phrase_max_memory: Option<u64>,
+        // Legacy/internal passthrough fields kept for compatibility (hidden from help).
+        #[arg(long, default_value = "data/passages.jsonl", hide = true)]
+        out_jsonl: PathBuf,
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
+        out_parquet: PathBuf,
     },
-    ExpandContext {
+
+    /// Start the MCP server (stdio or SSE transport) for agent access.
+    ///
+    /// All research and analysis tools are exposed via MCP — agents should
+    /// connect here rather than calling commands directly.
+    Mcp {
+        /// Transport protocol: stdio (default) or sse.
+        #[arg(long, default_value = "stdio")]
+        transport: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-
-        #[arg(long, value_name = "PASSAGE_ID")]
-        passage_id: Option<String>,
-
+        #[arg(long, default_value = "data/derived/tfidf.index")]
+        tfidf_index: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        catalog_index: PathBuf,
         #[arg(long)]
-        session: Option<PathBuf>,
-
+        registry: Option<PathBuf>,
+        #[arg(long, default_value_t = true)]
+        readonly: bool,
         #[arg(long)]
-        hit: Option<String>,
+        allow_admin_tools: bool,
+    },
 
+    /// Stitch already-built index artifacts into a validated pack with manifest.
+    ///
+    /// Validates fingerprint consistency across doc_table.bin, catalog.index,
+    /// phrase_v2.index, and tfidf.index, then writes manifest.json.
+    BuildPack {
+        /// Pack root directory (default: data/).
+        #[arg(long, default_value = "data")]
+        pack: PathBuf,
+        /// Optional pack id; defaults to the root directory name.
+        #[arg(long)]
+        pack_id: Option<String>,
+    },
+
+    // -----------------------------------------------------------------------
+    // Index build commands — run by users but not shown in top-level help.
+    // Use `sinoragd help <command>` for details.
+    // -----------------------------------------------------------------------
+
+    /// Build TF-IDF similarity index from passage parquet.
+    #[command(hide = true)]
+    TfidfBuild {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/tfidf.index")]
+        out: PathBuf,
         #[arg(long, default_value_t = 5)]
-        before: usize,
-
+        min_ngram: usize,
+        #[arg(long, default_value_t = 8)]
+        max_ngram: usize,
         #[arg(long, default_value_t = 5)]
-        after: usize,
+        min_df: u32,
+        #[arg(long, alias = "max-df", default_value_t = 0.05)]
+        max_df_ratio: f32,
+        #[arg(long, default_value_t = 200_000)]
+        max_features: usize,
+        #[arg(long, default_value_t = 2048)]
+        buckets: usize,
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
+    },
 
+    /// Show TF-IDF index metadata.
+    #[command(hide = true)]
+    TfidfInfo {
+        #[arg(long, default_value = "data/derived/tfidf.index")]
+        index: PathBuf,
+    },
+
+    /// Build phrase (n-gram) index from passage parquet.
+    #[command(hide = true)]
+    PhraseIndexBuild {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        out: PathBuf,
+        #[arg(long, default_value_t = 4)]
+        gram_len: usize,
+        #[arg(long, default_value_t = 2048)]
+        buckets: usize,
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
+    },
+
+    /// Show phrase index metadata.
+    #[command(hide = true)]
+    PhraseIndexInfo {
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        index: PathBuf,
+    },
+
+    /// Search phrase index directly (bypass MCP).
+    ///
+    /// Debug entrypoint. Normally agents invoke this via the MCP server.
+    /// Requires `sinoragd index phrase` to have been run.
+    #[command(hide = true)]
+    PhraseIndexSearch {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        index: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Build catalog (works/sections) index from passage parquet.
+    #[command(hide = true)]
+    CatalogIndexBuild {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        out: PathBuf,
+        #[arg(long)]
+        debug_json: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: Option<PathBuf>,
+    },
+
+    /// Show catalog index metadata.
+    #[command(hide = true)]
+    CatalogIndexInfo {
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        index: PathBuf,
+    },
+
+    /// Build document-ID table from passage parquet.
+    #[command(hide = true)]
+    DocTableBuild {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        out: PathBuf,
+        /// Append mode: preserve existing doc_id assignments and add new ones.
+        #[arg(long)]
+        append_to: Option<PathBuf>,
+    },
+
+    // -----------------------------------------------------------------------
+    // CEF / Kanripo format-conversion utilities (hidden from help).
+    // -----------------------------------------------------------------------
+
+    /// Validate a CEF JSON-lines file.
+    #[command(hide = true)]
     CefValidate {
         #[arg(long)]
         input: PathBuf,
     },
+
+    /// Create a skeleton CEF file.
+    #[command(hide = true)]
     CefInit {
         #[arg(long)]
         out: PathBuf,
     },
+
+    /// Print statistics for a CEF file.
+    #[command(hide = true)]
     CefStats {
         #[arg(long)]
         input: PathBuf,
     },
+
+    /// Ingest a CEF JSON-lines file into the passage parquet.
+    #[command(hide = true)]
     IngestCef {
         #[arg(long)]
         input: PathBuf,
         #[arg(long, default_value = "data/passages.parquet")]
         out_parquet: PathBuf,
     },
+
+    /// Convert a Kanripo plain-text repository to TEI/XML.
+    #[command(hide = true)]
     KanripoToTei {
         #[arg(long)]
         input: PathBuf,
@@ -101,12 +360,54 @@ pub enum Command {
         #[arg(long)]
         snapshot_id: Option<String>,
     },
+
+    /// Generate a manifest JSON for a Kanripo repository.
+    #[command(hide = true)]
     KanripoManifest {
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
+
+    /// Ingest Terebess Zen biography HTML pages.
+    #[command(hide = true)]
+    IngestTerebess {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value = "data/passages.parquet")]
+        out_parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/terebess_images")]
+        images_dir: PathBuf,
+        #[arg(long, default_value_t = 500)]
+        min_body_chars: usize,
+    },
+
+    // -----------------------------------------------------------------------
+    // Research / analysis commands — exposed via MCP, hidden from top-level
+    // help. Agents call these through the MCP server; users generally should
+    // not call them directly.
+    // -----------------------------------------------------------------------
+
+    /// Retrieve a single passage by ID.
+    ///
+    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`;
+    /// the direct CLI form is here for debugging.
+    #[command(hide = true)]
+    Passage {
+        #[arg(long, value_name = "PASSAGE_ID")]
+        id: String,
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Full-text / metadata search across the passage store.
+    ///
+    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`;
+    /// the direct CLI form is here for debugging.
+    #[command(hide = true)]
     Search {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -135,114 +436,28 @@ pub enum Command {
         #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
     },
-    TfidfBuild {
+
+    /// Expand context around a passage (preceding/following passages).
+    #[command(hide = true)]
+    ExpandContext {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
-        doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
-        out: PathBuf,
+        #[arg(long, value_name = "PASSAGE_ID")]
+        passage_id: Option<String>,
+        #[arg(long)]
+        session: Option<PathBuf>,
+        #[arg(long)]
+        hit: Option<String>,
         #[arg(long, default_value_t = 5)]
-        min_ngram: usize,
-        #[arg(long, default_value_t = 8)]
-        max_ngram: usize,
+        before: usize,
         #[arg(long, default_value_t = 5)]
-        min_df: u32,
-        #[arg(long, alias = "max-df", default_value_t = 0.05)]
-        max_df_ratio: f32,
-        #[arg(long, default_value_t = 200_000)]
-        max_features: usize,
-        #[arg(long, default_value_t = 2048)]
-        buckets: usize,
-        #[arg(long)]
-        temp_dir: Option<PathBuf>,
-    },
-    TfidfInfo {
-        #[arg(long, default_value = "data/derived/tfidf.index")]
-        index: PathBuf,
-    },
-    PhraseIndexBuild {
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
-        doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
-        out: PathBuf,
-        #[arg(long, default_value_t = 4)]
-        gram_len: usize,
-        #[arg(long, default_value_t = 2048)]
-        buckets: usize,
-        #[arg(long)]
-        temp_dir: Option<PathBuf>,
-    },
-    PhraseIndexInfo {
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
-        index: PathBuf,
-    },
-    PhraseIndexSearch {
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
-        index: PathBuf,
-        #[arg(long)]
-        phrase: String,
-        #[arg(long, default_value_t = 100)]
-        limit: usize,
+        after: usize,
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    CatalogIndexBuild {
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        out: PathBuf,
-        #[arg(long)]
-        debug_json: Option<PathBuf>,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
-        doc_table: Option<PathBuf>,
-    },
-    CatalogIndexInfo {
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        index: PathBuf,
-    },
-    DocTableBuild {
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
-        out: PathBuf,
-        /// Append mode: load this existing doc_table, preserve all its
-        /// doc_id assignments, and append any passage_ids in `--parquet`
-        /// not already present. Writes a sidecar `<out>.lineage.json`.
-        #[arg(long)]
-        append_to: Option<PathBuf>,
-    },
-    /// Ingest terebess.hu Zen biography pages (SingleFile-saved HTML).
-    /// Filters 403/404 placeholders, strips site chrome, extracts body text +
-    /// main image (written to images_dir), writes parquet under
-    /// `source_corpus=terebess/`.
-    IngestTerebess {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long, default_value = "data/passages.parquet")]
-        out_parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/terebess_images")]
-        images_dir: PathBuf,
-        #[arg(long, default_value_t = 500)]
-        min_body_chars: usize,
-    },
-    /// Stitch already-built artifacts (doc_table.bin, catalog.index,
-    /// phrase_v2.index, tfidf.index) into a pack: validate fingerprints,
-    /// populate the registry identity tables, write manifest.json.
-    BuildPack {
-        /// Pack root (defaults to `data` directory layout).
-        #[arg(long, default_value = "data")]
-        pack: PathBuf,
-        /// Optional pack id; defaults to the root directory name.
-        #[arg(long)]
-        pack_id: Option<String>,
-    },
-    /// Pick the smallest catalog node that contains the seed passage and
-    /// fits the char budget; return every passage inside it.
+
+    /// Adaptive context expansion using catalog outline boundaries.
+    #[command(hide = true)]
     ExpandContextAdaptive {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -255,182 +470,12 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Earliest attestation of a phrase, ordered by period_rank.
-    FindFirstMention {
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long)]
-        phrase_index: Option<PathBuf>,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
-        doc_table: PathBuf,
-        #[arg(long)]
-        phrase: String,
-        #[arg(long = "scope-canon")]
-        scope_canon: Vec<String>,
-        #[arg(long = "scope-period")]
-        scope_period: Vec<String>,
-        #[arg(long = "scope-source-work-id")]
-        scope_source_work_id: Option<String>,
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
-    /// Phrase frequency aggregated by period / canon / author / work, with
-    /// representative passages per group.
-    TraceTermUsage {
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long)]
-        phrase_index: Option<PathBuf>,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
-        doc_table: PathBuf,
-        #[arg(long)]
-        phrase: String,
-        #[arg(long, default_value = "period")]
-        group_by: String,
-        #[arg(long, default_value_t = 2000)]
-        limit_total: usize,
-        #[arg(long, default_value_t = 5)]
-        limit_per_group: usize,
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
-    /// Variants / orthographic flips / aliases for a seed phrase.
-    QueryExpandTerms {
-        #[arg(long)]
-        phrase: String,
-        #[arg(long, default_value = "all")]
-        mode: String,
-        #[arg(long = "person-alias")]
-        person_alias: Vec<String>,
-        #[arg(long, default_value_t = 10)]
-        max: usize,
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
-    /// Build a research packet: a zip of curated primary-source material
-    /// (tool outputs + cited passages) for a downstream agent. SinoRAG does
-    /// not write the report itself; it assembles the dossier.
-    ResearchPacketBuild {
-        /// Pack root that owns the corpus + indexes.
-        #[arg(long, default_value = "data")]
-        pack: PathBuf,
-        /// Output zip path. Default: `data/research_packets/<topic>-<utc>.researchpacket.zip`.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Bundled name (`academic-default`, `phrase-focused`, `full-genealogy`)
-        /// or a path to a custom recipe JSON.
-        #[arg(long, default_value = "academic-default")]
-        recipe: String,
-        /// Path to a brief JSON. Mutually exclusive with the per-seed flags below.
-        #[arg(long)]
-        brief: Option<PathBuf>,
-        /// Keep the staging directory for inspection.
-        #[arg(long)]
-        keep_temp: bool,
-        // ---- brief-from-flags (used when --brief is omitted) ----
-        #[arg(long)]
-        topic: Option<String>,
-        #[arg(long)]
-        notes: Option<String>,
-        #[arg(long)]
-        phrase: Option<String>,
-        #[arg(long)]
-        seed_passage: Option<String>,
-        #[arg(long)]
-        person: Option<String>,
-        #[arg(long = "person-alias")]
-        person_alias: Vec<String>,
-        #[arg(long)]
-        work: Option<String>,
-        #[arg(long)]
-        canon: Option<String>,
-        #[arg(long)]
-        period: Option<String>,
-    },
-    Works {
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        index: PathBuf,
-        #[arg(long)]
-        tradition: Option<String>,
-        #[arg(long)]
-        period: Option<String>,
-        #[arg(long)]
-        canon: Option<String>,
-        #[arg(long)]
-        author: Option<String>,
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
-    Outline {
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        index: PathBuf,
-        #[arg(long)]
-        work: Option<String>,
-        #[arg(long)]
-        node: Option<u32>,
-        #[arg(long, default_value_t = 5)]
-        max_depth: usize,
-    },
-    Sections {
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        index: PathBuf,
-        #[arg(long)]
-        work: Option<String>,
-        #[arg(long, default_value_t = 3)]
-        max_depth: usize,
-    },
-    Scope {
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        index: PathBuf,
-        #[arg(long)]
-        node: u32,
-    },
-    ExportMarkdown {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long)]
-        out: PathBuf,
-        #[arg(long)]
-        title: Option<String>,
-    },
-    ExportReadzen {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long)]
-        out: Option<PathBuf>,
-        #[arg(long)]
-        name: Option<String>,
-    },
-    GraphBuild {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long)]
-        out: Option<PathBuf>,
-        #[arg(long, default_value = "evidence")]
-        kind: String,
-        #[arg(long)]
-        name: Option<String>,
-    },
-    ReportBuild {
-        #[arg(long, required = true)]
-        input: Vec<PathBuf>,
-        #[arg(long)]
-        out: PathBuf,
-        #[arg(long)]
-        title: Option<String>,
-        #[arg(long, default_value_t = 3)]
-        essay_max_pages: usize,
-    },
-    ExportPdf {
-        #[arg(long)]
-        input_markdown: PathBuf,
-        #[arg(long)]
-        out: PathBuf,
-        #[arg(long)]
-        side_by_side: bool,
-    },
+
+    /// Find TF-IDF similar passages to a seed.
+    ///
+    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`.
+    /// Requires `sinoragd index tfidf` to have been run.
+    #[command(hide = true)]
     Similar {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -449,6 +494,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Batch TF-IDF similarity for a list of seeds.
+    #[command(hide = true)]
     SimilarBatch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -467,6 +515,27 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+
+    /// Find similar passages for a standalone phrase (not a passage ID).
+    #[command(hide = true)]
+    SimilarPhrase {
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/tfidf.index")]
+        index: PathBuf,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Generate a discovery frontier packet for an agent session.
+    ///
+    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`.
+    /// Requires `sinoragd index tfidf` to have been run.
+    #[command(hide = true)]
     Frontier {
         #[arg(long)]
         seed: String,
@@ -485,12 +554,127 @@ pub enum Command {
         #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
     },
+
+    /// List works in the catalog, optionally filtered by tradition/period/canon/author.
+    #[command(hide = true)]
+    Works {
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        index: PathBuf,
+        #[arg(long)]
+        tradition: Option<String>,
+        #[arg(long)]
+        period: Option<String>,
+        #[arg(long)]
+        canon: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+
+    /// Show the outline tree for a work.
+    #[command(hide = true)]
+    Outline {
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        index: PathBuf,
+        #[arg(long)]
+        work: Option<String>,
+        #[arg(long)]
+        node: Option<u32>,
+        #[arg(long, default_value_t = 5)]
+        max_depth: usize,
+    },
+
+    /// List top-level sections within a work.
+    #[command(hide = true)]
+    Sections {
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        index: PathBuf,
+        #[arg(long)]
+        work: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        max_depth: usize,
+    },
+
+    /// Return all passage IDs under a catalog outline node.
+    #[command(hide = true)]
+    Scope {
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        index: PathBuf,
+        #[arg(long)]
+        node: u32,
+    },
+
+    /// Export a research packet to Markdown.
+    #[command(hide = true)]
+    ExportMarkdown {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        title: Option<String>,
+    },
+
+    /// Export a research packet to a ReadZen collection bundle.
+    #[command(hide = true)]
+    ExportReadzen {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Build an evidence/timeline/lineage graph from a research packet.
+    #[command(hide = true)]
+    GraphBuild {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value = "evidence")]
+        kind: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Assemble a multi-source report document.
+    #[command(hide = true)]
+    ReportBuild {
+        #[arg(long, required = true)]
+        input: Vec<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        essay_max_pages: usize,
+    },
+
+    /// Render a Markdown file to PDF.
+    #[command(hide = true)]
+    ExportPdf {
+        #[arg(long)]
+        input_markdown: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        side_by_side: bool,
+    },
+
+    /// List prior research runs for a seed passage from the registry.
+    #[command(hide = true)]
     Catalog {
         #[arg(long, default_value = "GraphDiscovery/Runs")]
         runs: PathBuf,
         #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
     },
+
+    /// Show prior agent work for a seed passage.
+    #[command(hide = true)]
     PriorWork {
         #[arg(long)]
         seed: String,
@@ -499,6 +683,9 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    /// Show research status for a phrase across all sessions.
+    #[command(hide = true)]
     PhraseStatus {
         #[arg(long)]
         phrase: String,
@@ -507,24 +694,27 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    /// Summarize work-level research activity from the registry.
+    #[command(hide = true)]
     WorkSummary {
         #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    Passage {
-        #[arg(long, value_name = "PASSAGE_ID")]
-        id: String,
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
+
+    /// Validate an adjudication JSON file.
+    #[command(hide = true)]
     Validate {
         #[arg(long)]
         adjudication: PathBuf,
     },
+
+    /// Pick high-value seed passages for an agent to start from.
+    ///
+    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`.
+    #[command(hide = true)]
     SeedPick {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -537,6 +727,9 @@ pub enum Command {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
+
+    /// Trace the history and spread of a phrase across the corpus.
+    #[command(hide = true)]
     PhraseHistory {
         #[arg(long)]
         phrase: String,
@@ -551,6 +744,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Find the earliest attested occurrence of a phrase.
+    #[command(hide = true)]
     FirstAttestation {
         #[arg(long)]
         phrase: String,
@@ -563,6 +759,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Resolve a person's name to canonical form and known aliases.
+    #[command(hide = true)]
     PersonResolve {
         #[arg(long)]
         name: String,
@@ -573,6 +772,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Retrieve passages mentioning a person, ordered by period.
+    #[command(hide = true)]
     PersonHistory {
         #[arg(long)]
         name: String,
@@ -585,6 +787,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Find canonical-source passages for a phrase (sutra citations etc.).
+    #[command(hide = true)]
     CanonicalSource {
         #[arg(long)]
         phrase: String,
@@ -599,6 +804,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Build a chronological timeline of phrase occurrences.
+    #[command(hide = true)]
     Timeline {
         #[arg(long)]
         phrase: String,
@@ -613,20 +821,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    SimilarPhrase {
-        #[arg(long)]
-        phrase: String,
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
-        index: PathBuf,
-        #[arg(long, default_value_t = 100)]
-        limit: usize,
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
-    /// Search for a phrase within a catalog outline node, returning hits
-    /// grouped by child outline nodes (division, work, passage).
+
+    /// Search for a phrase within a catalog outline node.
+    #[command(hide = true)]
     OutlineSearch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -651,8 +848,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Cluster phrase search hits by catalog outline (work/division),
-    /// returning hit counts per cluster with representative passages.
+
+    /// Cluster phrase search hits by catalog outline (work/division).
+    #[command(hide = true)]
     ClusterHits {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -673,8 +871,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Check whether a phrase is absent from a specific catalog scope
-    /// (work, canon, period). Returns found/absent with sample hits.
+
+    /// Check whether a phrase is absent from a specific catalog scope.
+    #[command(hide = true)]
     AbsenceCheck {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -699,8 +898,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Find terms that co-occur near a seed phrase more often than
-    /// expected by chance, using n-gram log-odds scoring.
+
+    /// Find terms that co-occur near a seed phrase (log-odds scoring).
+    #[command(hide = true)]
     CollocationSearch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -721,8 +921,9 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Compare two sub-corpora (defined by catalog scopes) and return
-    /// distinctive terms using log-odds ratio scoring.
+
+    /// Compare two catalog sub-corpora by distinctive term log-odds.
+    #[command(hide = true)]
     CompareUsage {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -755,26 +956,96 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    Mcp {
-        #[arg(long, default_value = "stdio")]
-        transport: String,
 
+    /// Earliest attestation of a phrase, ordered by period_rank.
+    #[command(hide = true)]
+    FindFirstMention {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-
-        #[arg(long, default_value = "data/derived/tfidf.index")]
-        tfidf_index: PathBuf,
-
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        catalog_index: PathBuf,
-
         #[arg(long)]
-        registry: Option<PathBuf>,
-
-        #[arg(long, default_value_t = true)]
-        readonly: bool,
-
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
         #[arg(long)]
-        allow_admin_tools: bool,
+        phrase: String,
+        #[arg(long = "scope-canon")]
+        scope_canon: Vec<String>,
+        #[arg(long = "scope-period")]
+        scope_period: Vec<String>,
+        #[arg(long = "scope-source-work-id")]
+        scope_source_work_id: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Phrase frequency aggregated by period/canon/author/work.
+    #[command(hide = true)]
+    TraceTermUsage {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value = "period")]
+        group_by: String,
+        #[arg(long, default_value_t = 2000)]
+        limit_total: usize,
+        #[arg(long, default_value_t = 5)]
+        limit_per_group: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Variants / orthographic aliases for a seed phrase.
+    #[command(hide = true)]
+    QueryExpandTerms {
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value = "all")]
+        mode: String,
+        #[arg(long = "person-alias")]
+        person_alias: Vec<String>,
+        #[arg(long, default_value_t = 10)]
+        max: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Build a curated research packet zip for a downstream agent.
+    #[command(hide = true)]
+    ResearchPacketBuild {
+        #[arg(long, default_value = "data")]
+        pack: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value = "academic-default")]
+        recipe: String,
+        #[arg(long)]
+        brief: Option<PathBuf>,
+        #[arg(long)]
+        keep_temp: bool,
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        phrase: Option<String>,
+        #[arg(long)]
+        seed_passage: Option<String>,
+        #[arg(long)]
+        person: Option<String>,
+        #[arg(long = "person-alias")]
+        person_alias: Vec<String>,
+        #[arg(long)]
+        work: Option<String>,
+        #[arg(long)]
+        canon: Option<String>,
+        #[arg(long)]
+        period: Option<String>,
     },
 }

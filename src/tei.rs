@@ -182,16 +182,10 @@ pub fn load_buddhist_metadata(
 }
 
 pub fn iter_xml_paths(corpus_root: &Path) -> Result<Vec<(PathBuf, String)>> {
-    let original_root = corpus_root.join("xml-p5");
-    if !original_root.is_dir() {
-        anyhow::bail!(
-            "Original corpus directory not found: {}",
-            original_root.display()
-        );
-    }
+    let xml_root = resolve_xml_root(corpus_root)?;
 
     let mut paths = Vec::new();
-    for entry in WalkDir::new(&original_root)
+    for entry in WalkDir::new(&xml_root)
         .into_iter()
         .filter_map(Result::ok)
     {
@@ -200,7 +194,7 @@ pub fn iter_xml_paths(corpus_root: &Path) -> Result<Vec<(PathBuf, String)>> {
             continue;
         }
         let rel = path
-            .strip_prefix(&original_root)?
+            .strip_prefix(&xml_root)?
             .to_string_lossy()
             .replace('\\', "/");
         paths.push((path.to_path_buf(), rel));
@@ -208,6 +202,34 @@ pub fn iter_xml_paths(corpus_root: &Path) -> Result<Vec<(PathBuf, String)>> {
 
     paths.sort_by(|a, b| a.1.cmp(&b.1));
     Ok(paths)
+}
+
+/// Resolve the directory that contains CBETA `xml-p5` content.
+///
+/// Accepts either the CBETA root (which contains an `xml-p5/` subdir)
+/// or the `xml-p5` directory itself. Falls back to using the supplied
+/// path directly if it already contains `.xml` files anywhere below it.
+fn resolve_xml_root(corpus_root: &Path) -> Result<PathBuf> {
+    let nested = corpus_root.join("xml-p5");
+    if nested.is_dir() {
+        return Ok(nested);
+    }
+    if corpus_root.is_dir() && contains_xml_anywhere(corpus_root) {
+        return Ok(corpus_root.to_path_buf());
+    }
+    anyhow::bail!(
+        "No CBETA XML content found under {}.\n  \
+         Expected either a directory containing `xml-p5/` (CBETA root) \
+         or an `xml-p5/` directory itself.",
+        corpus_root.display()
+    );
+}
+
+fn contains_xml_anywhere(dir: &Path) -> bool {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("xml"))
 }
 
 pub fn extract_passages_from_file(
