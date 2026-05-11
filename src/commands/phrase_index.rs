@@ -31,6 +31,12 @@ pub async fn search(
     limit: usize,
     out: Option<PathBuf>,
 ) -> Result<()> {
+    if !index_path.exists() {
+        anyhow::bail!(
+            "phrase index not found at {}. Run `sinoragd phrase-index-build` first.",
+            index_path.display()
+        );
+    }
     let store = DataFusionStore::open(&parquet_path).await?;
     let rows = exact_phrase_rows_with_index(
         &store,

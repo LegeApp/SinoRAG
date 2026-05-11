@@ -55,9 +55,12 @@ pub fn build(
     doc_table_param: Option<PathBuf>,
 ) -> Result<()> {
     let doc_table_path = doc_table_param
-        .ok_or_else(|| anyhow!("--doc-table is required (path to derived/doc_table.bin)"))?;
+        .unwrap_or_else(|| PathBuf::from("data/derived/doc_table.bin"));
     if !doc_table_path.exists() {
-        anyhow::bail!("DocumentTable not found at {}", doc_table_path.display());
+        anyhow::bail!(
+            "DocumentTable not found at {}. Run `sinoragd doc-table-build` first.",
+            doc_table_path.display()
+        );
     }
     let doc_table = DocumentTable::load(&doc_table_path)?;
     let dt_fp = doc_table.source_fingerprint.clone();

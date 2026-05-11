@@ -26,6 +26,12 @@ pub async fn similar(
     min_shared_phrase_len: usize,
     out: Option<PathBuf>,
 ) -> Result<()> {
+    if !index_path.exists() {
+        anyhow::bail!(
+            "TF-IDF index not found at {}. Run `sinoragd tfidf-build` first.",
+            index_path.display()
+        );
+    }
     let store = DataFusionStore::open(&parquet_path).await?;
 
     let doc_table_path = index_path
@@ -72,6 +78,12 @@ pub async fn similar_batch(
     min_shared_phrase_len: usize,
     out: PathBuf,
 ) -> Result<()> {
+    if !index_path.exists() {
+        anyhow::bail!(
+            "TF-IDF index not found at {}. Run `sinoragd tfidf-build` first.",
+            index_path.display()
+        );
+    }
     let seed_ids: Vec<String> = std::fs::read_to_string(&seeds)?
         .lines()
         .map(str::trim)
@@ -135,6 +147,12 @@ pub async fn similar_passages(
     min_shared_phrase_len: usize,
     doc_table: &DocumentTable,
 ) -> Result<Vec<Value>> {
+    if !index_path.exists() {
+        anyhow::bail!(
+            "TF-IDF index not found at {}. Run `sinoragd tfidf-build` first.",
+            index_path.display()
+        );
+    }
     let index = TfidfIndex::load(&index_path)?;
     similar_passages_with_index(
         store,

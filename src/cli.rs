@@ -33,11 +33,11 @@ pub enum Command {
         /// a fresh staged run.
         #[arg(long)]
         resume: Option<PathBuf>,
-        /// Build phrase index after ingestion
-        #[arg(long, default_value = "true")]
+        /// Build phrase index after ingestion (slow, >10h on large corpora)
+        #[arg(long, default_value = "false")]
         build_phrase_index: bool,
-        /// Build TF-IDF index after ingestion
-        #[arg(long, default_value = "true")]
+        /// Build TF-IDF index after ingestion (slow, >10h on large corpora)
+        #[arg(long, default_value = "false")]
         build_tfidf: bool,
         /// Phrase index output path
         #[arg(long, default_value = "data/derived/phrase_v2.index")]
@@ -198,7 +198,7 @@ pub enum Command {
         out: PathBuf,
         #[arg(long)]
         debug_json: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: Option<PathBuf>,
     },
     CatalogIndexInfo {
@@ -622,6 +622,136 @@ pub enum Command {
         index: PathBuf,
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Search for a phrase within a catalog outline node, returning hits
+    /// grouped by child outline nodes (division, work, passage).
+    OutlineSearch {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        catalog: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long)]
+        node_id: Option<u32>,
+        #[arg(long)]
+        work_id: Option<String>,
+        #[arg(long, default_value = "division")]
+        group_by: String,
+        #[arg(long, default_value_t = 500)]
+        limit_total: usize,
+        #[arg(long, default_value_t = 20)]
+        limit_per_group: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Cluster phrase search hits by catalog outline (work/division),
+    /// returning hit counts per cluster with representative passages.
+    ClusterHits {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        catalog: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value = "work")]
+        cluster_by: String,
+        #[arg(long, default_value_t = 500)]
+        limit_total: usize,
+        #[arg(long, default_value_t = 20)]
+        limit_per_cluster: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Check whether a phrase is absent from a specific catalog scope
+    /// (work, canon, period). Returns found/absent with sample hits.
+    AbsenceCheck {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        catalog: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long = "scope-work-id")]
+        scope_work_id: Option<String>,
+        #[arg(long = "scope-canon")]
+        scope_canon: Option<String>,
+        #[arg(long = "scope-period")]
+        scope_period: Option<String>,
+        #[arg(long = "scope-node-id")]
+        scope_node_id: Option<u32>,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Find terms that co-occur near a seed phrase more often than
+    /// expected by chance, using n-gram log-odds scoring.
+    CollocationSearch {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long)]
+        phrase: String,
+        #[arg(long, default_value_t = 20)]
+        window_chars: usize,
+        #[arg(long, default_value_t = 4)]
+        gram_len: usize,
+        #[arg(long, default_value_t = 200)]
+        limit_total: usize,
+        #[arg(long, default_value_t = 30)]
+        limit_collocates: usize,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Compare two sub-corpora (defined by catalog scopes) and return
+    /// distinctive terms using log-odds ratio scoring.
+    CompareUsage {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index")]
+        catalog: PathBuf,
+        #[arg(long = "scope-a-node-id")]
+        scope_a_node_id: Option<u32>,
+        #[arg(long = "scope-a-work-id")]
+        scope_a_work_id: Option<String>,
+        #[arg(long = "scope-a-canon")]
+        scope_a_canon: Option<String>,
+        #[arg(long = "scope-a-period")]
+        scope_a_period: Option<String>,
+        #[arg(long = "scope-b-node-id")]
+        scope_b_node_id: Option<u32>,
+        #[arg(long = "scope-b-work-id")]
+        scope_b_work_id: Option<String>,
+        #[arg(long = "scope-b-canon")]
+        scope_b_canon: Option<String>,
+        #[arg(long = "scope-b-period")]
+        scope_b_period: Option<String>,
+        #[arg(long, default_value_t = 4)]
+        gram_len: usize,
+        #[arg(long, default_value_t = 500)]
+        limit_passages: usize,
+        #[arg(long, default_value_t = 50)]
+        limit_terms: usize,
         #[arg(long)]
         out: Option<PathBuf>,
     },
