@@ -520,6 +520,18 @@ pub fn build(
         let mut total_records: u64 = 0;
         let mut processed = 0usize;
 
+        // Single analyzer scratch reused across every passage. The hot
+        // loop allocates nothing in steady state.
+        let analyze_opts = crate::text_analyzer::AnalyzeOptions {
+            min_n: gram_len,
+            max_n: gram_len,
+            filter: crate::text_analyzer::FilterMode::WhitespaceOnly,
+            apply_low_value_filter: false,
+            dedup: true,
+            count_tf: false,
+        };
+        let mut scratch = crate::text_analyzer::AnalyzeScratch::new();
+
         for file_path in &files {
             processed += 1;
             if processed % 100 == 0 {
@@ -535,20 +547,11 @@ pub fn build(
                     let text = text_arr.value(i);
                     let Some(&doc_id) = doc_table.passage_id_map.get(pid) else { continue };
 
-                    let normalized = normalize_zh(text);
-                    let chars: Vec<char> = normalized.chars().filter(|c| !c.is_whitespace()).collect();
-                    if chars.len() < gram_len {
-                        continue;
-                    }
-                    let mut seen: FxHashSet<u64> = FxHashSet::default();
-                    for window in chars.windows(gram_len) {
-                        let gram: String = window.iter().collect();
-                        let hash = xxh3_64(gram.as_bytes());
-                        if seen.insert(hash) {
-                            let bucket = (hash as usize) % bucket_count;
-                            writers.write_record(bucket, hash, doc_id)?;
-                            total_records += 1;
-                        }
+                    crate::text_analyzer::analyze(text, &analyze_opts, &mut scratch);
+                    for &hash in &scratch.unique {
+                        let bucket = (hash as usize) % bucket_count;
+                        writers.write_record(bucket, hash, doc_id)?;
+                        total_records += 1;
                     }
                 }
             }

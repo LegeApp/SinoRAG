@@ -20,6 +20,7 @@ mod search_packet;
 mod storage;
 mod tei;
 mod templates;
+mod text_analyzer;
 mod tfidf;
 
 use anyhow::Result;
