@@ -30,12 +30,12 @@ SinoRAG is built for evidence-backed workflows: exact Chinese citations, passage
 
 General LLMs are useful, but they should not be trusted to “remember” the Buddhist canon or infer textual history without evidence.
 
-SinoRAGD gives agents a local research backend:
+SinoRAG gives agents a local research backend:
 
 ```text
 user question
-  -> agent calls SinoRAGD tools
-  -> SinoRAGD searches the corpus
+  -> agent calls SinoRAG tools
+  -> SinoRAG searches the corpus
   -> agent receives exact passages + metadata
   -> report cites the source text
 ````
@@ -52,7 +52,7 @@ This is especially useful for questions like:
 
 ## Data model
 
-SinoRAGD separates source text from derived indexes:
+SinoRAG separates source text from derived indexes:
 
 ```text
 passages.parquet      canonical passage database
@@ -97,7 +97,7 @@ sinoragd ingest \
 
 ### Custom corpora
 
-Custom Chinese corpora can be converted into the SinoRAGD Corpus Exchange Format.
+Custom Chinese corpora can be converted into the SinoRAG Corpus Exchange Format.
 
 ```bash
 sinoragd cef-init --out my-corpus
@@ -225,8 +225,8 @@ The intended agent pattern is:
 
 ```text
 agent receives user question
-agent calls SinoRAGD tools
-SinoRAGD returns structured evidence
+agent calls SinoRAG tools
+SinoRAG returns structured evidence
 agent writes answer/report with citations
 ```
 
@@ -255,7 +255,7 @@ SinoRAG can generate research artifacts that other tools organize.
 A clean division is:
 
 ```text
-SinoRAGD generates evidence.
+SinoRAG generates evidence.
 ReadZen organizes and displays it beside source texts.
 ```
 
