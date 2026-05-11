@@ -168,36 +168,106 @@ impl PhraseIndex {
     }
 
     pub fn candidate_ids_for_normalized(&self, normalized: &str, limit: usize) -> Vec<DocId> {
+        self.candidate_ids_for_normalized_streaming(normalized)
+            .map(|r| {
+                let mut ids = r.doc_ids;
+                ids.truncate(limit.max(1));
+                ids
+            })
+            .unwrap_or_default()
+    }
+
+    /// Streaming intersection variant: only the smallest postings list is
+    /// fully decoded; all others are streamed and used to filter in-place.
+    pub fn candidate_ids_for_normalized_streaming(
+        &self,
+        normalized: &str,
+    ) -> Option<PhraseCandidateResult> {
         let grams = phrase_index_grams(normalized, self.gram_len);
         if grams.is_empty() {
-            return Vec::new();
+            return Some(PhraseCandidateResult {
+                doc_ids: Vec::new(),
+                stats: PhraseCandidateStats {
+                    gram_count: 0,
+                    missing_gram_count: 0,
+                    postings_encoded_bytes: Vec::new(),
+                    smallest_postings_bytes: 0,
+                    initial_candidates: 0,
+                    final_candidates: 0,
+                    decoded_full_lists: 0,
+                    streamed_lists: 0,
+                },
+            });
         }
 
-        let mut posting_lists: Vec<Vec<DocId>> = Vec::with_capacity(grams.len());
-        for gram in grams {
+        let gram_count = grams.len();
+        let mut postings: Vec<PostingSlice<'_>> = Vec::with_capacity(gram_count);
+        let mut missing = 0usize;
+
+        for gram in &grams {
             let hash = xxh3_64(gram.as_bytes());
             let Some((p_off, p_len)) = self.find_gram(hash) else {
-                return Vec::new();
+                missing += 1;
+                continue;
             };
             let abs = self.postings_offset + p_off as usize;
             let slice = &self.mmap[abs..abs + p_len as usize];
-            let doc_ids = decode_delta_varint_docids(slice).unwrap_or_default();
-            if doc_ids.is_empty() {
-                return Vec::new();
-            }
-            posting_lists.push(doc_ids);
+            postings.push(PostingSlice { bytes: slice, encoded_len: p_len as usize });
         }
 
-        posting_lists.sort_by_key(|p| p.len());
-        let mut current = posting_lists.swap_remove(0);
-        for posting in &posting_lists {
-            current = intersect_sorted(&current, posting);
-            if current.is_empty() {
+        if missing > 0 {
+            return Some(PhraseCandidateResult {
+                doc_ids: Vec::new(),
+                stats: PhraseCandidateStats {
+                    gram_count,
+                    missing_gram_count: missing,
+                    postings_encoded_bytes: postings.iter().map(|p| p.encoded_len).collect(),
+                    smallest_postings_bytes: 0,
+                    initial_candidates: 0,
+                    final_candidates: 0,
+                    decoded_full_lists: 0,
+                    streamed_lists: 0,
+                },
+            });
+        }
+
+        let postings_encoded_bytes: Vec<usize> = postings.iter().map(|p| p.encoded_len).collect();
+
+        // Sort by encoded_len ascending — cheapest first.
+        postings.sort_by_key(|p| p.encoded_len);
+
+        let first = postings.remove(0);
+        let smallest_bytes = first.encoded_len;
+
+        // Fully decode only the smallest list.
+        let mut candidates: Vec<DocId> = DeltaDocIdIter::new(first.bytes).collect();
+        let initial = candidates.len();
+
+        let decoded_full = 1usize;
+        let streamed = postings.len();
+
+        for p in postings {
+            intersect_candidates_with_stream(&mut candidates, DeltaDocIdIter::new(p.bytes));
+            if candidates.is_empty() {
                 break;
             }
         }
-        current.truncate(limit.max(1));
-        current
+
+        let final_count = candidates.len();
+
+        Some(PhraseCandidateResult {
+            doc_ids: candidates,
+            stats: PhraseCandidateStats {
+                gram_count,
+                missing_gram_count: 0,
+                postings_encoded_bytes,
+                smallest_postings_bytes: smallest_bytes,
+                initial_candidates: initial,
+                final_candidates: final_count,
+                decoded_full_lists: decoded_full,
+                streamed_lists: streamed,
+            },
+        })
     }
 
     pub fn info_payload(&self) -> serde_json::Value {
@@ -277,6 +347,60 @@ fn intersect_sorted(a: &[DocId], b: &[DocId]) -> Vec<DocId> {
     out
 }
 
+/// Filter `candidates` in-place, retaining only doc_ids that also appear in
+/// the streaming `postings` iterator. Both must be sorted ascending.
+fn intersect_candidates_with_stream(candidates: &mut Vec<DocId>, postings: DeltaDocIdIter<'_>) {
+    if candidates.is_empty() {
+        return;
+    }
+    let mut out = 0usize;
+    let mut stream = postings.peekable();
+    let n = candidates.len();
+    for i in 0..n {
+        let candidate = candidates[i];
+        while let Some(&doc_id) = stream.peek() {
+            if doc_id < candidate {
+                stream.next();
+            } else {
+                break;
+            }
+        }
+        if matches!(stream.peek(), Some(&doc_id) if doc_id == candidate) {
+            candidates[out] = candidate;
+            out += 1;
+        }
+    }
+    candidates.truncate(out);
+}
+
+/// Metadata about a single gram's postings slice, used to sort by cost
+/// before streaming intersection.
+#[derive(Debug, Clone)]
+struct PostingSlice<'a> {
+    bytes: &'a [u8],
+    encoded_len: usize,
+}
+
+/// Statistics captured during phrase candidate generation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PhraseCandidateStats {
+    pub gram_count: usize,
+    pub missing_gram_count: usize,
+    pub postings_encoded_bytes: Vec<usize>,
+    pub smallest_postings_bytes: usize,
+    pub initial_candidates: usize,
+    pub final_candidates: usize,
+    pub decoded_full_lists: usize,
+    pub streamed_lists: usize,
+}
+
+/// Result of phrase candidate generation with stats.
+#[derive(Debug, Clone)]
+pub struct PhraseCandidateResult {
+    pub doc_ids: Vec<DocId>,
+    pub stats: PhraseCandidateStats,
+}
+
 // ---------------------------------------------------------------------------
 // Varint codec — zig-zag delta encoding of sorted DocId lists
 // ---------------------------------------------------------------------------
@@ -311,20 +435,50 @@ fn encode_varint(mut value: i64, output: &mut Vec<u8>) {
 
 fn decode_delta_varint_docids(data: &[u8]) -> Result<Vec<DocId>> {
     let mut doc_ids = Vec::new();
-    let mut pos = 0;
-    let mut prev: i64 = 0;
-    while pos < data.len() {
-        let (zz, consumed) = decode_varint(&data[pos..])?;
-        pos += consumed;
+    let mut iter = DeltaDocIdIter::new(data);
+    while let Some(doc_id) = iter.next() {
+        doc_ids.push(doc_id);
+    }
+    Ok(doc_ids)
+}
+
+/// Streaming iterator over a zig-zag delta-varint encoded sorted DocId list.
+/// Matches the exact encoding produced by `encode_sorted_docids_delta_varint`.
+#[derive(Debug, Clone)]
+pub struct DeltaDocIdIter<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    current: i64,
+    done: bool,
+}
+
+impl<'a> DeltaDocIdIter<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0, current: 0, done: false }
+    }
+
+    fn next_internal(&mut self) -> Option<DocId> {
+        if self.done || self.pos >= self.bytes.len() {
+            return None;
+        }
+        let (zz, consumed) = decode_varint(&self.bytes[self.pos..]).ok()?;
+        self.pos += consumed;
         let value = if zz & 1 == 0 {
             (zz >> 1) as i64
         } else {
             -((zz >> 1) as i64) - 1
         };
-        prev += value;
-        doc_ids.push(prev as DocId);
+        self.current += value;
+        Some(self.current as DocId)
     }
-    Ok(doc_ids)
+}
+
+impl<'a> Iterator for DeltaDocIdIter<'a> {
+    type Item = DocId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_internal()
+    }
 }
 
 fn decode_varint(data: &[u8]) -> Result<(u64, usize)> {
@@ -864,4 +1018,101 @@ fn write_padded_string(field: &mut [u8], value: &str) {
 fn read_padded_string(field: &[u8]) -> String {
     let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     String::from_utf8_lossy(&field[..end]).to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_test_list(doc_ids: &[DocId]) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_sorted_docids_delta_varint(doc_ids, &mut out);
+        out
+    }
+
+    #[test]
+    fn delta_doc_id_iter_matches_vec_decoder() {
+        let doc_ids = vec![1, 3, 10, 10_000, 10_005];
+        let encoded = encode_test_list(&doc_ids);
+        let decoded_vec = decode_delta_varint_docids(&encoded).unwrap();
+        let decoded_iter: Vec<DocId> = DeltaDocIdIter::new(&encoded).collect();
+        assert_eq!(decoded_vec, doc_ids);
+        assert_eq!(decoded_iter, doc_ids);
+    }
+
+    #[test]
+    fn delta_doc_id_iter_empty() {
+        let encoded = encode_test_list(&[]);
+        let decoded: Vec<DocId> = DeltaDocIdIter::new(&encoded).collect();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn delta_doc_id_iter_single() {
+        let encoded = encode_test_list(&[42]);
+        let decoded: Vec<DocId> = DeltaDocIdIter::new(&encoded).collect();
+        assert_eq!(decoded, vec![42]);
+    }
+
+    #[test]
+    fn streaming_intersection_matches_old_vec_intersection() {
+        let lists: Vec<Vec<DocId>> = vec![
+            vec![1, 2, 3, 10, 20, 30],
+            vec![2, 3, 4, 10, 99],
+            vec![3, 10, 11, 12],
+        ];
+        let encoded: Vec<Vec<u8>> = lists.iter().map(|xs| encode_test_list(xs)).collect();
+
+        // Old method: decode all, intersect
+        let decoded: Vec<Vec<DocId>> = encoded
+            .iter()
+            .map(|e| decode_delta_varint_docids(e).unwrap())
+            .collect();
+        let mut old = decoded[0].clone();
+        for d in &decoded[1..] {
+            old = intersect_sorted(&old, d);
+        }
+
+        // New method: streaming
+        let mut postings: Vec<PostingSlice<'_>> = encoded
+            .iter()
+            .map(|e| PostingSlice { bytes: e.as_slice(), encoded_len: e.len() })
+            .collect();
+        postings.sort_by_key(|p| p.encoded_len);
+        let first = postings.remove(0);
+        let mut new: Vec<DocId> = DeltaDocIdIter::new(first.bytes).collect();
+        for p in postings {
+            intersect_candidates_with_stream(&mut new, DeltaDocIdIter::new(p.bytes));
+        }
+
+        assert_eq!(old, new);
+        assert_eq!(new, vec![3, 10]);
+    }
+
+    #[test]
+    fn streaming_intersection_empty_candidates_short_circuits() {
+        let encoded = encode_test_list(&[1, 2, 3]);
+        let mut candidates: Vec<DocId> = Vec::new();
+        intersect_candidates_with_stream(&mut candidates, DeltaDocIdIter::new(&encoded));
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn duplicate_query_grams_deduped_by_hash_lookup() {
+        // The phrase_index_grams function may produce duplicate grams for
+        // repeated substrings. The lookup is idempotent — same hash returns
+        // same postings slice. The streaming intersection handles this
+        // correctly because intersecting with the same list twice is a no-op
+        // on the result (just costs extra work).
+        let grams = phrase_index_grams("如如如如", 2);
+        // "如如如如" → 3 bigrams: 如如, 如如, 如如 (all identical)
+        assert_eq!(grams.len(), 3);
+        // All three have the same hash.
+        let h0 = xxh3_64(grams[0].as_bytes());
+        assert!(grams.iter().all(|g| xxh3_64(g.as_bytes()) == h0));
+    }
 }

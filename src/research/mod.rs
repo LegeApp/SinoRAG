@@ -1,3 +1,5 @@
+pub mod context_expand;
+
 use crate::datafusion_store::{DataFusionStore, sql_literal, string_contains_sql};
 use crate::document_table::DocumentTable;
 use crate::normalize::normalize_zh;

@@ -34,7 +34,7 @@ use crate::commands::frontier;
 use crate::commands::phrase_history;
 use crate::commands::search;
 use crate::commands::tfidf as commands_tfidf;
-use crate::context_expand;
+use crate::research::context_expand;
 use crate::datafusion_store::DataFusionStore;
 use crate::phrase_index;
 use crate::registry;

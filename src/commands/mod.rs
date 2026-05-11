@@ -1,9 +1,14 @@
+pub mod absence_check;
 pub mod build_pack;
 pub mod canonical_source;
 pub mod catalog_index;
+pub mod cluster_hits;
+pub mod collocation_search;
+pub mod compare_usage;
 pub mod document_table;
 pub mod expand_context_adaptive;
 pub mod find_first_mention;
+pub mod outline_search;
 pub mod query_expand_terms;
 pub mod trace_term_usage;
 pub mod expand_context;
@@ -395,6 +400,51 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
             out,
         } => similar_phrase::run(phrase, parquet, index, limit, out).await,
+        Command::OutlineSearch {
+            parquet, phrase_index, doc_table, catalog,
+            phrase, node_id, work_id, group_by,
+            limit_total, limit_per_group, out
+        } => outline_search::run(
+            parquet, phrase_index, doc_table, catalog,
+            phrase, node_id, work_id, group_by,
+            limit_total, limit_per_group, out,
+        ).await,
+        Command::ClusterHits {
+            parquet, phrase_index, doc_table, catalog,
+            phrase, cluster_by, limit_total, limit_per_cluster, out
+        } => cluster_hits::run(
+            parquet, phrase_index, doc_table, catalog,
+            phrase, cluster_by, limit_total, limit_per_cluster, out,
+        ).await,
+        Command::AbsenceCheck {
+            parquet, phrase_index, doc_table, catalog,
+            phrase, scope_work_id, scope_canon, scope_period,
+            scope_node_id, limit, out
+        } => absence_check::run(
+            parquet, phrase_index, doc_table, catalog,
+            phrase, scope_work_id, scope_canon, scope_period,
+            scope_node_id, limit, out,
+        ).await,
+        Command::CollocationSearch {
+            parquet, phrase_index, doc_table,
+            phrase, window_chars, gram_len,
+            limit_total, limit_collocates, out
+        } => collocation_search::run(
+            parquet, phrase_index, doc_table,
+            phrase, window_chars, gram_len,
+            limit_total, limit_collocates, out,
+        ).await,
+        Command::CompareUsage {
+            parquet, doc_table, catalog,
+            scope_a_node_id, scope_a_work_id, scope_a_canon, scope_a_period,
+            scope_b_node_id, scope_b_work_id, scope_b_canon, scope_b_period,
+            gram_len, limit_passages, limit_terms, out
+        } => compare_usage::run(
+            parquet, doc_table, catalog,
+            scope_a_node_id, scope_a_work_id, scope_a_canon, scope_a_period,
+            scope_b_node_id, scope_b_work_id, scope_b_canon, scope_b_period,
+            gram_len, limit_passages, limit_terms, out,
+        ).await,
         Command::Mcp {
             transport,
             parquet,

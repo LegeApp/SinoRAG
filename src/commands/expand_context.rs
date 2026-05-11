@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
-use crate::context_expand::expand_passage_context;
+use crate::research::context_expand::expand_passage_context;
 use crate::datafusion_store::DataFusionStore;
 use crate::search_packet::SearchResultPacket;
 

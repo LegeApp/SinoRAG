@@ -1,6 +1,5 @@
 mod cli;
 mod commands;
-mod context_expand;
 mod cef;
 mod datafusion_store;
 mod document_table;
@@ -16,6 +15,7 @@ mod parquet_metadata;
 mod phrase_index;
 mod registry;
 mod research;
+mod research_tools;
 mod search_packet;
 mod storage;
 mod tei;
