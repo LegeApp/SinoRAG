@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

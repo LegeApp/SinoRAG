@@ -274,12 +274,13 @@ pub fn format_citation(row: &Value, from_lb: &str, to_lb: &str) -> String {
     let canon_name = field_str(row, "canon_name");
     let source_locator = field_str(row, "source_locator");
     let passage_id = field_str(row, "passage_id");
-    let source_url = field_str(row, "source_url");
-    
+
     let locator = if !source_locator.is_empty() {
         source_locator
     } else if !from_lb.is_empty() {
         lb_range(from_lb, to_lb)
+    } else if !passage_id.is_empty() {
+        passage_id
     } else {
         String::new()
     };

@@ -350,7 +350,7 @@ pub async fn run(
 
     if build_tfidf {
         println!("\n=== Building TF-IDF index ===");
-        let tfidf_out_path = tfidf_out.unwrap_or_else(|| out.join("tfidf.index"));
+        let tfidf_out_path = tfidf_out.unwrap_or_else(|| out.join("tfidf_v3.index"));
         let params = crate::tfidf::index::TfidfParams::default_v2();
         let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, phrase_max_memory);
         crate::tfidf::index::build(

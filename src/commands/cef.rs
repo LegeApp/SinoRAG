@@ -3,11 +3,9 @@ use crate::models::PassageRecord as ModelPassageRecord;
 use crate::normalize::normalize_zh;
 use crate::storage;
 use anyhow::{anyhow, Context, Result};
-use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub fn validate(input: PathBuf) -> Result<ValidationReport> {
     let corpus_dir = if input.is_file() {
@@ -171,7 +169,7 @@ pub fn validate(input: PathBuf) -> Result<ValidationReport> {
     let mut passages: Vec<PassageRecord> = Vec::new();
     let mut passage_ids = HashSet::new();
     let mut cjk_char_count = 0usize;
-    let mut missing_dates_count = 0usize;
+    let missing_dates_count;
 
     if !passages_path.exists() {
         errors.push(ValidationError {

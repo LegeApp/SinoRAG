@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// GraphDiscovery Corpus Exchange Format v1
 /// This module defines the data structures for the GD-CEF format.

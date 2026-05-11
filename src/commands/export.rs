@@ -81,9 +81,10 @@ pub fn report_build(
             .map(|q| format!("GraphDiscovery Report: {q}"))
             .unwrap_or_else(|| "GraphDiscovery Research Report".to_string())
     });
+
     let report = json!({
         "schema": "readzen-research-report-v1",
-        "title": inferred_title,
+        "title": inferred_title.clone(),
         "created_by": "graphdiscovery-rust",
         "created_utc": Utc::now().to_rfc3339(),
         "essay_max_pages": essay_max_pages,
@@ -116,7 +117,15 @@ pub fn report_build(
         "next_steps": next_steps,
         "confidence": "evidence_bundle"
     });
-    templates::write_json(&out, &report)?;
+
+    let ext = out.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") {
+        let md = markdown_report::render(&report, Some(&inferred_title));
+        templates::write_text(&out, &md)?;
+    } else {
+        templates::write_json(&out, &report)?;
+    }
+
     println!("wrote {}", out.display());
     Ok(())
 }

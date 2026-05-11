@@ -44,7 +44,7 @@ pub enum IndexCommand {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 4)]
         gram_len: usize,
@@ -64,7 +64,7 @@ pub enum IndexCommand {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 5)]
         min_ngram: usize,
@@ -84,13 +84,13 @@ pub enum IndexCommand {
 
     /// Print phrase-index metadata.
     PhraseInfo {
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index")]
         index: PathBuf,
     },
 
     /// Print tf-idf-index metadata.
     TfidfInfo {
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         index: PathBuf,
     },
 }
@@ -151,7 +151,7 @@ pub enum Command {
         #[arg(long, default_value = "false")]
         build_tfidf: bool,
         /// Phrase index output path.
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index")]
         phrase_index_out: PathBuf,
         /// Phrase index gram length.
         #[arg(long, default_value = "4")]
@@ -180,7 +180,7 @@ pub enum Command {
         transport: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         tfidf_index: PathBuf,
         #[arg(long, default_value = "data/derived/catalog.index")]
         catalog_index: PathBuf,
@@ -195,7 +195,7 @@ pub enum Command {
     /// Stitch already-built index artifacts into a validated pack with manifest.
     ///
     /// Validates fingerprint consistency across doc_table.bin, catalog.index,
-    /// phrase_v2.index, and tfidf.index, then writes manifest.json.
+    /// phrase_v3.index, and tfidf_v3.index, then writes manifest.json.
     BuildPack {
         /// Pack root directory (default: data/).
         #[arg(long, default_value = "data")]
@@ -217,7 +217,7 @@ pub enum Command {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 5)]
         min_ngram: usize,
@@ -238,7 +238,7 @@ pub enum Command {
     /// Show TF-IDF index metadata.
     #[command(hide = true)]
     TfidfInfo {
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         index: PathBuf,
     },
 
@@ -249,7 +249,7 @@ pub enum Command {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 4)]
         gram_len: usize,
@@ -262,7 +262,7 @@ pub enum Command {
     /// Show phrase index metadata.
     #[command(hide = true)]
     PhraseIndexInfo {
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index")]
         index: PathBuf,
     },
 
@@ -274,7 +274,7 @@ pub enum Command {
     PhraseIndexSearch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v2.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index")]
         index: PathBuf,
         #[arg(long)]
         phrase: String,
@@ -479,7 +479,7 @@ pub enum Command {
     Similar {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         index: PathBuf,
         #[arg(long)]
         seed: String,
@@ -500,7 +500,7 @@ pub enum Command {
     SimilarBatch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         index: PathBuf,
         #[arg(long)]
         seeds: PathBuf,
@@ -523,7 +523,7 @@ pub enum Command {
         phrase: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         index: PathBuf,
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -541,7 +541,7 @@ pub enum Command {
         seed: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         index: PathBuf,
         #[arg(long)]
         corpus: Option<PathBuf>,

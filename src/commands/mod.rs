@@ -490,6 +490,17 @@ pub async fn run(cli: Cli) -> Result<()> {
             registry,
             readonly,
             allow_admin_tools,
-        } => crate::mcp::server::run(transport, parquet, tfidf_index, catalog_index, registry, readonly, allow_admin_tools),
+        } => {
+            crate::mcp::server::run(
+                transport,
+                parquet,
+                tfidf_index,
+                catalog_index,
+                registry,
+                readonly,
+                allow_admin_tools,
+            )
+            .await
+        }
     }
 }

@@ -6,8 +6,8 @@
 //!   data/passages.parquet/...
 //!   derived/doc_table.bin
 //!   derived/catalog.index
-//!   derived/phrase_v2.index
-//!   derived/tfidf.index
+//!   derived/phrase_v3.index
+//!   derived/tfidf_v3.index
 //!   derived/registry.sqlite
 //! ```
 //!
@@ -28,8 +28,8 @@ pub const DEFAULT_PASSAGES: &str  = "data/passages.parquet";
 pub const DEFAULT_DOC_TABLE: &str = "derived/doc_table.bin";
 pub const DEFAULT_CATALOG: &str   = "derived/catalog.index";
 pub const DEFAULT_REGISTRY: &str  = "derived/registry.sqlite";
-pub const DEFAULT_PHRASE: &str    = "derived/phrase_v2.index";
-pub const DEFAULT_TFIDF: &str     = "derived/tfidf.index";
+pub const DEFAULT_PHRASE: &str    = "derived/phrase_v3.index";
+pub const DEFAULT_TFIDF: &str     = "derived/tfidf_v3.index";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackManifest {

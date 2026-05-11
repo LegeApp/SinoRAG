@@ -30,6 +30,14 @@ use clap::Parser;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("warn").init();
 
+    // Resolve all relative paths (e.g. "data/...") against the exe's directory
+    // so the binary can be invoked from any working directory.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let _ = std::env::set_current_dir(exe_dir);
+        }
+    }
+
     let cli = cli::Cli::parse();
     commands::run(cli).await
 }

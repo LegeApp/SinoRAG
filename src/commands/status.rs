@@ -13,8 +13,8 @@ pub fn run(data: PathBuf) -> Result<()> {
     let derived       = data.join("derived");
     let doc_table     = derived.join("doc_table.bin");
     let catalog_index = derived.join("catalog.index");
-    let phrase_index  = derived.join("phrase_v2.index");
-    let tfidf_index   = derived.join("tfidf.index");
+    let phrase_index  = derived.join("phrase_v3.index");
+    let tfidf_index   = derived.join("tfidf_v3.index");
     let registry      = derived.join("registry.sqlite");
 
     println!("SinoRAGD status — data root: {}", data.display());
@@ -36,8 +36,8 @@ pub fn run(data: PathBuf) -> Result<()> {
     println!("Indexes:");
     report("doc_table",     &doc_table,     "base");
     report("catalog.index", &catalog_index, "base");
-    report("phrase_v2.index", &phrase_index, "optional — exact phrase search");
-    report("tfidf.index",   &tfidf_index,   "optional — similarity / frontier");
+    report("phrase_v3.index", &phrase_index, "optional — exact phrase search");
+    report("tfidf_v3.index",   &tfidf_index,   "optional — similarity / frontier");
     println!();
 
     // --- Registry -------------------------------------------------------

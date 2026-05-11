@@ -70,19 +70,24 @@ pub fn init_registry(db_path: &Path) -> Result<()> {
         fs::create_dir_all(parent).context("Failed to create registry directory")?;
     }
 
-    let con = Connection::open(db_path).context("Failed to open registry database")?;
+    let con = Connection::open(db_path)
+        .with_context(|| format!("Failed to open registry database at {}", db_path.display()))?;
 
-    // Enable WAL mode for better concurrency (allows concurrent readers)
-    con.execute("PRAGMA journal_mode=WAL", [])
-        .context("Failed to enable WAL mode")?;
-    
-    // Set synchronous mode to NORMAL for better performance while maintaining durability
-    con.execute("PRAGMA synchronous=NORMAL", [])
-        .context("Failed to set synchronous mode")?;
-    
-    // Set busy timeout to 5 seconds to handle contention gracefully
-    con.execute("PRAGMA busy_timeout=5000", [])
-        .context("Failed to set busy timeout")?;
+    con.busy_timeout(std::time::Duration::from_secs(5))
+        .context("Failed to set SQLite busy timeout")?;
+
+    match con.pragma_update(None, "journal_mode", "WAL") {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!(
+                "WARNING: could not enable WAL for registry {}: {}; falling back to default journal mode",
+                db_path.display(),
+                e
+            );
+        }
+    }
+
+    let _ = con.pragma_update(None, "synchronous", "NORMAL");
 
     con.execute_batch(
         "
@@ -1548,6 +1553,7 @@ fn sha256_hash(data: &[u8]) -> String {
     hex::encode(result)
 }
 
+#[allow(dead_code)]
 fn seed_from_nodes(nodes: &Value) -> String {
     nodes
         .as_array()

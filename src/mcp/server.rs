@@ -19,14 +19,10 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use crate::cli::Command;
-use crate::cli::Command::*;
-use crate::commands;
 use crate::commands::cef;
 use crate::commands::expand_context;
 use crate::commands::first_attestation;
@@ -34,13 +30,9 @@ use crate::commands::frontier;
 use crate::commands::phrase_history;
 use crate::commands::search;
 use crate::commands::tfidf as commands_tfidf;
-use crate::research::context_expand;
 use crate::datafusion_store::DataFusionStore;
-use crate::phrase_index;
 use crate::registry;
-use crate::search_packet::{SearchResultPacket, SearchHit};
 use crate::tfidf::TfidfIndex;
-use crate::tfidf;
 use serde::Serialize;
 use serde_json::json;
 
@@ -408,6 +400,27 @@ fn default_schema_type() -> String {
     "all".to_string()
 }
 
+/// Wraps `serde_json::Value` with an explicit `type: "object"` JSON Schema.
+///
+/// rmcp's `#[tool]` macro extracts `T` from `Result<Json<T>, E>` and validates that
+/// `T`'s schema has root type "object". `serde_json::Value` has no such constraint in
+/// schemars, so we use this newtype to satisfy the MCP outputSchema requirement.
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+struct JsonObj(serde_json::Value);
+
+impl schemars::JsonSchema for JsonObj {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "object".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut map = serde_json::Map::new();
+        map.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+        map.insert("additionalProperties".to_string(), serde_json::Value::Bool(true));
+        schemars::Schema::from(map)
+    }
+}
+
 #[tool_router(router = tool_router)]
 impl GraphDiscoveryServer {
     #[tool(
@@ -417,7 +430,7 @@ impl GraphDiscoveryServer {
     pub async fn search_tool(
         &self,
         Parameters(params): Parameters<SearchParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         search::search(
             store,
@@ -433,7 +446,7 @@ impl GraphDiscoveryServer {
             params.limit,
         )
         .await
-        .map(Json)
+        .map(|v| Json(JsonObj(v)))
         .map_err(|e| format!("search failed: {e}"))
     }
 
@@ -444,12 +457,12 @@ impl GraphDiscoveryServer {
     pub async fn passage_tool(
         &self,
         Parameters(params): Parameters<PassageParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         store
             .get_passage(&params.passage_id)
             .await
-            .map(Json)
+            .map(|v| Json(JsonObj(v)))
             .map_err(|e| format!("get_passage failed: {e}"))
     }
 
@@ -460,11 +473,11 @@ impl GraphDiscoveryServer {
     pub async fn first_attestation_tool(
         &self,
         Parameters(params): Parameters<PhraseParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         first_attestation::first_attestation(params.phrase, store, params.limit, None)
             .await
-            .map(Json)
+            .map(|v| Json(JsonObj(v)))
             .map_err(|e| format!("first_attestation failed: {e}"))
     }
 
@@ -475,7 +488,7 @@ impl GraphDiscoveryServer {
     pub async fn phrase_history_tool(
         &self,
         Parameters(params): Parameters<PhraseHistoryParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         phrase_history::phrase_history(
             params.phrase,
@@ -485,7 +498,7 @@ impl GraphDiscoveryServer {
             None,
         )
         .await
-        .map(Json)
+        .map(|v| Json(JsonObj(v)))
         .map_err(|e| format!("phrase_history failed: {e}"))
     }
 
@@ -496,14 +509,14 @@ impl GraphDiscoveryServer {
     pub async fn prior_work_tool(
         &self,
         Parameters(params): Parameters<PriorWorkParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let items = registry::prior_work(&self.registry_path, &params.seed_passage_id, params.limit)
             .map_err(|e| format!("prior_work failed: {e}"))?;
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "registry": self.registry_path.display().to_string(),
             "seed_passage_id": params.seed_passage_id,
             "items": items,
-        })))
+        }))))
     }
 
     #[tool(
@@ -513,7 +526,7 @@ impl GraphDiscoveryServer {
     pub async fn phrase_status_tool(
         &self,
         Parameters(params): Parameters<PhraseStatusParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let mut payload =
             registry::phrase_status(&self.registry_path, &params.phrase, params.limit)
                 .map_err(|e| format!("phrase_status failed: {e}"))?;
@@ -523,7 +536,7 @@ impl GraphDiscoveryServer {
                 serde_json::json!(self.registry_path.display().to_string()),
             );
         }
-        Ok(Json(payload))
+        Ok(Json(JsonObj(payload)))
     }
 
     #[tool(
@@ -533,13 +546,13 @@ impl GraphDiscoveryServer {
     pub async fn work_summary_tool(
         &self,
         Parameters(params): Parameters<WorkSummaryParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let items = registry::work_summary(&self.registry_path, params.limit)
             .map_err(|e| format!("work_summary failed: {e}"))?;
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "registry": self.registry_path.display().to_string(),
             "items": items,
-        })))
+        }))))
     }
 
     #[tool(
@@ -549,7 +562,7 @@ impl GraphDiscoveryServer {
     pub async fn get_research_template_tool(
         &self,
         Parameters(params): Parameters<ResearchTemplateParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let template_type = params.template_type.as_deref().unwrap_or("basic");
         let include_diagrams = params.include_diagrams;
         let diagram_types = params.diagram_types;
@@ -583,12 +596,12 @@ impl GraphDiscoveryServer {
             }
         }
 
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "template_type": template_type,
             "markdown_template": template,
             "include_diagrams": include_diagrams,
             "diagram_types": diagram_types,
-        })))
+        }))))
     }
 
     #[tool(
@@ -598,7 +611,7 @@ impl GraphDiscoveryServer {
     pub async fn similar_passages_tool(
         &self,
         Parameters(params): Parameters<SimilarPassagesParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         
         // Load DocumentTable for doc_id resolution
@@ -622,12 +635,12 @@ impl GraphDiscoveryServer {
         )
         .await
         .map_err(|e| format!("similar_passages failed: {e}"))?;
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "seed": params.seed,
             "returned_count": results.len(),
             "limit": params.limit,
             "results": results,
-        })))
+        }))))
     }
 
     #[tool(
@@ -637,7 +650,7 @@ impl GraphDiscoveryServer {
     pub async fn frontier_tool(
         &self,
         Parameters(params): Parameters<FrontierParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         
         // Load DocumentTable for doc_id resolution
@@ -678,14 +691,14 @@ impl GraphDiscoveryServer {
             Vec::new()
         };
 
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "schema": "readzen-graphdiscovery-frontier-v1",
             "seed_passage_id": params.seed,
             "seed": seed_row,
             "similar_passages": similar,
             "phrase_frontiers": phrase_frontiers,
             "prior_work": prior_work,
-        })))
+        }))))
     }
 
     #[tool(
@@ -695,7 +708,7 @@ impl GraphDiscoveryServer {
     pub async fn classify_query_tool(
         &self,
         Parameters(params): Parameters<ClassifyQueryParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let query = params.query.to_lowercase();
         let query_type = classify_query_type(&query);
         let entities = extract_entities(&query);
@@ -703,7 +716,7 @@ impl GraphDiscoveryServer {
         let required_checks = get_required_checks(&query_type);
         let failure_modes = get_failure_modes(&query_type);
 
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "schema": "sragd-research-plan-v1",
             "query": params.query,
             "query_type": query_type,
@@ -711,7 +724,7 @@ impl GraphDiscoveryServer {
             "recommended_tools": recommended_tools,
             "required_checks": required_checks,
             "failure_modes": failure_modes,
-        })))
+        }))))
     }
 
     #[tool(
@@ -721,7 +734,7 @@ impl GraphDiscoveryServer {
     pub async fn research_first_attestation_tool(
         &self,
         Parameters(params): Parameters<ResearchFirstAttestationParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         let normalized_query = crate::normalize::normalize_zh(&params.query);
 
@@ -740,7 +753,7 @@ impl GraphDiscoveryServer {
         // Step 2: Search for phrase
         tool_trace.push("search".to_string());
         let search_results = search::search(
-            store.clone(),
+            store,
             Some(params.query.clone()),
             vec![],
             vec![],
@@ -757,7 +770,7 @@ impl GraphDiscoveryServer {
 
         // Step 3: First attestation
         tool_trace.push("first_attestation".to_string());
-        let first_attestation_results = first_attestation::first_attestation(params.query.clone(), store.clone(), params.limit, None)
+        let first_attestation_results = first_attestation::first_attestation(params.query.clone(), store, params.limit, None)
             .await
             .map_err(|e| format!("first_attestation failed: {e}"))?;
 
@@ -765,7 +778,7 @@ impl GraphDiscoveryServer {
         tool_trace.push("phrase_history".to_string());
         let phrase_history_results = phrase_history::phrase_history(
             params.query.clone(),
-            store.clone(),
+            store,
             true,
             true,
             None,
@@ -800,7 +813,7 @@ impl GraphDiscoveryServer {
             format!("No attestation found for '{}' in the loaded corpus", params.query)
         };
 
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "schema": "sragd-research-result-v1",
             "query": params.query,
             "normalized_query": normalized_query,
@@ -821,7 +834,7 @@ impl GraphDiscoveryServer {
                 "Consider using similar_passages to find related content that may provide context".to_string()
             ],
             "prior_work": prior_work,
-        })))
+        }))))
     }
 
     #[tool(
@@ -831,7 +844,7 @@ impl GraphDiscoveryServer {
     pub async fn research_phrase_genesis_tool(
         &self,
         Parameters(params): Parameters<ResearchPhraseGenesisParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
         let normalized_query = crate::normalize::normalize_zh(&params.query);
 
@@ -841,7 +854,7 @@ impl GraphDiscoveryServer {
         // Step 1: Search for phrase
         tool_trace.push("search".to_string());
         let search_results = search::search(
-            store.clone(),
+            store,
             Some(params.query.clone()),
             vec![],
             vec![],
@@ -858,7 +871,7 @@ impl GraphDiscoveryServer {
 
         // Step 2: First attestation
         tool_trace.push("first_attestation".to_string());
-        let first_attestation_results = first_attestation::first_attestation(params.query.clone(), store.clone(), params.limit, None)
+        let first_attestation_results = first_attestation::first_attestation(params.query.clone(), store, params.limit, None)
             .await
             .map_err(|e| format!("first_attestation failed: {e}"))?;
 
@@ -881,7 +894,7 @@ impl GraphDiscoveryServer {
             .and_then(|id| id.as_str())
         {
             commands_tfidf::similar_passages(
-                store.clone(),
+                store,
                 self.tfidf_index.clone(),
                 first_passage_id,
                 params.limit,
@@ -905,7 +918,7 @@ impl GraphDiscoveryServer {
         tool_trace.push("phrase_history".to_string());
         let phrase_history_results = phrase_history::phrase_history(
             params.query.clone(),
-            store.clone(),
+            store,
             true,
             true,
             None,
@@ -945,7 +958,7 @@ impl GraphDiscoveryServer {
             format!("No evidence found for the genesis of '{}' in the loaded corpus", params.query)
         };
 
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "schema": "sragd-research-result-v1",
             "query": params.query,
             "normalized_query": normalized_query,
@@ -967,7 +980,7 @@ impl GraphDiscoveryServer {
                 "Analyze phrase_history timeline to identify patterns of usage over time".to_string(),
                 "Consider whether the phrase may be formulaic or common expression rather than unique genesis".to_string()
             ],
-        })))
+        }))))
     }
 
     #[tool(
@@ -977,7 +990,7 @@ impl GraphDiscoveryServer {
     pub async fn resolve_entity_tool(
         &self,
         Parameters(params): Parameters<ResolveEntityParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let store = self.store().await?;
 
         // Build list of name forms to search
@@ -1004,7 +1017,7 @@ impl GraphDiscoveryServer {
             }));
         }
 
-        Ok(Json(serde_json::json!({
+        Ok(Json(JsonObj(serde_json::json!({
             "schema": "readzen-person-resolve-v1",
             "raw": params.name,
             "aliases": forms.iter().skip(1).cloned().collect::<Vec<_>>(),
@@ -1019,7 +1032,7 @@ impl GraphDiscoveryServer {
                 "This is a corpus-local resolver, not a historical authority file.",
                 "Aliases must be supplied explicitly until a persons/aliases table is added."
             ],
-        })))
+        }))))
     }
 
     // Catalog index tools
@@ -1030,11 +1043,11 @@ impl GraphDiscoveryServer {
     pub async fn catalog_overview_tool(
         &self,
         Parameters(params): Parameters<CatalogOverviewParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let index_path = params.index_path.map(PathBuf::from).unwrap_or_else(|| self.catalog_index.clone());
         let catalog = crate::catalog_index::CorpusCatalogIndex::load(&index_path)
             .map_err(|e| format!("failed to load catalog index: {e}"))?;
-        Ok(Json(catalog.info_payload()))
+        Ok(Json(JsonObj(catalog.info_payload())))
     }
 
     #[tool(
@@ -1044,7 +1057,7 @@ impl GraphDiscoveryServer {
     pub async fn list_works_tool(
         &self,
         Parameters(params): Parameters<ListWorksParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let index_path = params.index_path.map(PathBuf::from).unwrap_or_else(|| self.catalog_index.clone());
         let catalog = crate::catalog_index::CorpusCatalogIndex::load(&index_path)
             .map_err(|e| format!("failed to load catalog index: {e}"))?;
@@ -1081,7 +1094,7 @@ impl GraphDiscoveryServer {
             })
         }).collect();
 
-        Ok(Json(serde_json::json!(results)))
+        Ok(Json(JsonObj(serde_json::json!({"results": results}))))
     }
 
     #[tool(
@@ -1091,7 +1104,7 @@ impl GraphDiscoveryServer {
     pub async fn work_outline_tool(
         &self,
         Parameters(params): Parameters<WorkOutlineParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let index_path = params.index_path.map(PathBuf::from).unwrap_or_else(|| self.catalog_index.clone());
         let catalog = crate::catalog_index::CorpusCatalogIndex::load(&index_path)
             .map_err(|e| format!("failed to load catalog index: {e}"))?;
@@ -1107,7 +1120,7 @@ impl GraphDiscoveryServer {
         };
 
         let tree = build_outline_tree(&catalog, root_node_id, params.max_depth, 0);
-        Ok(Json(tree))
+        Ok(Json(JsonObj(serde_json::json!({"outline": tree}))))
     }
 
     #[tool(
@@ -1117,7 +1130,7 @@ impl GraphDiscoveryServer {
     pub async fn section_scope_tool(
         &self,
         Parameters(params): Parameters<SectionScopeParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let index_path = params.index_path.map(PathBuf::from).unwrap_or_else(|| self.catalog_index.clone());
         let catalog = crate::catalog_index::CorpusCatalogIndex::load(&index_path)
             .map_err(|e| format!("failed to load catalog index: {e}"))?;
@@ -1137,7 +1150,7 @@ impl GraphDiscoveryServer {
             }
         });
 
-        Ok(Json(scope))
+        Ok(Json(JsonObj(scope)))
     }
 
     #[tool(
@@ -1147,8 +1160,7 @@ impl GraphDiscoveryServer {
     pub async fn expand_context_tool(
         &self,
         Parameters(params): Parameters<ExpandContextParams>,
-    ) -> Result<Json<Value>, String> {
-        let store = self.store().await?;
+    ) -> Result<Json<JsonObj>, String> {
         let context = expand_context::run(
             self.parquet_path.clone(),
             Some(params.passage_id.clone()),
@@ -1160,7 +1172,7 @@ impl GraphDiscoveryServer {
         )
         .await
         .map_err(|e| format!("expand_context failed: {e}"))?;
-        Ok(Json(serde_json::to_value(context).map_err(|e| format!("failed to serialize context: {e}"))?))
+        Ok(Json(JsonObj(serde_json::to_value(context).map_err(|e| format!("failed to serialize context: {e}"))?)))
     }
 
     #[tool(
@@ -1170,15 +1182,8 @@ impl GraphDiscoveryServer {
     pub async fn expand_hit_tool(
         &self,
         Parameters(params): Parameters<ExpandHitParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let session_path = PathBuf::from(&params.session_path);
-        let packet = SearchResultPacket::load(&session_path)
-            .map_err(|e| format!("failed to load search packet: {e}"))?;
-        
-        let hit = packet.find_hit(&params.hit_id)
-            .map_err(|e| format!("failed to find hit: {e}"))?;
-        
-        let store = self.store().await?;
         let context = expand_context::run(
             self.parquet_path.clone(),
             None,
@@ -1191,7 +1196,7 @@ impl GraphDiscoveryServer {
         .await
         .map_err(|e| format!("expand_context failed: {e}"))?;
         
-        Ok(Json(serde_json::to_value(context).map_err(|e| format!("failed to serialize context: {e}"))?))
+        Ok(Json(JsonObj(serde_json::to_value(context).map_err(|e| format!("failed to serialize context: {e}"))?)))
     }
 
     #[tool(
@@ -1201,7 +1206,7 @@ impl GraphDiscoveryServer {
     pub async fn cef_schema_tool(
         &self,
         Parameters(params): Parameters<CefSchemaParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let schema_type = params.schema_type.as_str();
         
         let result = match schema_type {
@@ -1259,7 +1264,7 @@ rights_id = "CC-BY-SA-4.0""#
             })
         };
         
-        Ok(Json(result))
+        Ok(Json(JsonObj(result)))
     }
 
     #[tool(
@@ -1269,11 +1274,11 @@ rights_id = "CC-BY-SA-4.0""#
     pub async fn cef_validate_tool(
         &self,
         Parameters(params): Parameters<CefValidateParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let corpus_path = PathBuf::from(&params.corpus_path);
         let report = cef::validate(corpus_path)
             .map_err(|e| format!("validation failed: {e}"))?;
-        Ok(Json(serde_json::to_value(report).map_err(|e| format!("failed to serialize report: {e}"))?))
+        Ok(Json(JsonObj(serde_json::to_value(report).map_err(|e| format!("failed to serialize report: {e}"))?)))
     }
 
     #[tool(
@@ -1283,7 +1288,7 @@ rights_id = "CC-BY-SA-4.0""#
     pub async fn cef_guide_tool(
         &self,
         Parameters(params): Parameters<CefGuideParams>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<JsonObj>, String> {
         let topic = params.topic.as_str();
         
         let guidance = match topic {
@@ -1421,7 +1426,7 @@ notes = "Conversion notes"#
             })
         };
         
-        Ok(Json(guidance))
+        Ok(Json(JsonObj(guidance)))
     }
 }
 
@@ -1558,7 +1563,7 @@ impl rmcp::ServerHandler for GraphDiscoveryServer {
     }
 }
 
-pub fn run(
+pub async fn run(
     transport: String,
     parquet: PathBuf,
     tfidf_index: PathBuf,
@@ -1582,8 +1587,7 @@ pub fn run(
         let index = TfidfIndex::load(&tfidf_index)?;
         let index_fingerprint = index.doc_table_fingerprint().to_string();
         if !index_fingerprint.is_empty() {
-            let handle = tokio::runtime::Handle::current();
-            let store = handle.block_on(DataFusionStore::open(&parquet))?;
+            let store = DataFusionStore::open(&parquet).await?;
             let current_fingerprint = store.source_fingerprint();
             let current_fingerprint_str = current_fingerprint
                 .get("fingerprint")
@@ -1614,20 +1618,17 @@ pub fn run(
     );
 
     // The outer `commands::run` entry point is already inside a tokio runtime
-    // (via `#[tokio::main]` in main.rs), so we use `Handle::block_on` to drive
-    // the MCP server to completion on the existing runtime.
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(async move {
-        let service = server
-            .serve(stdio())
-            .await
-            .map_err(|e| anyhow::anyhow!("mcp serve failed: {e}"))?;
-        service
-            .waiting()
-            .await
-            .map_err(|e| anyhow::anyhow!("mcp server exited with error: {e}"))?;
-        Ok::<_, anyhow::Error>(())
-    })
+    // (via `#[tokio::main]` in main.rs), so we can directly await here.
+    let service = server
+        .serve(stdio())
+        .await
+        .map_err(|e| anyhow::anyhow!("mcp serve failed: {e}"))?;
+    service
+        .waiting()
+        .await
+        .map_err(|e| anyhow::anyhow!("mcp server exited with error: {e}"))?;
+
+    Ok(())
 }
 
 /// Returns comprehensive instructions for LLM agents using the SinoRAGD MCP server.

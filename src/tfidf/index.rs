@@ -1,4 +1,4 @@
-// TF-IDF index over CJK character n-grams. Single canonical implementation.
+// TF-IDF index over CJK character n-grams (v3, 8-bit log-quantized).
 //
 // Pipeline:
 //   Phase 1 — DF buckets:    write (gram_hash, doc_id) records per bucket.
@@ -7,22 +7,29 @@
 //   Phase 3 — Rows + posting buckets: re-scan parquet, compute TF, multiply
 //             by IDF, L2-normalise, write row entries inline + write
 //             (term_id, doc_id, weight) records into posting buckets.
+//             Writer thread also accumulates per-term `w_max` while
+//             collecting f32 row bytes.
 //   Phase 4 — Posting merge: for each posting bucket, sort by (term_id, doc_id)
-//             and emit a contiguous posting list per term.
-//   Save  —   write the file directly from the build's local Vecs (we never
-//             construct an in-memory `TfidfIndex` of an entire corpus).
+//             and emit a contiguous posting list per term. Quantize on emit
+//             using `w_max[tid]`.
+//   Requantize rows — second pass over the in-memory f32 row blob,
+//             quantizing each weight against `w_max` and rewriting as 5-byte
+//             entries in doc-id order.
+//   Save  —   write the file directly from the build's local Vecs.
 //
-// On-disk format ("SGTFIDF2", version 2): header (512 B) + vocab table +
-// IDF array + per-doc row offsets + per-doc row lengths + row blob +
-// postings blob. See header constant ranges below.
+// On-disk format ("SRTF3VAA", version 3): header (512 B) + vocab table
+// (32 B/entry, adds w_max:f32) + IDF array + per-doc row offsets + per-doc
+// row lengths + row blob (5 B/entry: term_id u32 + q u8) + postings blob
+// (5 B/entry: doc_id u32 + q u8). See header constant ranges below.
 //
 // Query side: `TfidfIndex::open` mmaps the file. Every accessor is a slice
-// into the mmap; no full-file copy. Loading a multi-GB index costs O(1) RAM.
+// into the mmap; weights are dequantized on the fly via per-term `w_max`.
 
 use crate::document_table::DocumentTable;
 use crate::tfidf::ngram::{
     char_ngram_hashes, char_ngram_hashes_all_into, char_ngram_hashes_into, char_ngrams,
 };
+use crate::tfidf::quantize::{dequantize_log_u8, quantize_log_u8};
 use anyhow::Result;
 use memmap2::Mmap;
 use ordered_float::OrderedFloat;
@@ -47,11 +54,11 @@ pub type TermId = u32;
 // File format constants
 // ---------------------------------------------------------------------------
 
-const MAGIC_TFIDF_V2: &[u8; 8] = b"SGTFIDF2";
+const MAGIC_TFIDF_V3: &[u8; 8] = b"SRTF3VAA";
 const HEADER_SIZE: usize = 512;
-const VOCAB_ENTRY_SIZE: usize = 28;       // u64 + u32 + u32 + u64 + u32
-const ROW_ENTRY_SIZE: usize = 8;          // term_id u32 + weight f32
-const POSTING_ENTRY_SIZE: usize = 8;      // doc_id u32 + weight f32
+const VOCAB_ENTRY_SIZE: usize = 32;       // u64 + u32 + u32 + u64 + u32 + f32
+const ROW_ENTRY_SIZE: usize = 5;          // term_id u32 + qweight u8
+const POSTING_ENTRY_SIZE: usize = 5;      // doc_id u32 + qweight u8
 const POSTING_BUCKET_RECORD_SIZE: usize = 12; // term_id u32 + doc_id u32 + weight f32
 
 const HDR_VOCAB_COUNT:    std::ops::Range<usize> = 10..14;
@@ -107,6 +114,7 @@ pub struct VocabEntry {
     pub df: u32,
     pub postings_offset: u64,
     pub postings_count: u32,
+    pub w_max: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,7 +126,7 @@ pub struct SharedNgram {
 }
 
 /// Mmap-backed TF-IDF index. All sections are accessed by slicing into the
-/// mmap; no copies of the row blob / postings blob are kept in RAM.
+/// mmap; quantized weights are dequantized on-the-fly per term.
 pub struct TfidfIndex {
     params: TfidfParams,
     doc_table_fingerprint: String,
@@ -140,14 +148,12 @@ pub struct TfidfIndex {
 // ---------------------------------------------------------------------------
 
 impl TfidfIndex {
-    /// Open by mmapping the index file. Constant RAM cost regardless of size.
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
         Self::from_mmap(mmap)
     }
 
-    /// Backwards-compat alias. Prefer `open`.
     pub fn load(path: &Path) -> Result<Self> {
         Self::open(path)
     }
@@ -156,12 +162,15 @@ impl TfidfIndex {
         if mmap.len() < HEADER_SIZE {
             anyhow::bail!("TF-IDF index too small");
         }
-        if &mmap[0..8] != MAGIC_TFIDF_V2 {
-            anyhow::bail!("invalid TF-IDF magic");
+        if &mmap[0..8] != MAGIC_TFIDF_V3 {
+            anyhow::bail!(
+                "invalid TF-IDF magic (expected v3 `SRTF3VAA`; rebuild required \
+                 — v2 files are not readable by v3 code)"
+            );
         }
         let version = u16::from_le_bytes([mmap[8], mmap[9]]);
-        if version != 2 {
-            anyhow::bail!("unsupported TF-IDF version: {}", version);
+        if version != 3 {
+            anyhow::bail!("unsupported TF-IDF version: {} (expected 3)", version);
         }
 
         let vocab_count  = u32::from_le_bytes(mmap[HDR_VOCAB_COUNT].try_into()?) as usize;
@@ -194,7 +203,7 @@ impl TfidfIndex {
             min_df,
             max_df_ratio,
             max_features,
-            dtype: "float32".to_string(),
+            dtype: "u8-log-quantized".to_string(),
             analyzer: "char".to_string(),
         };
 
@@ -229,6 +238,7 @@ impl TfidfIndex {
             df:              u32::from_le_bytes(s[12..16].try_into().unwrap()),
             postings_offset: u64::from_le_bytes(s[16..24].try_into().unwrap()),
             postings_count:  u32::from_le_bytes(s[24..28].try_into().unwrap()),
+            w_max:           f32::from_le_bytes(s[28..32].try_into().unwrap()),
         }
     }
 
@@ -247,7 +257,7 @@ impl TfidfIndex {
         u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap())
     }
 
-    /// Decode a single document's row into (term_id, weight) pairs.
+    /// Decode a single document's row into (term_id, dequantized weight) pairs.
     pub fn row_entries(&self, doc_id: DocId) -> Vec<(TermId, f32)> {
         let idx = doc_id as usize;
         if idx >= self.doc_count {
@@ -263,14 +273,15 @@ impl TfidfIndex {
         for i in 0..len {
             let e = base + i * ROW_ENTRY_SIZE;
             let tid = u32::from_le_bytes(self.mmap[e..e + 4].try_into().unwrap());
-            let w   = f32::from_le_bytes(self.mmap[e + 4..e + 8].try_into().unwrap());
-            out.push((tid, w));
+            let q   = self.mmap[e + 4];
+            let w_max = self.vocab_entry(tid).w_max;
+            out.push((tid, dequantize_log_u8(q, w_max)));
         }
         out
     }
 
-    /// Cosine similarity via posting lists. Row vectors are L2-normalised at
-    /// build time, so dot product == cosine similarity.
+    /// Cosine similarity via posting lists. Row vectors were L2-normalised
+    /// pre-quantization, so dot product approximates cosine similarity.
     pub fn similar(&self, doc_id: DocId, limit: usize) -> Result<Vec<(DocId, f32)>> {
         let idx = doc_id as usize;
         if idx >= self.doc_count {
@@ -286,13 +297,15 @@ impl TfidfIndex {
             let ve = self.vocab_entry(tid);
             let p_base = self.postings_blob_off + ve.postings_offset as usize;
             let p_count = ve.postings_count as usize;
+            let w_max = ve.w_max;
             for j in 0..p_count {
                 let p = p_base + j * POSTING_ENTRY_SIZE;
                 let cand_doc = u32::from_le_bytes(self.mmap[p..p + 4].try_into().unwrap());
                 if cand_doc == doc_id {
                     continue;
                 }
-                let cand_w = f32::from_le_bytes(self.mmap[p + 4..p + 8].try_into().unwrap());
+                let q = self.mmap[p + 4];
+                let cand_w = dequantize_log_u8(q, w_max);
                 *scores.entry(cand_doc).or_insert(0.0) += seed_w * cand_w;
             }
         }
@@ -306,8 +319,6 @@ impl TfidfIndex {
         Ok(ranked)
     }
 
-    /// Shared n-grams between seed and candidate, with TF-IDF contributions.
-    /// Requires the seed text so we can recover n-gram strings from hashes.
     pub fn shared_ngrams_with_seed_text(
         &self,
         seed_doc: DocId,
@@ -413,8 +424,9 @@ impl TfidfIndex {
             (row_nnz as f64) / ((docs * cols) as f64)
         };
         serde_json::json!({
-            "schema": "sinorag-tfidf-v2",
-            "version": 2,
+            "schema": "sinorag-tfidf-v3",
+            "version": 3,
+            "quantization": "u8-log",
             "documents": docs,
             "matrix_shape": [docs, cols],
             "matrix_nnz": row_nnz,
@@ -435,18 +447,20 @@ impl TfidfIndex {
         })
     }
 
-    /// Header-only read for `info` on huge files. Avoids mmapping the whole
-    /// file (cheap either way, but explicit and matches phrase-index `header_info`).
+    /// Header-only read for `info` on huge files.
     pub fn header_info(path: &Path) -> Result<serde_json::Value> {
         let mut file = File::open(path)?;
         let mut hdr = [0u8; HEADER_SIZE];
         file.read_exact(&mut hdr)?;
-        if &hdr[0..8] != MAGIC_TFIDF_V2 {
-            anyhow::bail!("invalid TF-IDF magic");
+        if &hdr[0..8] != MAGIC_TFIDF_V3 {
+            anyhow::bail!(
+                "invalid TF-IDF magic (expected v3 `SRTF3VAA`; rebuild required \
+                 — v2 files are not readable by v3 code)"
+            );
         }
         let version = u16::from_le_bytes([hdr[8], hdr[9]]);
-        if version != 2 {
-            anyhow::bail!("unsupported TF-IDF version: {}", version);
+        if version != 3 {
+            anyhow::bail!("unsupported TF-IDF version: {} (expected 3)", version);
         }
         let vocab_count  = u32::from_le_bytes(hdr[HDR_VOCAB_COUNT].try_into()?) as usize;
         let doc_count    = u32::from_le_bytes(hdr[HDR_DOC_COUNT].try_into()?) as usize;
@@ -462,8 +476,9 @@ impl TfidfIndex {
         let post_blob_len = u64::from_le_bytes(hdr[HDR_POST_BLOB_LEN].try_into()?);
         let file_bytes = std::fs::metadata(path)?.len();
         Ok(serde_json::json!({
-            "schema": "sinorag-tfidf-v2",
+            "schema": "sinorag-tfidf-v3",
             "version": version,
+            "quantization": "u8-log",
             "documents": doc_count,
             "features": vocab_count,
             "row_blob_bytes": row_blob_len,
@@ -516,9 +531,6 @@ pub fn long_common_substrings(a: &str, b: &str, min_len: usize, limit: usize) ->
 // External-sort builder helpers
 // ---------------------------------------------------------------------------
 
-/// Stable resume key for a parquet file: the last two path components
-/// (partition + filename), e.g. `source_corpus=kanripo/part-000123.parquet`.
-/// Invariant to absolute/relative invocation and to moves of the corpus root.
 fn progress_key(p: &Path) -> String {
     let comps: Vec<String> = p
         .components()
@@ -618,9 +630,6 @@ impl BucketWriterCache {
 // Build entry point
 // ---------------------------------------------------------------------------
 
-// Default temp dir is derived from the output index path
-// (`<out>.work/`). Set inside `build()` when `temp_dir` is None.
-
 pub fn build(
     parquet_path: PathBuf,
     doc_table_path: PathBuf,
@@ -635,7 +644,7 @@ pub fn build(
         PathBuf::from(p)
     });
 
-    eprintln!("=== TF-IDF builder ===");
+    eprintln!("=== TF-IDF builder (v3, u8-log quantized) ===");
     eprintln!("Parquet : {}", parquet_path.display());
     eprintln!("DocTable: {}", doc_table_path.display());
     eprintln!("Output  : {}", out_path.display());
@@ -646,7 +655,6 @@ pub fn build(
     eprintln!("Buckets : {}", bucket_count);
     eprintln!("Temp dir: {}", temp_dir.display());
 
-    // Phase marker paths — checked to determine whether to resume or start fresh.
     let phase1_done    = temp_dir.join("phase1.done");
     let phase1_prog    = temp_dir.join("phase1_progress.txt");
     let phase2_vocab   = temp_dir.join("phase2.vocab.bin");
@@ -691,9 +699,6 @@ pub fn build(
     } else {
         eprintln!("\n[Phase 1] DF buckets...");
 
-        // Use a stable key (last 2 path segments, e.g.
-        // `source_corpus=kanripo/part-000123.parquet`) so resume survives
-        // relative/absolute invocations and corpus-root moves.
         let mut completed: FxHashSet<String> = FxHashSet::default();
         if phase1_prog.exists() {
             for line in fs::read_to_string(&phase1_prog)?.lines() {
@@ -709,9 +714,6 @@ pub fn build(
             .collect();
 
         let nthreads = rayon::current_num_threads();
-        // Reserve ~300 handles for OS + parquet readers; distribute the rest
-        // across threads.  Assumes the common default ulimit of 1024.
-        // Running `ulimit -n 65536` before the binary removes this constraint.
         let handles_per_thread = (700usize / nthreads.max(1)).max(4).min(64);
         eprintln!(
             "  {} pending files on {} threads ({} handles/thread)",
@@ -756,7 +758,6 @@ pub fn build(
             Ok(())
         })?;
 
-        // Merge per-thread bucket files into the shared bucket files.
         eprintln!("  Merging {} threads × {} buckets...", nthreads, bucket_count);
         for bucket_idx in 0..bucket_count {
             let main = df_dir.join(format!("bucket-{:04}.bin", bucket_idx));
@@ -792,8 +793,6 @@ pub fn build(
     } else {
         eprintln!("\n[Phase 2] Building vocabulary...");
 
-        // Each bucket's hashes are disjoint (hash % bucket_count == bucket_idx),
-        // so bucket DF maps can be merged with extend (no key collision).
         let bucket_dfs: Vec<Vec<(u64, u32)>> = (0..bucket_count)
             .into_par_iter()
             .map(|bucket_idx| -> Result<Vec<(u64, u32)>> {
@@ -812,7 +811,6 @@ pub fn build(
                 }
                 records.sort_unstable();
                 records.dedup();
-                // Count distinct doc_ids per hash = DF for that n-gram.
                 let mut local: Vec<(u64, u32)> = Vec::new();
                 let mut i = 0;
                 while i < records.len() {
@@ -876,10 +874,10 @@ pub fn build(
                 df: *df,
                 postings_offset: 0,
                 postings_count: 0,
+                w_max: 0.0,
             })
             .collect();
 
-        // Save for resume — if Phase 3+ gets interrupted, we reload these.
         fs::write(&phase2_vocab,  bincode::serialize(&vocab_entries)?)?;
         fs::write(&phase2_idf_f,  bincode::serialize(&idf)?)?;
         fs::write(&phase2_termid, bincode::serialize(&term_to_id)?)?;
@@ -887,8 +885,12 @@ pub fn build(
         (vocab_entries, idf, term_to_id)
     };
 
+    let vocab_count = vocab_entries.len();
+
     // -----------------------------------------------------------------------
     // Phase 3 — rows + posting bucket writes (parallel)
+    // The writer thread accumulates an *intermediate* f32 row blob and
+    // tracks per-term w_max (largest weight ever observed).
     // -----------------------------------------------------------------------
     eprintln!("\n[Phase 3] Rows + posting buckets...");
     let nthreads = rayon::current_num_threads();
@@ -897,20 +899,30 @@ pub fn build(
         fs::create_dir_all(post_dir.join(format!("t{}", t)))?;
     }
 
-    // A dedicated writer thread assembles the row_blob so parallel compute
-    // threads never contend on it.  Channel is bounded to apply back-pressure.
+    // Intermediate row bytes are (term_id u32, weight f32) = 8 B per entry.
+    const ROW_F32_ENTRY: usize = 8;
+
     let (row_tx, row_rx) = std::sync::mpsc::sync_channel::<(DocId, Vec<u8>)>(8192);
     let writer_handle = {
         let mut row_offsets = vec![u64::MAX; doc_count];
         let mut row_lengths = vec![0u32; doc_count];
-        let mut row_blob: Vec<u8> = Vec::new();
+        let mut row_blob_f32: Vec<u8> = Vec::new();
+        let mut w_max: Vec<f32> = vec![0.0; vocab_count];
         std::thread::spawn(move || {
             for (doc_id, bytes) in row_rx {
-                row_offsets[doc_id as usize] = row_blob.len() as u64;
-                row_lengths[doc_id as usize] = (bytes.len() / ROW_ENTRY_SIZE) as u32;
-                row_blob.extend_from_slice(&bytes);
+                row_offsets[doc_id as usize] = row_blob_f32.len() as u64;
+                row_lengths[doc_id as usize] = (bytes.len() / ROW_F32_ENTRY) as u32;
+                // Track per-term w_max while consuming the row.
+                for chunk in bytes.chunks_exact(ROW_F32_ENTRY) {
+                    let tid = u32::from_le_bytes(chunk[0..4].try_into().unwrap()) as usize;
+                    let w = f32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                    if w > w_max[tid] {
+                        w_max[tid] = w;
+                    }
+                }
+                row_blob_f32.extend_from_slice(&bytes);
             }
-            (row_offsets, row_lengths, row_blob)
+            (row_offsets, row_lengths, row_blob_f32, w_max)
         })
     };
 
@@ -919,8 +931,6 @@ pub fn build(
     let min_n    = params.min_ngram;
     let max_n    = params.max_ngram;
 
-    // try_for_each_with clones row_tx once per rayon worker; when it returns,
-    // all clones are dropped and the channel closes, ending the writer loop.
     files.par_iter().try_for_each_with(row_tx, |tx, fp| -> Result<()> {
         let t = rayon::current_thread_index().unwrap_or(0);
         let mut post_w = BucketWriterCache::new(post_dir.join(format!("t{}", t)), handles_per_thread);
@@ -961,7 +971,7 @@ pub fn build(
                 }
                 row.sort_unstable_by_key(|(tid, _)| *tid);
 
-                let mut row_bytes = Vec::with_capacity(row.len() * ROW_ENTRY_SIZE);
+                let mut row_bytes = Vec::with_capacity(row.len() * ROW_F32_ENTRY);
                 for (tid, w) in &row {
                     row_bytes.extend_from_slice(&tid.to_le_bytes());
                     row_bytes.extend_from_slice(&w.to_le_bytes());
@@ -983,15 +993,21 @@ pub fn build(
         Ok(())
     })?;
 
-    let (row_offsets, row_lengths, row_blob) = writer_handle
+    let (row_offsets_f32, row_lengths, row_blob_f32, w_max) = writer_handle
         .join()
         .map_err(|_| anyhow::anyhow!("row writer thread panicked"))?;
 
     eprintln!(
-        "  Row blob: {} bytes ({:.1} MB)",
-        row_blob.len(),
-        row_blob.len() as f64 / 1e6
+        "  Intermediate f32 row blob: {} bytes ({:.1} MB)",
+        row_blob_f32.len(),
+        row_blob_f32.len() as f64 / 1e6
     );
+
+    // Persist w_max into vocab entries now (used both by Phase 4 quantization
+    // and by the final saved index).
+    for (tid, entry) in vocab_entries.iter_mut().enumerate() {
+        entry.w_max = w_max[tid];
+    }
 
     // Merge per-thread posting bucket files.
     eprintln!("  Merging posting thread buckets...");
@@ -1014,13 +1030,12 @@ pub fn build(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 4 — merge posting buckets (parallel)
+    // Phase 4 — merge posting buckets, quantize on emit (parallel)
     // -----------------------------------------------------------------------
-    eprintln!("\n[Phase 4] Merging posting buckets...");
+    eprintln!("\n[Phase 4] Merging posting buckets + quantizing...");
 
-    // Each bucket produces a sorted (term_id, count, postings_bytes) list.
-    // Buckets contain disjoint term_ids, so the final assembly is a simple
-    // sequential extend — no locking needed.
+    let w_max_arc: Arc<Vec<f32>> = Arc::new(w_max);
+
     let bucket_results: Vec<Vec<(TermId, u32, Vec<u8>)>> = (0..bucket_count)
         .into_par_iter()
         .map(|bucket_idx| -> Result<Vec<(TermId, u32, Vec<u8>)>> {
@@ -1047,6 +1062,7 @@ pub fn build(
             let mut i = 0;
             while i < records.len() {
                 let tid = records[i].0;
+                let wm = w_max_arc[tid as usize];
                 let mut j = i;
                 while j < records.len() && records[j].0 == tid {
                     j += 1;
@@ -1056,7 +1072,7 @@ pub fn build(
                 for k in i..j {
                     let (_, did, w) = records[k];
                     bytes.extend_from_slice(&did.to_le_bytes());
-                    bytes.extend_from_slice(&w.to_le_bytes());
+                    bytes.push(quantize_log_u8(w, wm));
                 }
                 out.push((tid, count, bytes));
                 i = j;
@@ -1075,13 +1091,48 @@ pub fn build(
     }
     let _ = fs::remove_dir_all(&post_dir);
     eprintln!(
-        "  Postings blob: {} bytes ({:.1} MB)",
+        "  Quantized postings blob: {} bytes ({:.1} MB)",
         postings_blob.len(),
         postings_blob.len() as f64 / 1e6
     );
 
     // -----------------------------------------------------------------------
-    // Save — write directly from build's local Vecs (no in-memory `TfidfIndex`).
+    // Quantize row blob — second pass converting the intermediate f32 blob
+    // into a packed 5-byte/entry quantized blob keyed by doc_id order.
+    // -----------------------------------------------------------------------
+    eprintln!("\n[Quantize] Re-emitting row blob with u8 weights...");
+    let mut row_blob_q: Vec<u8> = Vec::with_capacity(row_blob_f32.len() * 5 / 8);
+    let mut row_offsets_q: Vec<u64> = vec![u64::MAX; doc_count];
+    for doc_id in 0..doc_count {
+        let off_f32 = row_offsets_f32[doc_id];
+        if off_f32 == u64::MAX {
+            continue;
+        }
+        let len = row_lengths[doc_id] as usize;
+        if len == 0 {
+            row_offsets_q[doc_id] = row_blob_q.len() as u64;
+            continue;
+        }
+        row_offsets_q[doc_id] = row_blob_q.len() as u64;
+        let base = off_f32 as usize;
+        for k in 0..len {
+            let e = base + k * ROW_F32_ENTRY;
+            let tid = u32::from_le_bytes(row_blob_f32[e..e + 4].try_into().unwrap());
+            let w   = f32::from_le_bytes(row_blob_f32[e + 4..e + 8].try_into().unwrap());
+            let wm  = vocab_entries[tid as usize].w_max;
+            row_blob_q.extend_from_slice(&tid.to_le_bytes());
+            row_blob_q.push(quantize_log_u8(w, wm));
+        }
+    }
+    drop(row_blob_f32);
+    eprintln!(
+        "  Quantized row blob: {} bytes ({:.1} MB)",
+        row_blob_q.len(),
+        row_blob_q.len() as f64 / 1e6
+    );
+
+    // -----------------------------------------------------------------------
+    // Save
     // -----------------------------------------------------------------------
     eprintln!("\n[Save] Writing index...");
     write_index_file(
@@ -1091,9 +1142,9 @@ pub fn build(
         &vocab_entries,
         &idf,
         doc_count,
-        &row_offsets,
+        &row_offsets_q,
         &row_lengths,
-        &row_blob,
+        &row_blob_q,
         &postings_blob,
     )?;
 
@@ -1104,7 +1155,7 @@ pub fn build(
 }
 
 // ---------------------------------------------------------------------------
-// Free function: write the on-disk index from the builder's in-memory state
+// Write the on-disk v3 index from the builder's in-memory state
 // ---------------------------------------------------------------------------
 
 fn write_index_file(
@@ -1138,8 +1189,8 @@ fn write_index_file(
     let post_blob_off = row_blob_off + row_blob_len;
 
     let mut hdr = vec![0u8; HEADER_SIZE];
-    hdr[0..8].copy_from_slice(MAGIC_TFIDF_V2);
-    hdr[8..10].copy_from_slice(&2u16.to_le_bytes());
+    hdr[0..8].copy_from_slice(MAGIC_TFIDF_V3);
+    hdr[8..10].copy_from_slice(&3u16.to_le_bytes());
     hdr[HDR_VOCAB_COUNT].copy_from_slice(&vocab_count.to_le_bytes());
     hdr[HDR_DOC_COUNT].copy_from_slice(&doc_count_u32.to_le_bytes());
     hdr[HDR_MIN_NGRAM].copy_from_slice(&(params.min_ngram as u16).to_le_bytes());
@@ -1168,6 +1219,7 @@ fn write_index_file(
         f.write_all(&e.df.to_le_bytes())?;
         f.write_all(&e.postings_offset.to_le_bytes())?;
         f.write_all(&e.postings_count.to_le_bytes())?;
+        f.write_all(&e.w_max.to_le_bytes())?;
     }
     for &v in idf {
         f.write_all(&v.to_le_bytes())?;
@@ -1225,3 +1277,7 @@ fn round_f64(value: f64, places: i32) -> f64 {
     let factor = 10f64.powi(places);
     (value * factor).round() / factor
 }
+
+// idf_at is only used internally for diagnostics; keep it from being dead-stripped.
+#[allow(dead_code)]
+fn _idf_keep_alive(t: &TfidfIndex, tid: TermId) -> f32 { t.idf_at(tid) }

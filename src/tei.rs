@@ -3,7 +3,6 @@ use crate::normalize::{collapse_whitespace, contains_cjk, normalize_zh};
 use anyhow::{Context, Result};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
@@ -23,7 +22,7 @@ const SKIP_TEXT_TAGS: &[&str] = &[
     "space",
 ];
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BuddhistMeta {
     #[serde(default = "default_source_corpus")]
     pub source_corpus: String,
@@ -65,6 +64,33 @@ pub struct BuddhistMeta {
     pub main_title: String,
     #[serde(default = "default_period_rank")]
     pub period_rank: i32,
+}
+
+impl Default for BuddhistMeta {
+    fn default() -> Self {
+        Self {
+            source_corpus: default_source_corpus(),
+            source_work_id: String::new(),
+            source_section_id: String::new(),
+            source_locator: String::new(),
+            source_url: String::new(),
+            edition_siglum: String::new(),
+            edition_label: String::new(),
+            rights_id: String::new(),
+            rights_notes: String::new(),
+            retrieval_method: String::new(),
+            snapshot_id: String::new(),
+            quality_flags_json: String::new(),
+            canon: String::new(),
+            canon_name: String::new(),
+            traditions: Vec::new(),
+            period: String::new(),
+            origin: String::new(),
+            author: String::new(),
+            main_title: String::new(),
+            period_rank: default_period_rank(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -437,8 +463,8 @@ impl ActivePassage {
             div_path: self.div_path,
             heading: self.heading,
             heading_path: self.heading_path,
-            from_lb: None,
-            to_lb: None,
+            from_lb,
+            to_lb,
             passage_ord_in_file: 0,
             zh_text_raw: raw.clone(),
             zh_text_normalized: normalized.clone(),

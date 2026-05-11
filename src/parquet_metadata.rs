@@ -69,7 +69,6 @@ impl Default for ParquetMetadataCache {
     }
 }
 
-/// Global metadata cache instance.
 lazy_static::lazy_static! {
     static ref GLOBAL_CACHE: ParquetMetadataCache = ParquetMetadataCache::new();
 }

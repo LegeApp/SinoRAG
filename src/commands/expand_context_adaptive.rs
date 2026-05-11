@@ -3,7 +3,7 @@
 //! inside it. Climbs the tree from the leaf PassageRange up through
 //! Division → Work, stopping at Work. Never returns whole corpora.
 
-use crate::catalog_index::{CorpusCatalogIndex, NodeId, OutlineNodeKind};
+use crate::catalog_index::{CorpusCatalogIndex, OutlineNodeKind};
 use crate::datafusion_store::DataFusionStore;
 use crate::jsonout::write_or_print;
 use anyhow::{anyhow, Result};

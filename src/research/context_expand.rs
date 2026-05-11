@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::datafusion_store::{sql_literal, DataFusionStore};
 use crate::research::format_citation;

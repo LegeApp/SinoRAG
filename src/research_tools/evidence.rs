@@ -3,7 +3,6 @@ use crate::document_table::DocumentTable;
 use crate::research::quote_for_phrase;
 use crate::research_tools::common::EvidencePassage;
 use anyhow::Result;
-use std::path::Path;
 
 /// Load evidence passages for a set of doc_ids from parquet.
 /// Preserves the input doc_id order.

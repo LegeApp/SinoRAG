@@ -8,7 +8,7 @@
 use crate::catalog_index::CorpusCatalogIndex;
 use crate::document_table::{match_index_fingerprint, DocumentTable, IndexCoverage};
 use crate::pack::{
-    self, IndexRef, IndexSet, Pack, PackManifest,
+    self, IndexRef, IndexSet, Pack,
     DEFAULT_CATALOG, DEFAULT_DOC_TABLE, DEFAULT_PHRASE, DEFAULT_TFIDF,
 };
 use crate::phrase_index::PhraseIndex;

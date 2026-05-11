@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+    Array, BooleanArray, Float64Array, Int32Array, Int64Array, LargeStringArray, StringArray,
+    StringViewArray,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::*;
@@ -60,7 +61,7 @@ impl DataFusionStore {
             sql_literal(passage_id)
         );
 
-        let mut rows = self.query_json(&sql).await?;
+        let rows = self.query_json(&sql).await?;
         if let Some(mut row) = rows.into_iter().next() {
             let from_lb = row.get("from_lb").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let to_lb = row.get("to_lb").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -169,19 +170,19 @@ fn array_value_to_json(array: &dyn Array, row_idx: usize, column_name: &str) -> 
         return Value::Null;
     }
 
+    // DataFusion 40+ returns StringViewArray by default for string columns read from parquet.
+    if let Some(a) = array.as_any().downcast_ref::<StringViewArray>() {
+        return string_to_json(a.value(row_idx), column_name);
+    }
+
+    // Standard Utf8 — written by our storage layer; also returned by some DataFusion operations.
     if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
-        let value = a.value(row_idx).to_string();
+        return string_to_json(a.value(row_idx), column_name);
+    }
 
-        // traditions is JSON text in Parquet, preserve old behavior of returning as array
-        if column_name == "traditions" {
-            return serde_json::from_str(&value).unwrap_or(Value::String(value));
-        }
-
-        if column_name.ends_with("_json") {
-            return serde_json::from_str(&value).unwrap_or(Value::String(value));
-        }
-
-        return Value::String(value);
+    // LargeUtf8 — produced by some DataFusion aggregate / cast operations.
+    if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return string_to_json(a.value(row_idx), column_name);
     }
 
     if let Some(a) = array.as_any().downcast_ref::<BooleanArray>() {
@@ -201,4 +202,16 @@ fn array_value_to_json(array: &dyn Array, row_idx: usize, column_name: &str) -> 
     }
 
     Value::Null
+}
+
+/// Apply column-specific JSON parsing (traditions / *_json fields) to a raw string value.
+fn string_to_json(value: &str, column_name: &str) -> Value {
+    // traditions is stored as a JSON array string in parquet
+    if column_name == "traditions" {
+        return serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+    }
+    if column_name.ends_with("_json") {
+        return serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+    }
+    Value::String(value.to_string())
 }

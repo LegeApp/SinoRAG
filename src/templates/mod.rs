@@ -28,11 +28,69 @@ pub enum GraphKind {
 // ---------------------------------------------------------------------------
 
 pub fn evidence_items(payload: &Value) -> Vec<Value> {
-    payload
-        .get("evidence")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
+    if let Some(items) = payload.get("evidence").and_then(Value::as_array) {
+        return items.clone();
+    }
+
+    let mut out = Vec::new();
+
+    if let Some(claims) = payload.get("accepted_claims").and_then(Value::as_array) {
+        for claim in claims {
+            let claim_id = claim
+                .get("claim_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claim_type = claim
+                .get("claim_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let ring = claim
+                .get("ring")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let matched_phrases = claim
+                .get("matched_phrases")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+
+            if let Some(evidence) = claim.get("evidence").and_then(Value::as_array) {
+                for item in evidence {
+                    let mut item = item.clone();
+
+                    if let Some(obj) = item.as_object_mut() {
+                        obj.insert("claim_id".to_string(), json!(claim_id));
+                        obj.insert("claim_type".to_string(), json!(claim_type));
+                        obj.insert("ring".to_string(), json!(ring));
+                        obj.insert("matched_phrases".to_string(), matched_phrases.clone());
+
+                        if !obj.contains_key("zh_quote") {
+                            if let Some(q) = obj.get("quote_zh").cloned() {
+                                obj.insert("zh_quote".to_string(), q);
+                            }
+                        }
+
+                        if !obj.contains_key("evidence_role") {
+                            if let Some(side) = obj.get("side").and_then(|v| v.as_str()) {
+                                let role = match side {
+                                    "zen" => "seed",
+                                    "canon" => "candidate",
+                                    other => other,
+                                };
+                                obj.insert("evidence_role".to_string(), json!(role));
+                            }
+                        }
+                    }
+
+                    out.push(item);
+                }
+            }
+        }
+    }
+
+    out
 }
 
 pub fn query_raw(payload: &Value) -> String {

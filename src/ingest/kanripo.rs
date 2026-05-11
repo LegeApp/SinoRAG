@@ -14,10 +14,8 @@
 use crate::models::PassageRecord;
 use crate::normalize::{contains_cjk, normalize_zh};
 use anyhow::{Context, Result};
-use fs::File;
 use rayon::prelude::*;
 use serde_json::json;
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
