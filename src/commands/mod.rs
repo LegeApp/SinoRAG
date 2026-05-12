@@ -87,8 +87,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Ingest {
             source,
             path,
-            sorting_data_dir,
-            out,
             out_jsonl,
             out_parquet,
             zen_only,
@@ -109,17 +107,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                     return cef::ingest(path, out_parquet).await;
                 }
                 IngestSource::Terebess => {
-                    let images_dir = out.as_ref()
-                        .map(|o| o.join("derived/terebess_images"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("data/derived/terebess_images"));
+                    let images_dir = std::path::PathBuf::from("data/derived/terebess_images");
                     return ingest_terebess::run(path, out_parquet, images_dir, 500);
                 }
             };
             ingest::run(
                 corpus,
                 kanripo_input,
-                sorting_data_dir,
-                out,
                 out_jsonl,
                 out_parquet,
                 zen_only,

@@ -3,8 +3,6 @@ use crate::normalize::{collapse_whitespace, contains_cjk, normalize_zh};
 use anyhow::{Context, Result};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -22,47 +20,27 @@ const SKIP_TEXT_TAGS: &[&str] = &[
     "space",
 ];
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BuddhistMeta {
-    #[serde(default = "default_source_corpus")]
     pub source_corpus: String,
-    #[serde(default)]
     pub source_work_id: String,
-    #[serde(default)]
     pub source_section_id: String,
-    #[serde(default)]
     pub source_locator: String,
-    #[serde(default)]
     pub source_url: String,
-    #[serde(default)]
     pub edition_siglum: String,
-    #[serde(default)]
     pub edition_label: String,
-    #[serde(default)]
     pub rights_id: String,
-    #[serde(default)]
     pub rights_notes: String,
-    #[serde(default)]
     pub retrieval_method: String,
-    #[serde(default)]
     pub snapshot_id: String,
-    #[serde(default)]
     pub quality_flags_json: String,
-    #[serde(default)]
     pub canon: String,
-    #[serde(default)]
     pub canon_name: String,
-    #[serde(default)]
     pub traditions: Vec<String>,
-    #[serde(default)]
     pub period: String,
-    #[serde(default)]
     pub origin: String,
-    #[serde(default)]
     pub author: String,
-    #[serde(default)]
     pub main_title: String,
-    #[serde(default = "default_period_rank")]
     pub period_rank: i32,
 }
 
@@ -93,119 +71,190 @@ impl Default for BuddhistMeta {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct MetadataPayload {
-    #[serde(default)]
-    detailed_analysis: Vec<MetadataItem>,
+/// Extract Buddhist metadata directly from TEI XML file during parsing
+pub fn extract_metadata_from_xml(xml_path: &Path, rel_path: &str) -> BuddhistMeta {
+    let file = File::open(xml_path);
+    let mut meta = BuddhistMeta::default();
+    
+    // Derive source_work_id from filename (e.g., T/T01/T01n0001.xml -> T01n0001)
+    if let Some(filename) = xml_path.file_stem().and_then(|s| s.to_str()) {
+        meta.source_work_id = filename.to_string();
+    }
+    
+    // Extract canon from file path (first directory component)
+    let path_parts: Vec<&str> = rel_path.split('/').collect();
+    if path_parts.len() >= 1 {
+        meta.canon = path_parts[0].to_string();
+    }
+    
+    // Parse TEI header for additional metadata
+    if let Ok(file) = file {
+        let reader = Reader::from_reader(BufReader::new(file));
+        let mut buf = Vec::new();
+        let mut in_header = false;
+        let mut in_title = false;
+        let mut in_author = false;
+        let mut in_source_desc = false;
+        let mut in_availability = false;
+        let mut current_text = String::new();
+        
+        let mut reader = reader;
+        reader.config_mut().trim_text(true);
+        
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    let name_bytes = e.name().as_ref().to_vec();
+                    let name = local_name(&name_bytes);
+                    match name {
+                        "teiHeader" => in_header = true,
+                        "title" if in_header => in_title = true,
+                        "author" if in_header => in_author = true,
+                        "sourceDesc" if in_header => in_source_desc = true,
+                        "availability" if in_header => in_availability = true,
+                        _ => {}
+                    }
+                    buf.clear();
+                }
+                Ok(Event::Text(e)) => {
+                    let text = String::from_utf8_lossy(e.as_ref()).to_string();
+                    if in_title && meta.main_title.is_empty() {
+                        meta.main_title = text.trim().to_string();
+                    } else if in_author && meta.author.is_empty() {
+                        meta.author = text.trim().to_string();
+                    } else if in_source_desc {
+                        // Look for URLs in source description
+                        if text.contains("http") {
+                            let url_start = text.find("http").unwrap_or(0);
+                            let url_end = text[url_start..]
+                                .find(|c: char| !c.is_alphanumeric() && !"/:.?=&_-".contains(c))
+                                .map(|i| url_start + i)
+                                .unwrap_or(text.len());
+                            let url = &text[url_start..url_end];
+                            if url.starts_with("http") {
+                                meta.source_url = url.to_string();
+                            }
+                        }
+                    } else if in_availability {
+                        current_text.push_str(&text);
+                    }
+                    buf.clear();
+                }
+                Ok(Event::End(e)) => {
+                    let name_bytes = e.name().as_ref().to_vec();
+                    let name = local_name(&name_bytes);
+                    match name {
+                        "teiHeader" => in_header = false,
+                        "title" => in_title = false,
+                        "author" => in_author = false,
+                        "sourceDesc" => in_source_desc = false,
+                        "availability" => {
+                            in_availability = false;
+                            if !current_text.is_empty() {
+                                meta.rights_notes = collapse_whitespace(&current_text);
+                                current_text.clear();
+                            }
+                        }
+                        _ => {}
+                    }
+                    buf.clear();
+                }
+                Ok(Event::Eof) => break,
+                Ok(_) => buf.clear(),
+                Err(_) => break,
+            }
+        }
+    }
+    
+    // Classify tradition, period, origin from available text
+    let text_content = format!("{} {} {}", meta.main_title, meta.author, meta.rights_notes);
+    meta.traditions = classify_tradition(&text_content);
+    meta.period = classify_period(&text_content);
+    meta.origin = classify_origin(&text_content);
+    meta.period_rank = period_rank(&meta.period);
+    
+    meta
 }
 
-#[derive(Debug, Deserialize)]
-struct MetadataItem {
-    #[serde(default)]
-    file: String,
-    #[serde(default)]
-    source_corpus: String,
-    #[serde(default)]
-    source_work_id: String,
-    #[serde(default)]
-    source_section_id: String,
-    #[serde(default)]
-    source_locator: String,
-    #[serde(default)]
-    source_url: String,
-    #[serde(default)]
-    edition_siglum: String,
-    #[serde(default)]
-    edition_label: String,
-    #[serde(default)]
-    rights_id: String,
-    #[serde(default)]
-    rights_notes: String,
-    #[serde(default)]
-    retrieval_method: String,
-    #[serde(default)]
-    snapshot_id: String,
-    #[serde(default)]
-    quality_flags_json: String,
-    #[serde(default)]
-    canon: String,
-    #[serde(default)]
-    canon_name: String,
-    #[serde(default)]
-    traditions: Vec<String>,
-    period: Option<String>,
-    #[serde(default)]
-    origin: String,
-    #[serde(default)]
-    author: String,
-    #[serde(default)]
-    main_title: String,
+fn classify_tradition(text: &str) -> Vec<String> {
+    let text_lower = text.to_lowercase();
+    let mut traditions = Vec::new();
+    
+    // Chinese Buddhist traditions
+    if text_lower.contains("禪") || text_lower.contains("禅") || text_lower.contains("chan") || text_lower.contains("zen") {
+        traditions.push("Chan/Zen".to_string());
+    }
+    if text_lower.contains("淨土") || text_lower.contains("净土") || text_lower.contains("阿彌陀") {
+        traditions.push("Pure Land".to_string());
+    }
+    if text_lower.contains("天台") || text_lower.contains("法華") {
+        traditions.push("Tiantai".to_string());
+    }
+    if text_lower.contains("華嚴") || text_lower.contains("华严") {
+        traditions.push("Huayan".to_string());
+    }
+    if text_lower.contains("律") || text_lower.contains("戒律") || text_lower.contains("毗奈耶") {
+        traditions.push("Vinaya".to_string());
+    }
+    if text_lower.contains("中觀") || text_lower.contains("中論") {
+        traditions.push("Madhyamaka".to_string());
+    }
+    if text_lower.contains("瑜伽") || text_lower.contains("唯識") {
+        traditions.push("Yogacara".to_string());
+    }
+    if text_lower.contains("密") || text_lower.contains("密教") {
+        traditions.push("Esoteric".to_string());
+    }
+    if text_lower.contains("註") || text_lower.contains("疏") || text_lower.contains("論") {
+        traditions.push("Commentarial".to_string());
+    }
+    if text_lower.contains("史") || text_lower.contains("傳") {
+        traditions.push("Historical".to_string());
+    }
+    
+    if traditions.is_empty() {
+        traditions.push("General/Unspecified".to_string());
+    }
+    
+    traditions
 }
 
-pub fn load_buddhist_metadata(
-    corpus_root: &Path,
-    sorting_data_dir: Option<&Path>,
-) -> Result<HashMap<String, BuddhistMeta>> {
-    let mut candidates = Vec::new();
-    if let Some(dir) = sorting_data_dir {
-        candidates.push(dir.join("buddhist_metadata_analysis.json"));
+fn classify_period(text: &str) -> String {
+    if text.contains("唐") {
+        return "Tang".to_string();
+    } else if text.contains("宋") {
+        return "Song".to_string();
+    } else if text.contains("元") {
+        return "Yuan".to_string();
+    } else if text.contains("明") {
+        return "Ming".to_string();
+    } else if text.contains("清") {
+        return "Qing".to_string();
+    } else if text.contains("漢") || text.contains("魏") || text.contains("晉") {
+        return "Pre-Tang".to_string();
+    } else if text.contains("隋") {
+        return "Sui".to_string();
+    } else if text.contains("民國") || text.contains("現代") {
+        return "Modern".to_string();
     }
-    candidates.push(
-        corpus_root
-            .join("CBETA_Sorting_Data")
-            .join("buddhist_metadata_analysis.json"),
-    );
-    if let Some(parent) = corpus_root.parent() {
-        candidates.push(
-            parent
-                .join("CBETA_Sorting_Data")
-                .join("buddhist_metadata_analysis.json"),
-        );
-    }
-
-    let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
-        return Ok(HashMap::new());
-    };
-
-    let payload: MetadataPayload = serde_json::from_slice(&std::fs::read(&path)?)?;
-    let mut out = HashMap::new();
-    for item in payload.detailed_analysis {
-        let Some(rel_path) = normalize_metadata_path(&item.file) else {
-            continue;
-        };
-        let period = item.period.unwrap_or_else(|| "Unknown Period".to_string());
-        out.insert(
-            rel_path,
-            BuddhistMeta {
-                source_corpus: if item.source_corpus.is_empty() {
-                    default_source_corpus()
-                } else {
-                    item.source_corpus
-                },
-                source_work_id: item.source_work_id,
-                source_section_id: item.source_section_id,
-                source_locator: item.source_locator,
-                source_url: item.source_url,
-                edition_siglum: item.edition_siglum,
-                edition_label: item.edition_label,
-                rights_id: item.rights_id,
-                rights_notes: item.rights_notes,
-                retrieval_method: item.retrieval_method,
-                snapshot_id: item.snapshot_id,
-                quality_flags_json: item.quality_flags_json,
-                canon: item.canon,
-                canon_name: item.canon_name,
-                traditions: item.traditions,
-                period_rank: period_rank(&period),
-                period,
-                origin: item.origin,
-                author: item.author,
-                main_title: item.main_title,
-            },
-        );
-    }
-    Ok(out)
+    "Unknown Period".to_string()
 }
+
+fn classify_origin(text: &str) -> String {
+    if text.contains("印度") || text.contains("天竺") {
+        return "India".to_string();
+    } else if text.contains("西域") || text.contains("中亞") {
+        return "Central Asia".to_string();
+    } else if text.contains("中國") || text.contains("漢地") || text.contains("中土") {
+        return "China".to_string();
+    } else if text.contains("高麗") || text.contains("朝鮮") {
+        return "Korea".to_string();
+    } else if text.contains("日本") {
+        return "Japan".to_string();
+    }
+    "Unknown Origin".to_string()
+}
+
 
 pub fn iter_xml_paths(corpus_root: &Path) -> Result<Vec<(PathBuf, String)>> {
     let xml_root = resolve_xml_root(corpus_root)?;
@@ -499,17 +548,6 @@ fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Option<String> {
 fn local_name(name: &[u8]) -> &str {
     let raw = std::str::from_utf8(name).unwrap_or("");
     raw.rsplit_once(':').map(|(_, local)| local).unwrap_or(raw)
-}
-
-fn normalize_metadata_path(value: &str) -> Option<String> {
-    if value.is_empty() {
-        return None;
-    }
-    let normalized = value.replace('\\', "/");
-    if let Some((_, tail)) = normalized.split_once("xml-p5/") {
-        return Some(tail.to_string());
-    }
-    Some(normalized.trim_start_matches('/').to_string())
 }
 
 fn period_rank(period: &str) -> i32 {

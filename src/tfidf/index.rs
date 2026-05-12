@@ -740,7 +740,7 @@ pub fn build(
                 let (pids, texts) = extract_columns(&batch)?;
                 let mut hash_buf: Vec<u64> = Vec::new();
                 for i in 0..batch.num_rows() {
-                    if let Some(&doc_id) = doc_table.passage_id_map.get(pids.value(i)) {
+                    if let Some(doc_id) = doc_table.doc_id(pids.value(i)) {
                         char_ngram_hashes_into(texts.value(i), min_n, max_n, &mut hash_buf);
                         for &hash in &hash_buf {
                             w.write_df_record((hash as usize) % bucket_count, hash, doc_id)?;
@@ -944,7 +944,7 @@ pub fn build(
             for i in 0..batch.num_rows() {
                 let pid  = pids.value(i);
                 let text = texts.value(i);
-                let Some(&doc_id) = doc_table.passage_id_map.get(pid) else { continue };
+                let Some(doc_id) = doc_table.doc_id(pid) else { continue };
 
                 let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
                 char_ngram_hashes_all_into(text, min_n, max_n, &mut hash_buf);

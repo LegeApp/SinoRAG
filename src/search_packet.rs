@@ -123,13 +123,12 @@ pub fn row_to_search_hit(rank: usize, row: Value, score: Option<f32>) -> Result<
         .ok_or_else(|| anyhow!("search row is not a JSON object"))?;
 
     let passage_id = get_str(obj, "passage_id")?;
-    let snippet = obj
+    let zh_text_raw = obj
         .get("zh_text_raw")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .chars()
-        .take(160)
-        .collect::<String>();
+        .to_string();
+    let snippet = zh_text_raw.chars().take(160).collect::<String>();
 
     Ok(SearchHit {
         hit_id: make_hit_id(rank),

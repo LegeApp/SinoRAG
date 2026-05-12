@@ -148,7 +148,10 @@ fn row_to_context_passage(row: &Value, relative_index: isize, is_center: bool) -
     let to_lb = row.get("to_lb").and_then(|v| v.as_str()).map(str::to_string);
 
     let citation = format_citation(row, from_lb.as_deref().unwrap_or(""), to_lb.as_deref().unwrap_or(""));
-
+let zh_text_raw = str_field(row, "zh_text_raw").unwrap_or_default().to_string();
+    let zh_text_normalized = str_field(row, "zh_text_normalized").unwrap_or_default().to_string();
+    
+    
     Ok(ContextPassage {
         relative_index,
         passage_id: str_field(row, "passage_id")?.to_string(),
@@ -161,8 +164,8 @@ fn row_to_context_passage(row: &Value, relative_index: isize, is_center: bool) -
         div_path: str_field(row, "div_path").unwrap_or_default().to_string(),
         from_lb,
         to_lb,
-        zh_text_raw: str_field(row, "zh_text_raw").unwrap_or_default().to_string(),
-        zh_text_normalized: str_field(row, "zh_text_normalized").unwrap_or_default().to_string(),
+        zh_text_raw,
+        zh_text_normalized,
         is_center,
     })
 }

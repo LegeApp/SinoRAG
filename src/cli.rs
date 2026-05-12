@@ -132,15 +132,9 @@ pub enum Command {
         source: IngestSource,
         /// Path to the corpus root directory or file.
         path: PathBuf,
-        /// Output root directory (default: data/).
-        #[arg(long)]
-        out: Option<PathBuf>,
         /// Resume from a staging dir or "auto" to pick the freshest one.
         #[arg(long)]
         resume: Option<PathBuf>,
-        /// CBETA only: path to sorting-data directory (provides period_rank ordering).
-        #[arg(long)]
-        sorting_data_dir: Option<PathBuf>,
         /// Kanripo only: ingest Zen-lineage works only.
         #[arg(long)]
         zen_only: bool,

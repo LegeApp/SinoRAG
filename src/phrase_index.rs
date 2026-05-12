@@ -761,7 +761,7 @@ pub fn build(
                 for i in 0..batch.num_rows() {
                     let pid = passage_ids.value(i);
                     let text = text_arr.value(i);
-                    let Some(&doc_id) = doc_table.passage_id_map.get(pid) else { continue };
+                    let Some(doc_id) = doc_table.doc_id(pid) else { continue };
 
                     crate::text_analyzer::analyze(text, &analyze_opts, &mut scratch);
                     for &hash in &scratch.unique {

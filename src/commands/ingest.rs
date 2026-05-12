@@ -51,8 +51,6 @@ struct CheckpointStats {
 pub async fn run(
     corpus: Option<PathBuf>,
     kanripo_input: Option<PathBuf>,
-    sorting_data_dir: Option<PathBuf>,
-    out: Option<PathBuf>,
     out_jsonl: PathBuf,
     out_parquet: PathBuf,
     zen_only: bool,
@@ -65,7 +63,7 @@ pub async fn run(
     catalog_index_out: Option<PathBuf>,
     phrase_max_memory: Option<u64>,
 ) -> Result<()> {
-    let out = out.unwrap_or_else(|| PathBuf::from("data"));
+    let out = PathBuf::from("data");
 
     if corpus.is_none() && kanripo_input.is_none() {
         anyhow::bail!("ingest requires at least one of --corpus or --kanripo-input");
@@ -198,7 +196,6 @@ pub async fn run(
 
     // -- CBETA -----------------------------------------------------------
     if let Some(corpus_root) = corpus.as_ref() {
-        let metadata = tei::load_buddhist_metadata(corpus_root, sorting_data_dir.as_deref())?;
         let paths = tei::iter_xml_paths(corpus_root)?;
         let pb = ProgressBar::new(paths.len() as u64);
         pb.set_style(
@@ -214,7 +211,7 @@ pub async fn run(
                 pb.inc(1);
                 continue;
             }
-            let meta = metadata.get(&rel_path).cloned().unwrap_or_default();
+            let meta = tei::extract_metadata_from_xml(&xml_path, &rel_path);
             if zen_only && !meta.traditions.iter().any(|t| t == "Chan/Zen") {
                 pb.inc(1);
                 continue;

@@ -210,7 +210,7 @@ fn scan_file(
         for i in 0..batch.num_rows() {
             if cols.passage_ids.is_null(i) { continue; }
             let pid = cols.passage_ids.value(i);
-            let Some(&doc_id) = doc_table.passage_id_map.get(pid) else { continue };
+            let Some(doc_id) = doc_table.doc_id(pid) else { continue };
 
             let zh = cols.zh_texts.value(i);
             let cjk_chars = zh.chars().filter(|c| is_cjk(*c)).count() as u32;
