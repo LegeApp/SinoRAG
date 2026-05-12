@@ -1,0 +1,12 @@
+# Increase the default Windows main-thread stack to 32 MiB.
+# Debug builds of the MCP server generate very large stack frames in
+# proc-macro-generated tool futures and the clap parser, which overflow
+# the default 1 MiB Windows stack at process startup / clap init.
+[target.'cfg(windows)']
+# Reserve 32 MiB stack. We pass both the GNU ld (`--stack`) and MSVC link.exe
+# (`/STACK:`) variants; only the relevant one is consumed by the active linker.
+rustflags = [
+    "-C", "link-arg=-Wl,--stack,67108864",
+    "-C", "link-arg=-Xlinker",
+    "-C", "link-arg=--stack=67108864",
+]

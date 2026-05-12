@@ -26,6 +26,10 @@ mod tfidf;
 use anyhow::Result;
 use clap::Parser;
 
+// Note: the Windows linker stack reserve is bumped to 32 MiB via
+// `.cargo/config.toml`, because debug builds generate very large stack
+// frames (proc-macro-generated MCP tool futures, clap parser) that
+// overflow the default 1 MiB Windows main-thread stack at startup.
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("warn").init();

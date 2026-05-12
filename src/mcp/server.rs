@@ -68,7 +68,6 @@ pub struct EvidenceItem {
     pub risk_flags: Vec<String>,
 }
 
-#[derive(Clone)]
 pub struct GraphDiscoveryServer {
     parquet_path: PathBuf,
     registry_path: PathBuf,
@@ -78,6 +77,23 @@ pub struct GraphDiscoveryServer {
     allow_admin_tools: bool,
     store: Arc<OnceCell<DataFusionStore>>,
     tool_router: ToolRouter<Self>,
+}
+
+impl Clone for GraphDiscoveryServer {
+    fn clone(&self) -> Self {
+        Self {
+            parquet_path: self.parquet_path.clone(),
+            registry_path: self.registry_path.clone(),
+            tfidf_index: self.tfidf_index.clone(),
+            catalog_index: self.catalog_index.clone(),
+            readonly: self.readonly,
+            allow_admin_tools: self.allow_admin_tools,
+            store: self.store.clone(),
+            // Regenerate the tool router instead of cloning - the closures
+            // in ToolRouter reference Self, causing infinite recursion if cloned
+            tool_router: Self::tool_router(),
+        }
+    }
 }
 
 impl GraphDiscoveryServer {
