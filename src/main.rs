@@ -5,7 +5,7 @@ mod datafusion_store;
 mod document_table;
 mod ingest;
 mod jsonout;
-mod mcp;
+// mod mcp;  // Commented out - requires rmcp dependency
 mod memory;
 mod models;
 mod normalize;
@@ -22,9 +22,11 @@ mod tei;
 mod templates;
 mod text_analyzer;
 mod tfidf;
+mod tools;
 
 use anyhow::Result;
 use clap::Parser;
+use tracing::Level;
 
 // Note: the Windows linker stack reserve is bumped to 32 MiB via
 // `.cargo/config.toml`, because debug builds generate very large stack
@@ -32,7 +34,9 @@ use clap::Parser;
 // overflow the default 1 MiB Windows main-thread stack at startup.
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter("warn").init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .init();
 
     // Resolve all relative paths (e.g. "data/...") against the exe's directory
     // so the binary can be invoked from any working directory.

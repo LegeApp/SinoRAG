@@ -1,63 +1,59 @@
 [package]
-name = "sinorag"
+name = "sinoragd"
 version = "0.2.0"
 edition = "2021"
 
+[[bin]]
+name = "sinoragd"
+path = "src/main.rs"
+
 [dependencies]
-clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-bincode = "1"
-zstd = "0.13"
-walkdir = "2"
-glob = "0.3"
-chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
-hex = "0.4"
-quick-xml = { version = "0.39", features = ["encoding"] }
-unicode-normalization = "0.1"
-unicode-general-category = "1"
+schemars = "1"
+
 arrow = "58"
 parquet = { version = "58", features = ["arrow"] }
 datafusion = { version = "53", features = ["parquet"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-rustc-hash = "2"
-hashbrown = "0.15"
+
 rayon = "1.12"
-ordered-float = "5"
 regex = "1"
-cbeta-pdf-creator = { path = "cbeta-pdf-creator", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
-futures = "0.3.32"
-rmcp = { path = "../rust-sdk/crates/rmcp", features = ["server", "macros", "transport-io", "schemars"] }
-schemars = "1"
-async-trait = "0.1"
-indicatif = "0.17"
-num_cpus = "1"
-lazy_static = "1.5"
 memmap2 = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
-base64 = "0.22"
-wide = "0.7"
+ordered-float = "5"
+hashbrown = "0.15"
+rustc-hash = "2"
 roaring = "0.10"
+bincode = "1"
+zstd = "0.13"
+
+quick-xml = { version = "0.39", features = ["encoding"] }
+unicode-normalization = "0.1"
+unicode-general-category = "1"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+walkdir = "2"
+glob = "0.3"
+
+lazy_static = "1.5"
+num_cpus = "1"
+base64 = "0.22"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+wide = "0.7"
+toml = "0.8"
+thiserror = "2"
+futures = "0.3.32"
+indicatif = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
-
-[features]
-default = []
-sparse-matrix = []
-pdf-export = ["dep:cbeta-pdf-creator"]
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
 
 [dev-dependencies]
 tempfile = "3"

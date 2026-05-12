@@ -172,8 +172,9 @@ pub enum Command {
 
     /// Start the MCP server (stdio or SSE transport) for agent access.
     ///
-    /// All research and analysis tools are exposed via MCP — agents should
-    /// connect here rather than calling commands directly.
+    /// All research tools are exposed via MCP for Claude/Cline/Roo-style clients.
+    /// MCP is one of three frontends to the same ToolEngine core.
+    #[command(hide = true)]  // Hidden until rmcp dependency is properly configured
     Mcp {
         /// Transport protocol: stdio (default) or sse.
         #[arg(long, default_value = "stdio")]
@@ -1047,5 +1048,65 @@ pub enum Command {
         canon: Option<String>,
         #[arg(long)]
         period: Option<String>,
+    },
+
+    // -----------------------------------------------------------------------
+    // JSON batching / tool-call commands
+    // -----------------------------------------------------------------------
+
+    /// Print manifest of available tools with schemas and descriptions.
+    ///
+    /// Used by agents to discover available tools, their input/output schemas,
+    /// required resources, and safety levels.
+    #[command(hide = true)]
+    ToolsManifest {
+        #[arg(long)]
+        pack: Option<PathBuf>,
+        #[arg(long, default_value = "json")]
+        format: String,
+        #[arg(long, default_value_t = false)]
+        include_examples: bool,
+    },
+
+    /// Call a single tool with JSON arguments.
+    ///
+    /// Example: sinoragd tool-call search --json '{"phrase":"金剛經云","limit":5}'
+    #[command(hide = true)]
+    ToolCall {
+        /// Tool name to call.
+        tool: String,
+        #[arg(long)]
+        json: Option<String>,
+        #[arg(long)]
+        json_file: Option<PathBuf>,
+        #[arg(long)]
+        pack: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        readonly: bool,
+        #[arg(long, default_value_t = false)]
+        allow_admin_tools: bool,
+    },
+
+    /// Run a batch of tools from a JSONL file.
+    ///
+    /// Example: sinoragd run-tools --input jobs.jsonl --output results.jsonl
+    #[command(hide = true)]
+    RunTools {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        pack: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        readonly: bool,
+        #[arg(long, default_value_t = false)]
+        allow_admin_tools: bool,
+        #[arg(long, default_value_t = true)]
+        continue_on_error: bool,
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+        #[arg(long)]
+        output_root: Option<PathBuf>,
     },
 }

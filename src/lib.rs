@@ -6,7 +6,7 @@ pub mod datafusion_store;
 pub mod document_table;
 pub mod ingest;
 pub mod jsonout;
-pub mod mcp;
+// pub mod mcp;  // Commented out - requires rmcp dependency
 pub mod memory;
 pub mod models;
 pub mod normalize;
@@ -22,3 +22,4 @@ pub mod tei;
 pub mod templates;
 pub mod text_analyzer;
 pub mod tfidf;
+pub mod tools;

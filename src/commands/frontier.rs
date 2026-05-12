@@ -185,7 +185,7 @@ fn looks_low_value_phrase(phrase: &str) -> bool {
     false
 }
 
-fn facet_summary(rows: &[Value]) -> Value {
+pub fn facet_summary(rows: &[Value]) -> Value {
     let mut periods = BTreeMap::new();
     let mut canons = BTreeMap::new();
     let mut origins = BTreeMap::new();
@@ -211,7 +211,7 @@ fn facet_summary(rows: &[Value]) -> Value {
     })
 }
 
-fn next_seed_candidates(rows: &[Value]) -> Vec<Value> {
+pub fn next_seed_candidates(rows: &[Value]) -> Vec<Value> {
     let mut candidates = rows.to_vec();
     candidates.sort_by(|a, b| {
         value_f64(b, "tfidf_cosine")
