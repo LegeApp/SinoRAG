@@ -19,6 +19,7 @@ mod research_tools;
 mod search_packet;
 mod storage;
 mod tei;
+mod taxonomy_legend;
 mod templates;
 mod text_analyzer;
 mod tfidf;

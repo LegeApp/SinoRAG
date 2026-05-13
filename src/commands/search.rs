@@ -27,10 +27,16 @@ pub async fn search(
         where_parts.push(string_contains_sql("zh_text_normalized", &normalized_phrase));
     }
     for t in expand_values(&tradition) {
-        where_parts.push(string_contains_sql("traditions", &t));
+        let t = crate::taxonomy_legend::resolve_tradition(&t);
+        let token = serde_json::to_string(t).unwrap_or_else(|_| format!("\"{t}\""));
+        where_parts.push(string_contains_sql("traditions", &token));
     }
-    exact_any(&mut where_parts, "period", &expand_values(&period));
-    exact_any(&mut where_parts, "origin", &expand_values(&origin));
+    let resolved_periods: Vec<String> = expand_values(&period).into_iter()
+        .map(|p| crate::taxonomy_legend::resolve_period(&p).to_string()).collect();
+    let resolved_origins: Vec<String> = expand_values(&origin).into_iter()
+        .map(|o| crate::taxonomy_legend::resolve_origin(&o).to_string()).collect();
+    exact_any(&mut where_parts, "period", &resolved_periods);
+    exact_any(&mut where_parts, "origin", &resolved_origins);
     exact_any(&mut where_parts, "canon", &expand_values(&canon));
     if let Some(author) = &author {
         where_parts.push(format!(

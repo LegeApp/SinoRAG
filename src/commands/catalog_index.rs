@@ -667,9 +667,13 @@ pub fn works(
     let catalog = CorpusCatalogIndex::load(&index_path)?;
     let mut filtered: Vec<_> = catalog.works.iter().collect();
     if let Some(t) = tradition {
+        let t = crate::taxonomy_legend::resolve_tradition(&t).to_string();
         filtered.retain(|w| w.traditions.iter().any(|tr| tr == &t));
     }
-    if let Some(p) = period { filtered.retain(|w| w.period == p); }
+    if let Some(p) = period {
+        let p = crate::taxonomy_legend::resolve_period(&p).to_string();
+        filtered.retain(|w| w.period == p);
+    }
     if let Some(c) = canon { filtered.retain(|w| w.canon == c); }
     if let Some(a) = author { filtered.retain(|w| w.author == a); }
     filtered.truncate(limit);

@@ -67,6 +67,30 @@ fn expand_optional_filter(value: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Like `expand_optional_filter` but also resolves numeric tradition IDs.
+fn expand_tradition_filter(value: Option<&str>) -> Vec<String> {
+    expand_optional_filter(value)
+        .into_iter()
+        .map(|t| crate::taxonomy_legend::resolve_tradition(&t).to_string())
+        .collect()
+}
+
+/// Like `expand_optional_filter` but also resolves numeric period IDs.
+fn expand_period_filter(value: Option<&str>) -> Vec<String> {
+    expand_optional_filter(value)
+        .into_iter()
+        .map(|p| crate::taxonomy_legend::resolve_period(&p).to_string())
+        .collect()
+}
+
+/// Like `expand_optional_filter` but also resolves numeric origin IDs.
+fn expand_origin_filter(value: Option<&str>) -> Vec<String> {
+    expand_optional_filter(value)
+        .into_iter()
+        .map(|o| crate::taxonomy_legend::resolve_origin(&o).to_string())
+        .collect()
+}
+
 fn exact_any_sql(where_parts: &mut Vec<String>, column: &str, values: &[String]) {
     if values.is_empty() {
         return;
@@ -536,9 +560,9 @@ impl ToolEngine {
         }
 
         let canon = expand_optional_filter(req.canon.as_deref());
-        let tradition = expand_optional_filter(req.tradition.as_deref());
-        let period = expand_optional_filter(req.period.as_deref());
-        let origin = expand_optional_filter(req.origin.as_deref());
+        let tradition = expand_tradition_filter(req.tradition.as_deref());
+        let period = expand_period_filter(req.period.as_deref());
+        let origin = expand_origin_filter(req.origin.as_deref());
 
         exact_any_sql(&mut where_parts, "canon", &canon);
         if !tradition.is_empty() {
@@ -1066,9 +1090,11 @@ impl ToolEngine {
         // Build WHERE clauses
         let mut where_clauses = vec!["true".to_string()];
         for t in &req.tradition {
-            where_clauses.push(string_contains_sql("traditions", t));
+            let t = crate::taxonomy_legend::resolve_tradition(t);
+            where_clauses.push(tradition_contains_sql("traditions", t));
         }
         for p in &req.period {
+            let p = crate::taxonomy_legend::resolve_period(p);
             where_clauses.push(format!("period = {}", sql_literal(p)));
         }
         if !already_worked.is_empty() {

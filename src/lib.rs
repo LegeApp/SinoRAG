@@ -19,6 +19,7 @@ pub mod research_tools;
 pub mod search_packet;
 pub mod storage;
 pub mod tei;
+pub mod taxonomy_legend;
 pub mod templates;
 pub mod text_analyzer;
 pub mod tfidf;
