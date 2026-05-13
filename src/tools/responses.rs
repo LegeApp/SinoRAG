@@ -7,7 +7,14 @@ use std::path::PathBuf;
 pub struct SearchResponse {
     pub schema: &'static str,
     pub phrase: String,
+    pub mode: String,
+    pub brief: bool,
+    pub expanded_phrases: Vec<String>,
     pub hits: Vec<SearchHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clusters: Option<Vec<ClusterHitsCluster>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_groups: Option<Vec<TermUsageGroup>>,
     pub search_strategy: SearchStrategy,
 }
 
@@ -27,6 +34,37 @@ pub struct SearchStrategy {
     pub filters: Value,
     pub candidate_count: Option<usize>,
     pub verified_count: Option<usize>,
+}
+
+/// Response from the heading-search tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct HeadingSearchResponse {
+    pub schema: &'static str,
+    pub query: String,
+    pub brief: bool,
+    pub returned_count: usize,
+    pub sections: Vec<HeadingSearchHit>,
+    pub search_strategy: SearchStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct HeadingSearchHit {
+    pub source_work_id: Option<String>,
+    pub main_title: Option<String>,
+    pub heading: Option<String>,
+    pub heading_path: Option<String>,
+    pub passage_id: String,
+    pub sample: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Response from the tool-docs tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ToolDocsResponse {
+    pub schema: &'static str,
+    pub tool: Option<String>,
+    pub docs: serde_json::Value,
 }
 
 /// Response from the passage tool

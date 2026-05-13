@@ -1,11 +1,11 @@
-use serde_json::Value;
 use anyhow::Result;
+use serde_json::Value;
 
 use crate::tools::engine::ToolEngine;
-use crate::tools::spec::{ToolDef, ToolSpec, ToolExample, ToolSafety, schema_for};
-use crate::tools::errors::{ToolError, classify_tool_error};
-use crate::tools::responses::*;
+use crate::tools::errors::{classify_tool_error, ToolError};
 use crate::tools::requests::*;
+use crate::tools::responses::*;
+use crate::tools::spec::{schema_for, ToolDef, ToolExample, ToolSafety, ToolSpec};
 
 /// Standard response envelope for tool calls
 #[derive(Debug, serde::Serialize)]
@@ -13,23 +13,23 @@ pub struct ToolCallEnvelope {
     pub id: Option<String>,
     pub ok: bool,
     pub tool: String,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::tools::errors::ToolErrorBody>,
-    
+
     pub meta: ToolCallMeta,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct ToolCallMeta {
     pub elapsed_ms: u128,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_utc: Option<String>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_utc: Option<String>,
 }
@@ -38,21 +38,23 @@ pub struct ToolCallMeta {
 fn enforce_safety(engine: &ToolEngine, spec: &ToolSpec) -> Result<()> {
     match spec.safety {
         ToolSafety::ReadOnly => Ok(()),
-        
+
         ToolSafety::WritesOutput => {
             if engine.config.readonly {
                 return Err(ToolError::ReadonlyViolation {
                     tool: spec.name.to_string(),
-                }.into_anyhow());
+                }
+                .into_anyhow());
             }
             Ok(())
         }
-        
+
         ToolSafety::MutatesRegistry | ToolSafety::Admin => {
             if !engine.config.allow_admin_tools {
                 return Err(ToolError::AdminToolDisabled {
                     tool: spec.name.to_string(),
-                }.into_anyhow());
+                }
+                .into_anyhow());
             }
             Ok(())
         }
@@ -60,20 +62,16 @@ fn enforce_safety(engine: &ToolEngine, spec: &ToolSpec) -> Result<()> {
 }
 
 /// Call a tool by name with JSON arguments
-pub async fn call_tool(
-    engine: &ToolEngine,
-    name: &str,
-    args: Value,
-) -> Result<Value> {
+pub async fn call_tool(engine: &ToolEngine, name: &str, args: Value) -> Result<Value> {
     let defs = tool_defs();
-    
+
     let def = defs
         .iter()
         .find(|d| d.spec.name == name)
         .ok_or_else(|| ToolError::unknown_tool(name).into_anyhow())?;
-    
+
     enforce_safety(engine, &def.spec)?;
-    
+
     (def.call)(engine, args).await
 }
 
@@ -85,7 +83,7 @@ pub async fn call_tool_enveloped(
     args: Value,
 ) -> ToolCallEnvelope {
     let started = std::time::Instant::now();
-    
+
     match call_tool(engine, &tool, args).await {
         Ok(result) => ToolCallEnvelope {
             id,
@@ -99,7 +97,7 @@ pub async fn call_tool_enveloped(
                 finished_utc: None,
             },
         },
-        
+
         Err(err) => ToolCallEnvelope {
             id,
             ok: false,
@@ -140,7 +138,33 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+        // Tool docs tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "tool-docs",
+                description: "Return compiled-in documentation for all tools or one named tool.",
+                input_schema: schema_for::<ToolDocsRequest>(),
+                output_schema: schema_for::<ToolDocsResponse>(),
+                requires: vec![],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Show all tool docs",
+                        args: serde_json::json!({}),
+                    },
+                    ToolExample {
+                        title: "Show search docs",
+                        args: serde_json::json!({ "tool": "search" }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: ToolDocsRequest = serde_json::from_value(args)?;
+                let res = engine.tool_docs_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // Passage tool
         ToolDef {
             spec: ToolSpec {
@@ -165,22 +189,32 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Search tool
         ToolDef {
             spec: ToolSpec {
                 name: "search",
-                description: "Full-text search across corpus passages.",
+                description: "Exact phrase search across loaded passage text. Uses the phrase index when available, verifies candidates against parquet text, and falls back to a parquet scan if no index/doc table is available. Optional modes add work/division clusters or term-usage traces.",
                 input_schema: schema_for::<SearchRequest>(),
                 output_schema: schema_for::<SearchResponse>(),
                 requires: vec!["passages.parquet"],
                 safety: ToolSafety::ReadOnly,
                 examples: vec![
                     ToolExample {
-                        title: "Search for Diamond Sutra citation marker",
+                        title: "Search for exact phrase hits",
                         args: serde_json::json!({
                             "phrase": "金剛經云",
                             "limit": 5
+                        }),
+                    },
+                    ToolExample {
+                        title: "Search and cluster hits by work",
+                        args: serde_json::json!({
+                            "phrase": "雪峯辭洞山",
+                            "mode": "clusters",
+                            "group_by": "work",
+                            "limit": 50,
+                            "limit_per_group": 10
                         }),
                     }
                 ],
@@ -191,7 +225,33 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+        // Heading-search tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "heading-search",
+                description: "Search heading and section metadata by title/path, with passage-text fallback.",
+                input_schema: schema_for::<HeadingSearchRequest>(),
+                output_schema: schema_for::<HeadingSearchResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Find sections headed by a case title",
+                        args: serde_json::json!({
+                            "query": "雪峰過嶺",
+                            "limit": 10,
+                            "brief": true
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: HeadingSearchRequest = serde_json::from_value(args)?;
+                let res = engine.heading_search_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // Canonical-source tool
         ToolDef {
             spec: ToolSpec {
@@ -217,7 +277,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Validate-adjudication tool
         ToolDef {
             spec: ToolSpec {
@@ -242,7 +302,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Graph-build tool
         ToolDef {
             spec: ToolSpec {
@@ -270,7 +330,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Report-build tool
         ToolDef {
             spec: ToolSpec {
@@ -300,7 +360,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Works tool
         ToolDef {
             spec: ToolSpec {
@@ -332,7 +392,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Catalog-index-info tool
         ToolDef {
             spec: ToolSpec {
@@ -355,7 +415,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Similar tool
         ToolDef {
             spec: ToolSpec {
@@ -381,7 +441,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Frontier tool
         ToolDef {
             spec: ToolSpec {
@@ -408,7 +468,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // First-attestation tool
         ToolDef {
             spec: ToolSpec {
@@ -434,7 +494,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Phrase-history tool
         ToolDef {
             spec: ToolSpec {
@@ -460,7 +520,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Phrase-index-search tool
         ToolDef {
             spec: ToolSpec {
@@ -486,7 +546,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Seed-pick tool
         ToolDef {
             spec: ToolSpec {
@@ -513,7 +573,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Expand-context-adaptive tool
         ToolDef {
             spec: ToolSpec {
@@ -539,7 +599,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Trace-term-usage tool
         ToolDef {
             spec: ToolSpec {
@@ -567,7 +627,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Query-expand-terms tool
         ToolDef {
             spec: ToolSpec {
@@ -594,7 +654,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Compare-usage tool
         ToolDef {
             spec: ToolSpec {
@@ -623,7 +683,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Collocation-search tool
         ToolDef {
             spec: ToolSpec {
@@ -652,7 +712,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Outline-search tool
         ToolDef {
             spec: ToolSpec {
@@ -681,7 +741,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Cluster-hits tool
         ToolDef {
             spec: ToolSpec {
@@ -709,7 +769,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-        
+
         // Absence-check tool
         ToolDef {
             spec: ToolSpec {

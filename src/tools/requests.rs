@@ -9,6 +9,24 @@ pub struct SearchRequest {
     #[serde(default = "default_limit")]
     pub limit: usize,
 
+    #[serde(default = "default_search_mode")]
+    pub mode: String,
+
+    #[serde(default = "default_search_depth")]
+    pub depth: String,
+
+    #[serde(default = "default_cluster_by")]
+    pub group_by: String,
+
+    #[serde(default)]
+    pub include_variants: bool,
+
+    #[serde(default = "default_limit_per_group")]
+    pub limit_per_group: usize,
+
+    #[serde(default)]
+    pub brief: bool,
+
     #[serde(default)]
     pub canon: Option<String>,
 
@@ -36,6 +54,42 @@ pub struct SearchRequest {
 
 fn default_limit() -> usize {
     20
+}
+
+/// Request for the heading-search tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct HeadingSearchRequest {
+    pub query: String,
+
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    #[serde(default)]
+    pub canon: Option<String>,
+
+    #[serde(default)]
+    pub source_work_id: Option<String>,
+
+    #[serde(default)]
+    pub period: Option<String>,
+
+    #[serde(default)]
+    pub brief: bool,
+}
+
+/// Request for the tool-docs tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ToolDocsRequest {
+    #[serde(default)]
+    pub tool: Option<String>,
+}
+
+fn default_search_mode() -> String {
+    "hits".to_string()
+}
+
+fn default_search_depth() -> String {
+    "exact".to_string()
 }
 
 /// Request for the passage tool

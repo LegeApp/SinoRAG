@@ -195,7 +195,7 @@ pub enum Command {
     /// Start the legacy MCP server (currently disabled).
     ///
     /// Use `tools-manifest`, `tool-call`, and `run-tools` for agent workflows.
-    #[command(hide = true)]  // Hidden until rmcp dependency is properly configured
+    #[command(hide = true)] // Hidden until rmcp dependency is properly configured
     Mcp {
         /// Transport protocol: stdio (default) or sse.
         #[arg(long, default_value = "stdio")]
@@ -231,7 +231,6 @@ pub enum Command {
     // Index build commands — run by users but not shown in top-level help.
     // Use `sinoragd help <command>` for details.
     // -----------------------------------------------------------------------
-
     /// Build TF-IDF similarity index from passage parquet.
     #[command(hide = true)]
     TfidfBuild {
@@ -341,7 +340,6 @@ pub enum Command {
     // -----------------------------------------------------------------------
     // CEF / Kanripo format-conversion utilities (hidden from help).
     // -----------------------------------------------------------------------
-
     /// Validate a CEF JSON-lines file.
     #[command(hide = true)]
     CefValidate {
@@ -410,7 +408,6 @@ pub enum Command {
     // Some low-level debug forms stay hidden; users generally should
     // not call them directly.
     // -----------------------------------------------------------------------
-
     /// Retrieve a single passage by ID.
     ///
     /// JSON tool. Normally invoked by agents via `sinoragd tool-call`;
@@ -881,6 +878,27 @@ pub enum Command {
         out: Option<PathBuf>,
     },
 
+    /// Search section headings and heading paths by name.
+    #[command(hide = true)]
+    HeadingSearch {
+        #[arg(long)]
+        query: String,
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long)]
+        canon: Option<String>,
+        #[arg(long)]
+        source_work_id: Option<String>,
+        #[arg(long)]
+        period: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, default_value_t = false)]
+        brief: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
     /// Cluster phrase search hits by catalog outline (work/division).
     #[command(hide = true)]
     ClusterHits {
@@ -1084,7 +1102,6 @@ pub enum Command {
     // -----------------------------------------------------------------------
     // JSON batching / tool-call commands
     // -----------------------------------------------------------------------
-
     /// Print manifest of available tools with schemas and descriptions.
     ///
     /// Used by agents to discover available tools, their input/output schemas,
@@ -1096,6 +1113,12 @@ pub enum Command {
         format: String,
         #[arg(long, default_value_t = false)]
         include_examples: bool,
+    },
+
+    /// Print compiled-in documentation for tools.
+    ToolDocs {
+        #[arg(long)]
+        tool: Option<String>,
     },
 
     /// Call a single tool with JSON arguments.

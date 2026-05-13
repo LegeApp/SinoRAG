@@ -29,29 +29,42 @@ pub async fn run(
     let catalog = CorpusCatalogIndex::load(&catalog_path)?;
     let store = DataFusionStore::open(&parquet).await?;
 
-    // Resolve starting node: explicit node_id or work_id → root_node.
-    let start_node = if let Some(nid) = node_id {
-        nid
-    } else if let Some(wid) = &work_id {
-        let work = catalog.get_work(wid)
-            .ok_or_else(|| anyhow!("unknown work_id: {wid}"))?;
-        work.root_node
-    } else {
-        return Err(anyhow!("either --node-id or --work-id is required"));
-    };
-
     let target = match group_by.as_str() {
         "division" => OutlineSearchLevel::Division,
         "work" => OutlineSearchLevel::Work,
         "passage" => OutlineSearchLevel::PassageRange,
-        other => return Err(anyhow!("unknown --group-by `{other}`; expected division|work|passage")),
+        other => {
+            return Err(anyhow!(
+                "unknown --group-by `{other}`; expected division|work|passage"
+            ))
+        }
     };
 
-    let start_node_obj = catalog.get_node(start_node)
-        .ok_or_else(|| anyhow!("unknown node_id: {start_node}"))?;
-    let (lo, hi) = match (start_node_obj.first_doc_id, start_node_obj.last_doc_id) {
-        (Some(l), Some(h)) => (l, h),
-        _ => return Err(anyhow!("node {start_node} has no doc range")),
+    // Resolve starting node: explicit node_id or work_id -> root_node.
+    // If no scope is supplied, search corpus-wide and group all hits.
+    let (start_node, start_label, doc_range) = if let Some(nid) = node_id {
+        let node = catalog
+            .get_node(nid)
+            .ok_or_else(|| anyhow!("unknown node_id: {nid}"))?;
+        let range = match (node.first_doc_id, node.last_doc_id) {
+            (Some(l), Some(h)) => Some((l, h)),
+            _ => return Err(anyhow!("node {nid} has no doc range")),
+        };
+        (nid, node.label.clone(), range)
+    } else if let Some(wid) = &work_id {
+        let work = catalog
+            .get_work(wid)
+            .ok_or_else(|| anyhow!("unknown work_id: {wid}"))?;
+        let root = catalog
+            .get_node(work.root_node)
+            .ok_or_else(|| anyhow!("work root node missing"))?;
+        let range = match (root.first_doc_id, root.last_doc_id) {
+            (Some(l), Some(h)) => Some((l, h)),
+            _ => return Err(anyhow!("work {wid} has no doc range")),
+        };
+        (work.root_node, root.label.clone(), range)
+    } else {
+        (0, "corpus".to_string(), None)
     };
 
     let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
@@ -60,12 +73,14 @@ pub async fn run(
         phrase_index.as_deref(),
         &phrase,
         limit_total,
-        Some((lo, hi)),
+        doc_range,
         None,
         None,
-    ).await?;
+    )
+    .await?;
 
-    let filtered_doc_ids: Vec<u32> = hits.iter()
+    let filtered_doc_ids: Vec<u32> = hits
+        .iter()
         .filter_map(|row| {
             let pid = row.get("passage_id").and_then(|v| v.as_str())?;
             doc_table.doc_id(pid)
@@ -96,7 +111,7 @@ pub async fn run(
         "schema": "sinoragd-outline-search-v1",
         "phrase": phrase,
         "start_node_id": start_node,
-        "start_label": start_node_obj.label,
+        "start_label": start_label,
         "group_by": group_by,
         "total_hits": total_hits,
         "group_count": sorted_groups.len(),

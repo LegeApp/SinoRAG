@@ -3,3 +3,7 @@ Cargo.lock.bak
 *.tmp
 *.index.tmp
 .DS_Store
+SinoRAG.zip
+cargo-checker.exe
+/terebess_zen_text_images/
+/terebess_zen_urls/

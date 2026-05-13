@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use anyhow::Result;
 use crate::pack;
+use anyhow::Result;
+use std::path::PathBuf;
 
 #[derive(clap::Args, Debug)]
 pub struct ToolsManifestArgs {
@@ -30,8 +30,16 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
 
             if let Some(obj) = spec.as_object_mut() {
                 let missing = missing_requirements(args.pack.as_deref(), &requires);
-                obj.insert("available".to_string(), serde_json::json!(missing.is_empty()));
+                obj.insert(
+                    "available".to_string(),
+                    serde_json::json!(missing.is_empty()),
+                );
                 obj.insert("missing".to_string(), serde_json::json!(missing));
+                if let Some(docs) = crate::tools::docs::doc_for_tool(
+                    obj.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
+                ) {
+                    obj.insert("docs".to_string(), docs);
+                }
             }
 
             spec
@@ -49,7 +57,10 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
     Ok(())
 }
 
-fn missing_requirements(pack_root: Option<&std::path::Path>, requires: &[&'static str]) -> Vec<String> {
+fn missing_requirements(
+    pack_root: Option<&std::path::Path>,
+    requires: &[&'static str],
+) -> Vec<String> {
     requires
         .iter()
         .filter(|name| !resource_exists(pack_root, name))
