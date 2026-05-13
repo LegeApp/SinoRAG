@@ -121,7 +121,8 @@ pub fn report_build(
 
     let ext = out.extension().and_then(|s| s.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") {
-        let md = markdown_report::render_with_options(&report, Some(&inferred_title), essay_max_pages);
+        let md =
+            markdown_report::render_with_options(&report, Some(&inferred_title), essay_max_pages);
         templates::write_text(&out, &md)?;
     } else {
         templates::write_json(&out, &report)?;
@@ -145,7 +146,9 @@ fn pdf_from_markdown(markdown: &str, out: PathBuf, side_by_side: bool) -> Result
     context.set_options(595.0, 842.0, 72.0, 12.5, 11.5, 1.35, 8.0, 6.0, 0.45);
     let output = out.to_string_lossy().to_string();
     if side_by_side {
-        cbeta_pdf_creator::create_bilingual_pdf_side_by_side_with_context(&zh, &en, &output, &context)?;
+        cbeta_pdf_creator::create_bilingual_pdf_side_by_side_with_context(
+            &zh, &en, &output, &context,
+        )?;
     } else {
         cbeta_pdf_creator::create_bilingual_pdf_with_context(&zh, &en, &output, &context)?;
     }
@@ -188,7 +191,13 @@ fn markdown_to_pdf_sections(markdown: &str) -> (Vec<String>, Vec<String>) {
     }
     if zh.is_empty() {
         zh.push(String::new());
-        en.push(markdown.lines().map(strip_markdown).collect::<Vec<_>>().join("\n"));
+        en.push(
+            markdown
+                .lines()
+                .map(strip_markdown)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
     (zh, en)
 }

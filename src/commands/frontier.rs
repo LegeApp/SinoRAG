@@ -20,15 +20,18 @@ pub async fn run(
     registry_path: PathBuf,
 ) -> Result<()> {
     let store = DataFusionStore::open(&parquet_path).await?;
-    
+
     // Load DocumentTable for doc_id resolution
     let doc_table_path = parquet_path.join("doc_table.bin");
     let doc_table = if doc_table_path.exists() {
         DocumentTable::load(&doc_table_path)?
     } else {
-        anyhow::bail!("DocumentTable not found at {}. Run doc-table-build first.", doc_table_path.display());
+        anyhow::bail!(
+            "DocumentTable not found at {}. Run doc-table-build first.",
+            doc_table_path.display()
+        );
     };
-    
+
     let seed_row = store.get_passage(&seed).await?;
     let similar = crate::commands::tfidf::similar_passages(
         &store,
@@ -39,7 +42,8 @@ pub async fn run(
         8,
         4,
         &doc_table,
-    ).await?;
+    )
+    .await?;
     let phrase_frontiers = phrase_frontiers(&store, &seed_row, phrase_limit).await?;
     let prior_work = if registry_path.exists() {
         registry::prior_work(&registry_path, &seed, 10)?
@@ -84,13 +88,17 @@ pub async fn run(
     jsonout::write_or_print(&payload, out)
 }
 
-pub async fn phrase_frontiers(store: &DataFusionStore, seed: &Value, limit: usize) -> Result<Vec<Value>> {
+pub async fn phrase_frontiers(
+    store: &DataFusionStore,
+    seed: &Value,
+    limit: usize,
+) -> Result<Vec<Value>> {
     let candidates = seed_phrases(value_str(seed, "zh_text_normalized"));
     let mut frontiers = Vec::new();
     for phrase in candidates {
         let where_clause = string_contains_sql("zh_text_normalized", &phrase);
-        let rows = store.query_json(
-            &format!(
+        let rows = store
+            .query_json(&format!(
                 r#"
                 SELECT passage_id, source_rel_path, xml_id, heading, from_lb, to_lb,
                        zh_text_raw, canon, traditions, period, origin, author, main_title
@@ -99,17 +107,17 @@ pub async fn phrase_frontiers(store: &DataFusionStore, seed: &Value, limit: usiz
                 ORDER BY period_rank, source_rel_path, from_lb, xml_id
                 LIMIT 8
                 "#
-            ),
-        ).await?;
-        let count_rows = store.query_json(
-            &format!(
+            ))
+            .await?;
+        let count_rows = store
+            .query_json(&format!(
                 r#"
                 SELECT count(*) AS count
                 FROM passages
                 WHERE {where_clause}
                 "#
-            ),
-        ).await?;
+            ))
+            .await?;
         let total = count_rows
             .first()
             .and_then(|row| row.get("count"))

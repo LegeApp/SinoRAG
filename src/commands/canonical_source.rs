@@ -21,7 +21,8 @@ pub async fn run(
         &store,
         &SearchSpec::exact_phrase(phrase.clone(), limit),
         phrase_index.as_deref(),
-    ).await?;
+    )
+    .await?;
     let canon_filter = if canon.is_empty() {
         vec!["T".to_string()]
     } else {
@@ -29,7 +30,8 @@ pub async fn run(
     };
     let mut canon_spec = SearchSpec::exact_phrase(phrase.clone(), limit);
     canon_spec.canon = canon_filter.clone();
-    let canon_hits = exact_phrase_rows_with_index(&store, &canon_spec, phrase_index.as_deref()).await?;
+    let canon_hits =
+        exact_phrase_rows_with_index(&store, &canon_spec, phrase_index.as_deref()).await?;
 
     let source_claim = if let Some(hit) = canon_hits.first() {
         json!({

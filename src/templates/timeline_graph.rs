@@ -48,7 +48,11 @@ pub fn render(payload: &Value, title: &str) -> Value {
         previous_period_id = Some(period_id.clone());
         for (item_idx, item) in items.into_iter().enumerate() {
             let node = node_from_evidence(&item);
-            let passage_id = node.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            let passage_id = node
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             nodes.push(with_layout(
                 node,
                 "standard",

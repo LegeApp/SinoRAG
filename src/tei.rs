@@ -75,18 +75,18 @@ impl Default for BuddhistMeta {
 pub fn extract_metadata_from_xml(xml_path: &Path, rel_path: &str) -> BuddhistMeta {
     let file = File::open(xml_path);
     let mut meta = BuddhistMeta::default();
-    
+
     // Derive source_work_id from filename (e.g., T/T01/T01n0001.xml -> T01n0001)
     if let Some(filename) = xml_path.file_stem().and_then(|s| s.to_str()) {
         meta.source_work_id = filename.to_string();
     }
-    
+
     // Extract canon from file path (first directory component)
     let path_parts: Vec<&str> = rel_path.split('/').collect();
     if path_parts.len() >= 1 {
         meta.canon = path_parts[0].to_string();
     }
-    
+
     // Parse TEI header for additional metadata
     if let Ok(file) = file {
         let reader = Reader::from_reader(BufReader::new(file));
@@ -97,10 +97,10 @@ pub fn extract_metadata_from_xml(xml_path: &Path, rel_path: &str) -> BuddhistMet
         let mut in_source_desc = false;
         let mut in_availability = false;
         let mut current_text = String::new();
-        
+
         let mut reader = reader;
         reader.config_mut().trim_text(true);
-        
+
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
@@ -165,26 +165,31 @@ pub fn extract_metadata_from_xml(xml_path: &Path, rel_path: &str) -> BuddhistMet
             }
         }
     }
-    
+
     // Classify tradition, period, origin from available text
     let text_content = format!("{} {} {}", meta.main_title, meta.author, meta.rights_notes);
     meta.traditions = classify_tradition(&text_content);
     meta.period = classify_period(&text_content);
     meta.origin = classify_origin(&text_content);
     meta.period_rank = period_rank(&meta.period);
-    
+
     meta
 }
 
 fn classify_tradition(text: &str) -> Vec<String> {
     let text_lower = text.to_lowercase();
     let mut traditions = Vec::new();
-    
+
     // Chinese Buddhist traditions
-    if text_lower.contains("禪") || text_lower.contains("禅") || text_lower.contains("chan") || text_lower.contains("zen") {
+    if text_lower.contains("禪")
+        || text_lower.contains("禅")
+        || text_lower.contains("chan")
+        || text_lower.contains("zen")
+    {
         traditions.push("Chan/Zen".to_string());
     }
-    if text_lower.contains("淨土") || text_lower.contains("净土") || text_lower.contains("阿彌陀") {
+    if text_lower.contains("淨土") || text_lower.contains("净土") || text_lower.contains("阿彌陀")
+    {
         traditions.push("Pure Land".to_string());
     }
     if text_lower.contains("天台") || text_lower.contains("法華") {
@@ -193,7 +198,8 @@ fn classify_tradition(text: &str) -> Vec<String> {
     if text_lower.contains("華嚴") || text_lower.contains("华严") {
         traditions.push("Huayan".to_string());
     }
-    if text_lower.contains("律") || text_lower.contains("戒律") || text_lower.contains("毗奈耶") {
+    if text_lower.contains("律") || text_lower.contains("戒律") || text_lower.contains("毗奈耶")
+    {
         traditions.push("Vinaya".to_string());
     }
     if text_lower.contains("中觀") || text_lower.contains("中論") {
@@ -211,11 +217,11 @@ fn classify_tradition(text: &str) -> Vec<String> {
     if text_lower.contains("史") || text_lower.contains("傳") {
         traditions.push("Historical".to_string());
     }
-    
+
     if traditions.is_empty() {
         traditions.push("General/Unspecified".to_string());
     }
-    
+
     traditions
 }
 
@@ -255,15 +261,11 @@ fn classify_origin(text: &str) -> String {
     "Unknown Origin".to_string()
 }
 
-
 pub fn iter_xml_paths(corpus_root: &Path) -> Result<Vec<(PathBuf, String)>> {
     let xml_root = resolve_xml_root(corpus_root)?;
 
     let mut paths = Vec::new();
-    for entry in WalkDir::new(&xml_root)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
+    for entry in WalkDir::new(&xml_root).into_iter().filter_map(Result::ok) {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("xml") {
             continue;
@@ -424,7 +426,8 @@ pub fn extract_passages_from_file(
                 }
                 if let Some(active_p) = active.take() {
                     if name == active_p.tag {
-                        if let Some(mut record) = active_p.into_record(rel_path, meta, &mut previous_lb)
+                        if let Some(mut record) =
+                            active_p.into_record(rel_path, meta, &mut previous_lb)
                         {
                             record.passage_ord_in_file = passage_ord_in_file;
                             passage_ord_in_file += 1;

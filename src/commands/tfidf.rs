@@ -211,12 +211,8 @@ pub async fn similar_passages_with_index(
         let passage_id = doc_table.passage_id(doc_id).unwrap_or("");
         let cand = by_id.get(passage_id).cloned().unwrap_or_else(|| json!({}));
         let cand_norm = value_str(&cand, "zh_text_normalized");
-        let shared_ngrams = index.shared_ngrams_with_seed_text(
-            seed_doc_id,
-            doc_id,
-            &seed_norm,
-            shared_ngram_limit,
-        );
+        let shared_ngrams =
+            index.shared_ngrams_with_seed_text(seed_doc_id, doc_id, &seed_norm, shared_ngram_limit);
         let shared_phrases = long_common_substrings(
             &seed_norm,
             &cand_norm,
@@ -232,18 +228,18 @@ pub async fn similar_passages_with_index(
         let cross_source = !same_file;
         let cross_period = !same_period && !cand_period.is_empty();
 
-        let long_gram_count = index.long_gram_shared_count_with_seed_text(
-            seed_doc_id,
-            doc_id,
-            &seed_norm,
-            6,
-        );
+        let long_gram_count =
+            index.long_gram_shared_count_with_seed_text(seed_doc_id, doc_id, &seed_norm, 6);
         let max_lcs_len = shared_phrases
             .iter()
             .map(|s| s.chars().count())
             .max()
             .unwrap_or(0);
-        let cand_len = doc_table.period_ranks.get(doc_id as usize).copied().unwrap_or(0) as usize;
+        let cand_len = doc_table
+            .period_ranks
+            .get(doc_id as usize)
+            .copied()
+            .unwrap_or(0) as usize;
 
         let mut graph_score = score;
         let mut reasons: Vec<&'static str> = Vec::new();

@@ -79,10 +79,12 @@ impl DocTableLineage {
     }
     pub fn load_if_present(doc_table_path: &Path) -> Result<Option<Self>> {
         let p = Self::sidecar_path(doc_table_path);
-        if !p.exists() { return Ok(None); }
+        if !p.exists() {
+            return Ok(None);
+        }
         let bytes = std::fs::read(&p)?;
-        let v: Self = serde_json::from_slice(&bytes)
-            .map_err(|e| anyhow!("parse {}: {}", p.display(), e))?;
+        let v: Self =
+            serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {}", p.display(), e))?;
         Ok(Some(v))
     }
     pub fn write(&self, doc_table_path: &Path) -> Result<()> {
@@ -92,7 +94,9 @@ impl DocTableLineage {
     }
     pub fn delete_if_present(doc_table_path: &Path) -> Result<()> {
         let p = Self::sidecar_path(doc_table_path);
-        if p.exists() { std::fs::remove_file(p)?; }
+        if p.exists() {
+            std::fs::remove_file(p)?;
+        }
         Ok(())
     }
 }
@@ -122,9 +126,9 @@ impl DocumentTable {
         rows.dedup_by(|a, b| a.passage_id == b.passage_id);
 
         let n = rows.len();
-        let mut passage_ids      = Vec::with_capacity(n);
-        let mut source_work_ids  = Vec::with_capacity(n);
-        let mut period_ranks     = Vec::with_capacity(n);
+        let mut passage_ids = Vec::with_capacity(n);
+        let mut source_work_ids = Vec::with_capacity(n);
+        let mut period_ranks = Vec::with_capacity(n);
 
         let mut work_strings: Vec<String> = Vec::new();
         let mut work_intern: FxHashMap<String, u32> = FxHashMap::default();
@@ -155,8 +159,11 @@ impl DocumentTable {
             work_doc_offsets,
             work_doc_ids,
         };
-        eprintln!("DocumentTable built: {} passages, {} unique works",
-            dt.passage_ids.len(), dt.work_strings.len());
+        eprintln!(
+            "DocumentTable built: {} passages, {} unique works",
+            dt.passage_ids.len(),
+            dt.work_strings.len()
+        );
         Ok(dt)
     }
 
@@ -164,8 +171,11 @@ impl DocumentTable {
     /// Existing doc_ids are preserved exactly.
     pub fn append_from_parquet(base: &DocumentTable, parquet_path: &Path) -> Result<Self> {
         let all_rows = scan_parquet_rows(parquet_path)?;
-        eprintln!("Scanned {} rows; base has {} passages",
-            all_rows.len(), base.passage_ids.len());
+        eprintln!(
+            "Scanned {} rows; base has {} passages",
+            all_rows.len(),
+            base.passage_ids.len()
+        );
 
         // Collect only rows whose passage_id isn't already in base.
         let mut new_rows: Vec<DocRow> = all_rows
@@ -180,9 +190,9 @@ impl DocumentTable {
 
         // Merge: base first (preserves base doc_ids), then new passages.
         let total = base.passage_ids.len() + new_rows.len();
-        let mut passage_ids     = Vec::with_capacity(total);
+        let mut passage_ids = Vec::with_capacity(total);
         let mut source_work_ids = Vec::with_capacity(total);
-        let mut period_ranks    = Vec::with_capacity(total);
+        let mut period_ranks = Vec::with_capacity(total);
 
         passage_ids.extend_from_slice(&base.passage_ids);
         source_work_ids.extend_from_slice(&base.source_work_ids);
@@ -229,9 +239,7 @@ impl DocumentTable {
     /// O(log N) reverse lookup via sorted `passage_lookup_order`.
     pub fn doc_id(&self, passage_id: &str) -> Option<DocId> {
         self.passage_lookup_order
-            .binary_search_by(|&doc_id| {
-                self.passage_ids[doc_id as usize].as_str().cmp(passage_id)
-            })
+            .binary_search_by(|&doc_id| self.passage_ids[doc_id as usize].as_str().cmp(passage_id))
             .ok()
             .map(|i| self.passage_lookup_order[i])
     }
@@ -242,7 +250,10 @@ impl DocumentTable {
 
     /// O(N) linear search — work table is typically a few thousand entries.
     pub fn work_id(&self, work_name: &str) -> Option<u32> {
-        self.work_strings.iter().position(|s| s == work_name).map(|i| i as u32)
+        self.work_strings
+            .iter()
+            .position(|s| s == work_name)
+            .map(|i| i as u32)
     }
 
     pub fn work_name(&self, work_id: u32) -> Option<&str> {
@@ -256,7 +267,7 @@ impl DocumentTable {
             return &[];
         }
         let start = self.work_doc_offsets[w] as usize;
-        let end   = self.work_doc_offsets[w + 1] as usize;
+        let end = self.work_doc_offsets[w + 1] as usize;
         &self.work_doc_ids[start..end]
     }
 
@@ -305,7 +316,9 @@ pub fn match_index_fingerprint(
     }
     if let Some(lineage) = DocTableLineage::load_if_present(doc_table_path)? {
         if index_fingerprint == lineage.base_fingerprint {
-            return Ok(Some(IndexCoverage::Base { base_doc_count: lineage.base_doc_count }));
+            return Ok(Some(IndexCoverage::Base {
+                base_doc_count: lineage.base_doc_count,
+            }));
         }
     }
     Ok(None)
@@ -331,21 +344,40 @@ fn scan_parquet_rows(parquet_path: &Path) -> Result<Vec<DocRow>> {
         let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
-            let passage_col = batch.schema().column_with_name("passage_id")
-                .ok_or_else(|| anyhow!("Column 'passage_id' missing"))?.0;
-            let work_col = batch.schema().column_with_name("source_work_id")
-                .ok_or_else(|| anyhow!("Column 'source_work_id' missing"))?.0;
-            let period_col = batch.schema().column_with_name("period_rank")
-                .ok_or_else(|| anyhow!("Column 'period_rank' missing"))?.0;
-            let pid_arr = batch.column(passage_col).as_any().downcast_ref::<StringArray>()
+            let passage_col = batch
+                .schema()
+                .column_with_name("passage_id")
+                .ok_or_else(|| anyhow!("Column 'passage_id' missing"))?
+                .0;
+            let work_col = batch
+                .schema()
+                .column_with_name("source_work_id")
+                .ok_or_else(|| anyhow!("Column 'source_work_id' missing"))?
+                .0;
+            let period_col = batch
+                .schema()
+                .column_with_name("period_rank")
+                .ok_or_else(|| anyhow!("Column 'period_rank' missing"))?
+                .0;
+            let pid_arr = batch
+                .column(passage_col)
+                .as_any()
+                .downcast_ref::<StringArray>()
                 .ok_or_else(|| anyhow!("passage_id not StringArray"))?;
-            let work_arr = batch.column(work_col).as_any().downcast_ref::<StringArray>()
+            let work_arr = batch
+                .column(work_col)
+                .as_any()
+                .downcast_ref::<StringArray>()
                 .ok_or_else(|| anyhow!("source_work_id not StringArray"))?;
-            let period_arr = batch.column(period_col).as_any()
+            let period_arr = batch
+                .column(period_col)
+                .as_any()
                 .downcast_ref::<arrow::array::Int32Array>()
                 .ok_or_else(|| anyhow!("period_rank not Int32Array"))?;
             for i in 0..batch.num_rows() {
-                if pid_arr.is_null(i) { continue; }
+                if pid_arr.is_null(i) {
+                    continue;
+                }
                 rows.push(DocRow {
                     passage_id: pid_arr.value(i).to_string(),
                     source_work_id: if work_arr.is_null(i) {
@@ -353,7 +385,11 @@ fn scan_parquet_rows(parquet_path: &Path) -> Result<Vec<DocRow>> {
                     } else {
                         work_arr.value(i).to_string()
                     },
-                    period_rank: if period_arr.is_null(i) { 0 } else { period_arr.value(i) },
+                    period_rank: if period_arr.is_null(i) {
+                        0
+                    } else {
+                        period_arr.value(i)
+                    },
                 });
             }
         }
@@ -363,11 +399,7 @@ fn scan_parquet_rows(parquet_path: &Path) -> Result<Vec<DocRow>> {
 
 /// Intern `name` into `table` (appending if new) and return its stable index.
 /// `map` is a build-time only lookup and is NOT serialized.
-fn intern_work(
-    table: &mut Vec<String>,
-    map: &mut FxHashMap<String, u32>,
-    name: &str,
-) -> u32 {
+fn intern_work(table: &mut Vec<String>, map: &mut FxHashMap<String, u32>, name: &str) -> u32 {
     if let Some(&id) = map.get(name) {
         return id;
     }
@@ -416,7 +448,10 @@ fn build_work_doc_csr(source_work_ids: &[u32], num_works: usize) -> (Vec<u32>, V
 
 fn fingerprint_passage_ids(passage_ids: &[String], base: Option<&str>) -> String {
     let mut hasher = Sha256::new();
-    if let Some(b) = base { hasher.update(b.as_bytes()); hasher.update(b"\n"); }
+    if let Some(b) = base {
+        hasher.update(b.as_bytes());
+        hasher.update(b"\n");
+    }
     for pid in passage_ids {
         hasher.update(pid.as_bytes());
         hasher.update(b"\0");

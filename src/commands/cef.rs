@@ -1,4 +1,7 @@
-use crate::cef::{CorpusToml, PassageRecord, ValidationReport, ValidationStats, ValidationError, ValidationWarning, WorkRecord};
+use crate::cef::{
+    CorpusToml, PassageRecord, ValidationError, ValidationReport, ValidationStats,
+    ValidationWarning, WorkRecord,
+};
 use crate::models::PassageRecord as ModelPassageRecord;
 use crate::normalize::normalize_zh;
 use crate::storage;
@@ -9,7 +12,9 @@ use std::path::PathBuf;
 
 pub fn validate(input: PathBuf) -> Result<ValidationReport> {
     let corpus_dir = if input.is_file() {
-        input.parent().ok_or_else(|| anyhow!("Cannot determine corpus directory from file path"))?
+        input
+            .parent()
+            .ok_or_else(|| anyhow!("Cannot determine corpus directory from file path"))?
     } else {
         &input
     };
@@ -220,7 +225,10 @@ pub fn validate(input: PathBuf) -> Result<ValidationReport> {
                             file: "passages.jsonl".to_string(),
                             line: Some(line_num + 1),
                             code: "invalid_work_id".to_string(),
-                            message: format!("work_id '{}' not found in works.jsonl", passage.work_id),
+                            message: format!(
+                                "work_id '{}' not found in works.jsonl",
+                                passage.work_id
+                            ),
                         });
                     }
 
@@ -398,7 +406,9 @@ pub fn stats(input: PathBuf) -> Result<()> {
 
 pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
     let corpus_dir = if input.is_file() {
-        input.parent().ok_or_else(|| anyhow!("Cannot determine corpus directory from file path"))?
+        input
+            .parent()
+            .ok_or_else(|| anyhow!("Cannot determine corpus directory from file path"))?
     } else {
         &input
     };
@@ -406,10 +416,16 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
     // Validate first
     let report = validate(input.clone())?;
     if !report.valid {
-        anyhow::bail!("Validation failed with {} errors. Run cef-validate for details.", report.errors.len());
+        anyhow::bail!(
+            "Validation failed with {} errors. Run cef-validate for details.",
+            report.errors.len()
+        );
     }
 
-    eprintln!("Validation passed. Ingesting {} passages...", report.stats.passages);
+    eprintln!(
+        "Validation passed. Ingesting {} passages...",
+        report.stats.passages
+    );
 
     // Read corpus.toml
     let corpus_toml_path = corpus_dir.join("corpus.toml");
@@ -419,7 +435,8 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
     // Read works.jsonl into a map
     let works_path = corpus_dir.join("works.jsonl");
     let works_content = fs::read_to_string(&works_path)?;
-    let mut work_map: std::collections::HashMap<String, WorkRecord> = std::collections::HashMap::new();
+    let mut work_map: std::collections::HashMap<String, WorkRecord> =
+        std::collections::HashMap::new();
     for (line_no, line) in works_content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -441,55 +458,102 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
         }
         let passage = serde_json::from_str::<PassageRecord>(line)
             .with_context(|| format!("parse {} line {}", passages_path.display(), line_no + 1))?;
-            let work = work_map.get(&passage.work_id);
+        let work = work_map.get(&passage.work_id);
 
-            let text_normalized = passage.text_normalized.unwrap_or_else(|| normalize_zh(&passage.text));
+        let text_normalized = passage
+            .text_normalized
+            .unwrap_or_else(|| normalize_zh(&passage.text));
 
-            passages.push(ModelPassageRecord {
+        passages.push(
+            ModelPassageRecord {
                 source_corpus: corpus.corpus_id.clone(),
                 source_work_id: passage.work_id.clone(),
                 source_section_id: passage.section_id.clone().unwrap_or_default(),
                 source_locator: passage.locator.clone().unwrap_or_default(),
-                source_url: passage.source_url.clone().unwrap_or_else(|| corpus.source_url.clone().unwrap_or_default()),
+                source_url: passage
+                    .source_url
+                    .clone()
+                    .unwrap_or_else(|| corpus.source_url.clone().unwrap_or_default()),
                 edition_siglum: String::new(),
                 edition_label: String::new(),
-                rights_id: passage.rights_id.clone().unwrap_or_else(|| corpus.rights_id.clone()),
+                rights_id: passage
+                    .rights_id
+                    .clone()
+                    .unwrap_or_else(|| corpus.rights_id.clone()),
                 rights_notes: corpus.rights_notes.clone().unwrap_or_default(),
                 retrieval_method: "gd-cef".to_string(),
                 snapshot_id: corpus.snapshot_id.clone(),
-                quality_flags_json: passage.quality_flags.clone().map(|v| serde_json::to_string(&v).unwrap()).unwrap_or_default(),
+                quality_flags_json: passage
+                    .quality_flags
+                    .clone()
+                    .map(|v| serde_json::to_string(&v).unwrap())
+                    .unwrap_or_default(),
                 passage_id: passage.passage_id.clone(),
-                source_rel_path: passage.source_rel_path.clone().unwrap_or_else(|| format!("{}/{}", corpus.corpus_id, passage.work_id)),
-                xml_id: passage.passage_id.split('#').nth(1).unwrap_or("unknown").to_string(),
+                source_rel_path: passage
+                    .source_rel_path
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/{}", corpus.corpus_id, passage.work_id)),
+                xml_id: passage
+                    .passage_id
+                    .split('#')
+                    .nth(1)
+                    .unwrap_or("unknown")
+                    .to_string(),
                 div_path: String::new(),
-                heading: passage.section_title.clone().unwrap_or_else(|| work.and_then(|w| Some(w.title_zh.clone())).unwrap_or_default()),
+                heading: passage.section_title.clone().unwrap_or_else(|| {
+                    work.and_then(|w| Some(w.title_zh.clone()))
+                        .unwrap_or_default()
+                }),
                 heading_path: passage.heading_path.clone().unwrap_or_default(),
                 from_lb: passage.line_start.clone(),
                 to_lb: passage.line_end.clone(),
                 passage_ord_in_file: passage_ord,
                 zh_text_raw: passage.text.clone(),
                 zh_text_normalized: text_normalized,
-                text_type: passage.text_type.clone().unwrap_or_else(|| "prose".to_string()),
+                text_type: passage
+                    .text_type
+                    .clone()
+                    .unwrap_or_else(|| "prose".to_string()),
                 contains_person: passage.contains_person.unwrap_or(false),
                 contains_term: passage.contains_term.unwrap_or(false),
                 contains_foreign: false,
                 canon: String::new(),
                 canon_name: String::new(),
-                traditions: work.and_then(|w| if w.traditions.is_empty() { None } else { Some(w.traditions.clone()) }).unwrap_or_else(|| corpus.default_traditions.clone()),
-                period: work.and_then(|w| w.period.clone()).unwrap_or_else(|| corpus.default_period.clone().unwrap_or_default()),
+                traditions: work
+                    .and_then(|w| {
+                        if w.traditions.is_empty() {
+                            None
+                        } else {
+                            Some(w.traditions.clone())
+                        }
+                    })
+                    .unwrap_or_else(|| corpus.default_traditions.clone()),
+                period: work
+                    .and_then(|w| w.period.clone())
+                    .unwrap_or_else(|| corpus.default_period.clone().unwrap_or_default()),
                 origin: corpus.default_origin.clone().unwrap_or_default(),
                 author: work.and_then(|w| w.author.clone()).unwrap_or_default(),
-                main_title: work.and_then(|w| Some(w.title_zh.clone())).unwrap_or_default(),
-                period_rank: work.and_then(|w| w.period_rank).unwrap_or_else(|| corpus.default_period_rank.unwrap_or(99)),
+                main_title: work
+                    .and_then(|w| Some(w.title_zh.clone()))
+                    .unwrap_or_default(),
+                period_rank: work
+                    .and_then(|w| w.period_rank)
+                    .unwrap_or_else(|| corpus.default_period_rank.unwrap_or(99)),
                 zh: String::new(),
                 normalized_zh: String::new(),
-            }.finalize_aliases());
+            }
+            .finalize_aliases(),
+        );
 
         passage_ord += 1;
     }
 
     // Write to Parquet
-    eprintln!("Writing {} passages to {}", passages.len(), out_parquet.display());
+    eprintln!(
+        "Writing {} passages to {}",
+        passages.len(),
+        out_parquet.display()
+    );
 
     let mut batch = storage::PassageBatch::default();
     for passage in &passages {
@@ -497,6 +561,10 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
     }
     storage::write_parquet_part_partitioned(&batch, &out_parquet, &corpus.corpus_id, 0)?;
 
-    eprintln!("Ingest complete. Wrote {} passages to {}", passages.len(), out_parquet.display());
+    eprintln!(
+        "Ingest complete. Wrote {} passages to {}",
+        passages.len(),
+        out_parquet.display()
+    );
     Ok(())
 }

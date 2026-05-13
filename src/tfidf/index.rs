@@ -26,11 +26,9 @@
 // into the mmap; weights are dequantized on the fly via per-term `w_max`.
 
 use crate::document_table::DocumentTable;
-use crate::tfidf::ngram::{
-    char_ngram_hashes, char_ngrams,
-};
-use crate::tfidf::quantize::{dequantize_log_u8, quantize_log_u8};
 use crate::text_analyzer::{analyze, AnalyzeOptions, AnalyzeScratch, FilterMode};
+use crate::tfidf::ngram::{char_ngram_hashes, char_ngrams};
+use crate::tfidf::quantize::{dequantize_log_u8, quantize_log_u8};
 use anyhow::Result;
 use memmap2::Mmap;
 use ordered_float::OrderedFloat;
@@ -57,27 +55,27 @@ pub type TermId = u32;
 
 const MAGIC_TFIDF_V3: &[u8; 8] = b"SRTF3VAA";
 const HEADER_SIZE: usize = 512;
-const VOCAB_ENTRY_SIZE: usize = 32;       // u64 + u32 + u32 + u64 + u32 + f32
-const ROW_ENTRY_SIZE: usize = 5;          // term_id u32 + qweight u8
-const POSTING_ENTRY_SIZE: usize = 5;      // doc_id u32 + qweight u8
+const VOCAB_ENTRY_SIZE: usize = 32; // u64 + u32 + u32 + u64 + u32 + f32
+const ROW_ENTRY_SIZE: usize = 5; // term_id u32 + qweight u8
+const POSTING_ENTRY_SIZE: usize = 5; // doc_id u32 + qweight u8
 const POSTING_BUCKET_RECORD_SIZE: usize = 12; // term_id u32 + doc_id u32 + weight f32
 
-const HDR_VOCAB_COUNT:    std::ops::Range<usize> = 10..14;
-const HDR_DOC_COUNT:      std::ops::Range<usize> = 14..18;
-const HDR_MIN_NGRAM:      std::ops::Range<usize> = 18..20;
-const HDR_MAX_NGRAM:      std::ops::Range<usize> = 20..22;
-const HDR_MIN_DF:         std::ops::Range<usize> = 22..26;
-const HDR_MAX_FEATURES:   std::ops::Range<usize> = 26..30;
-const HDR_MAX_DF_RATIO:   std::ops::Range<usize> = 30..34;
-const HDR_FP:             std::ops::Range<usize> = 34..98;
-const HDR_VOCAB_OFF:      std::ops::Range<usize> = 98..106;
-const HDR_IDF_OFF:        std::ops::Range<usize> = 106..114;
-const HDR_ROW_OFFSETS:    std::ops::Range<usize> = 114..122;
-const HDR_ROW_LENGTHS:    std::ops::Range<usize> = 122..130;
-const HDR_ROW_BLOB_OFF:   std::ops::Range<usize> = 130..138;
-const HDR_ROW_BLOB_LEN:   std::ops::Range<usize> = 138..146;
-const HDR_POST_BLOB_OFF:  std::ops::Range<usize> = 146..154;
-const HDR_POST_BLOB_LEN:  std::ops::Range<usize> = 154..162;
+const HDR_VOCAB_COUNT: std::ops::Range<usize> = 10..14;
+const HDR_DOC_COUNT: std::ops::Range<usize> = 14..18;
+const HDR_MIN_NGRAM: std::ops::Range<usize> = 18..20;
+const HDR_MAX_NGRAM: std::ops::Range<usize> = 20..22;
+const HDR_MIN_DF: std::ops::Range<usize> = 22..26;
+const HDR_MAX_FEATURES: std::ops::Range<usize> = 26..30;
+const HDR_MAX_DF_RATIO: std::ops::Range<usize> = 30..34;
+const HDR_FP: std::ops::Range<usize> = 34..98;
+const HDR_VOCAB_OFF: std::ops::Range<usize> = 98..106;
+const HDR_IDF_OFF: std::ops::Range<usize> = 106..114;
+const HDR_ROW_OFFSETS: std::ops::Range<usize> = 114..122;
+const HDR_ROW_LENGTHS: std::ops::Range<usize> = 122..130;
+const HDR_ROW_BLOB_OFF: std::ops::Range<usize> = 130..138;
+const HDR_ROW_BLOB_LEN: std::ops::Range<usize> = 138..146;
+const HDR_POST_BLOB_OFF: std::ops::Range<usize> = 146..154;
+const HDR_POST_BLOB_LEN: std::ops::Range<usize> = 154..162;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -174,23 +172,26 @@ impl TfidfIndex {
             anyhow::bail!("unsupported TF-IDF version: {} (expected 3)", version);
         }
 
-        let vocab_count  = u32::from_le_bytes(mmap[HDR_VOCAB_COUNT].try_into()?) as usize;
-        let doc_count    = u32::from_le_bytes(mmap[HDR_DOC_COUNT].try_into()?) as usize;
-        let min_ngram    = u16::from_le_bytes(mmap[HDR_MIN_NGRAM].try_into()?) as usize;
-        let max_ngram    = u16::from_le_bytes(mmap[HDR_MAX_NGRAM].try_into()?) as usize;
-        let min_df       = u32::from_le_bytes(mmap[HDR_MIN_DF].try_into()?);
+        let vocab_count = u32::from_le_bytes(mmap[HDR_VOCAB_COUNT].try_into()?) as usize;
+        let doc_count = u32::from_le_bytes(mmap[HDR_DOC_COUNT].try_into()?) as usize;
+        let min_ngram = u16::from_le_bytes(mmap[HDR_MIN_NGRAM].try_into()?) as usize;
+        let max_ngram = u16::from_le_bytes(mmap[HDR_MAX_NGRAM].try_into()?) as usize;
+        let min_df = u32::from_le_bytes(mmap[HDR_MIN_DF].try_into()?);
         let max_features = u32::from_le_bytes(mmap[HDR_MAX_FEATURES].try_into()?) as usize;
         let max_df_ratio = f32::from_le_bytes(mmap[HDR_MAX_DF_RATIO].try_into()?);
-        let fp_end = mmap[HDR_FP].iter().position(|&b| b == 0).unwrap_or(HDR_FP.len());
+        let fp_end = mmap[HDR_FP]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(HDR_FP.len());
         let doc_table_fingerprint =
             String::from_utf8_lossy(&mmap[HDR_FP.start..HDR_FP.start + fp_end]).to_string();
 
-        let vocab_off       = u64::from_le_bytes(mmap[HDR_VOCAB_OFF].try_into()?) as usize;
-        let idf_off         = u64::from_le_bytes(mmap[HDR_IDF_OFF].try_into()?) as usize;
+        let vocab_off = u64::from_le_bytes(mmap[HDR_VOCAB_OFF].try_into()?) as usize;
+        let idf_off = u64::from_le_bytes(mmap[HDR_IDF_OFF].try_into()?) as usize;
         let row_offsets_off = u64::from_le_bytes(mmap[HDR_ROW_OFFSETS].try_into()?) as usize;
         let row_lengths_off = u64::from_le_bytes(mmap[HDR_ROW_LENGTHS].try_into()?) as usize;
-        let row_blob_off    = u64::from_le_bytes(mmap[HDR_ROW_BLOB_OFF].try_into()?) as usize;
-        let row_blob_len    = u64::from_le_bytes(mmap[HDR_ROW_BLOB_LEN].try_into()?) as usize;
+        let row_blob_off = u64::from_le_bytes(mmap[HDR_ROW_BLOB_OFF].try_into()?) as usize;
+        let row_blob_len = u64::from_le_bytes(mmap[HDR_ROW_BLOB_LEN].try_into()?) as usize;
         let postings_blob_off = u64::from_le_bytes(mmap[HDR_POST_BLOB_OFF].try_into()?) as usize;
         let postings_blob_len = u64::from_le_bytes(mmap[HDR_POST_BLOB_LEN].try_into()?) as usize;
 
@@ -225,21 +226,29 @@ impl TfidfIndex {
         })
     }
 
-    pub fn params(&self) -> &TfidfParams { &self.params }
-    pub fn doc_count(&self) -> usize { self.doc_count }
-    pub fn vocab_count(&self) -> usize { self.vocab_count }
-    pub fn doc_table_fingerprint(&self) -> &str { &self.doc_table_fingerprint }
+    pub fn params(&self) -> &TfidfParams {
+        &self.params
+    }
+    pub fn doc_count(&self) -> usize {
+        self.doc_count
+    }
+    pub fn vocab_count(&self) -> usize {
+        self.vocab_count
+    }
+    pub fn doc_table_fingerprint(&self) -> &str {
+        &self.doc_table_fingerprint
+    }
 
     pub fn vocab_entry(&self, term_id: TermId) -> VocabEntry {
         let off = self.vocab_off + (term_id as usize) * VOCAB_ENTRY_SIZE;
         let s = &self.mmap[off..off + VOCAB_ENTRY_SIZE];
         VocabEntry {
-            term_hash:       u64::from_le_bytes(s[0..8].try_into().unwrap()),
-            term_id:         u32::from_le_bytes(s[8..12].try_into().unwrap()),
-            df:              u32::from_le_bytes(s[12..16].try_into().unwrap()),
+            term_hash: u64::from_le_bytes(s[0..8].try_into().unwrap()),
+            term_id: u32::from_le_bytes(s[8..12].try_into().unwrap()),
+            df: u32::from_le_bytes(s[12..16].try_into().unwrap()),
             postings_offset: u64::from_le_bytes(s[16..24].try_into().unwrap()),
-            postings_count:  u32::from_le_bytes(s[24..28].try_into().unwrap()),
-            w_max:           f32::from_le_bytes(s[28..32].try_into().unwrap()),
+            postings_count: u32::from_le_bytes(s[24..28].try_into().unwrap()),
+            w_max: f32::from_le_bytes(s[28..32].try_into().unwrap()),
         }
     }
 
@@ -274,7 +283,7 @@ impl TfidfIndex {
         for i in 0..len {
             let e = base + i * ROW_ENTRY_SIZE;
             let tid = u32::from_le_bytes(self.mmap[e..e + 4].try_into().unwrap());
-            let q   = self.mmap[e + 4];
+            let q = self.mmap[e + 4];
             let w_max = self.vocab_entry(tid).w_max;
             out.push((tid, dequantize_log_u8(q, w_max)));
         }
@@ -286,7 +295,11 @@ impl TfidfIndex {
     pub fn similar(&self, doc_id: DocId, limit: usize) -> Result<Vec<(DocId, f32)>> {
         let idx = doc_id as usize;
         if idx >= self.doc_count {
-            anyhow::bail!("doc_id {} out of range (doc_count={})", doc_id, self.doc_count);
+            anyhow::bail!(
+                "doc_id {} out of range (doc_count={})",
+                doc_id,
+                self.doc_count
+            );
         }
         let row = self.row_entries(doc_id);
         if row.is_empty() {
@@ -311,10 +324,7 @@ impl TfidfIndex {
             }
         }
 
-        let mut ranked: Vec<(DocId, f32)> = scores
-            .into_iter()
-            .filter(|(_, s)| *s > 0.0)
-            .collect();
+        let mut ranked: Vec<(DocId, f32)> = scores.into_iter().filter(|(_, s)| *s > 0.0).collect();
         ranked.sort_by_key(|&(_, s)| Reverse(OrderedFloat(s)));
         ranked.truncate(limit.max(1));
         Ok(ranked)
@@ -463,17 +473,20 @@ impl TfidfIndex {
         if version != 3 {
             anyhow::bail!("unsupported TF-IDF version: {} (expected 3)", version);
         }
-        let vocab_count  = u32::from_le_bytes(hdr[HDR_VOCAB_COUNT].try_into()?) as usize;
-        let doc_count    = u32::from_le_bytes(hdr[HDR_DOC_COUNT].try_into()?) as usize;
-        let min_ngram    = u16::from_le_bytes(hdr[HDR_MIN_NGRAM].try_into()?) as usize;
-        let max_ngram    = u16::from_le_bytes(hdr[HDR_MAX_NGRAM].try_into()?) as usize;
-        let min_df       = u32::from_le_bytes(hdr[HDR_MIN_DF].try_into()?);
+        let vocab_count = u32::from_le_bytes(hdr[HDR_VOCAB_COUNT].try_into()?) as usize;
+        let doc_count = u32::from_le_bytes(hdr[HDR_DOC_COUNT].try_into()?) as usize;
+        let min_ngram = u16::from_le_bytes(hdr[HDR_MIN_NGRAM].try_into()?) as usize;
+        let max_ngram = u16::from_le_bytes(hdr[HDR_MAX_NGRAM].try_into()?) as usize;
+        let min_df = u32::from_le_bytes(hdr[HDR_MIN_DF].try_into()?);
         let max_features = u32::from_le_bytes(hdr[HDR_MAX_FEATURES].try_into()?) as usize;
         let max_df_ratio = f32::from_le_bytes(hdr[HDR_MAX_DF_RATIO].try_into()?);
-        let fp_end = hdr[HDR_FP].iter().position(|&b| b == 0).unwrap_or(HDR_FP.len());
+        let fp_end = hdr[HDR_FP]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(HDR_FP.len());
         let doc_table_fingerprint =
             String::from_utf8_lossy(&hdr[HDR_FP.start..HDR_FP.start + fp_end]).to_string();
-        let row_blob_len  = u64::from_le_bytes(hdr[HDR_ROW_BLOB_LEN].try_into()?);
+        let row_blob_len = u64::from_le_bytes(hdr[HDR_ROW_BLOB_LEN].try_into()?);
         let post_blob_len = u64::from_le_bytes(hdr[HDR_POST_BLOB_LEN].try_into()?);
         let file_bytes = std::fs::metadata(path)?.len();
         Ok(serde_json::json!({
@@ -577,7 +590,9 @@ impl BucketWriterCache {
 
     fn evict_if_needed(&mut self) -> Result<()> {
         while self.writers.len() >= self.max_open {
-            let Some(victim) = self.lru.pop_front() else { break };
+            let Some(victim) = self.lru.pop_front() else {
+                break;
+            };
             if let Some(mut w) = self.writers.remove(&victim) {
                 w.flush()?;
             }
@@ -656,24 +671,25 @@ pub fn build(
     eprintln!("Buckets : {}", bucket_count);
     eprintln!("Temp dir: {}", temp_dir.display());
 
-    let phase1_done    = temp_dir.join("phase1.done");
-    let phase1_prog    = temp_dir.join("phase1_progress.txt");
-    let phase2_vocab   = temp_dir.join("phase2.vocab.bin");
-    let phase2_idf_f   = temp_dir.join("phase2.idf.bin");
-    let phase2_termid  = temp_dir.join("phase2.termid.bin");
+    let phase1_done = temp_dir.join("phase1.done");
+    let phase1_prog = temp_dir.join("phase1_progress.txt");
+    let phase2_vocab = temp_dir.join("phase2.vocab.bin");
+    let phase2_idf_f = temp_dir.join("phase2.idf.bin");
+    let phase2_termid = temp_dir.join("phase2.termid.bin");
 
-    let resuming = phase1_done.exists()
-        || phase1_prog.exists()
-        || phase2_vocab.exists();
+    let resuming = phase1_done.exists() || phase1_prog.exists() || phase2_vocab.exists();
 
     if resuming {
-        eprintln!("Resume mode: detected partial run in {}", temp_dir.display());
+        eprintln!(
+            "Resume mode: detected partial run in {}",
+            temp_dir.display()
+        );
     } else if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
     }
 
     fs::create_dir_all(&temp_dir)?;
-    let df_dir   = temp_dir.join("df_buckets");
+    let df_dir = temp_dir.join("df_buckets");
     let post_dir = temp_dir.join("post_buckets");
     if !phase1_done.exists() {
         fs::create_dir_all(&df_dir)?;
@@ -707,7 +723,11 @@ pub fn build(
                     completed.insert(progress_key(Path::new(line)));
                 }
             }
-            eprintln!("  Resume: {}/{} files already processed", completed.len(), files.len());
+            eprintln!(
+                "  Resume: {}/{} files already processed",
+                completed.len(),
+                files.len()
+            );
         }
         let pending: Vec<&PathBuf> = files
             .iter()
@@ -718,17 +738,24 @@ pub fn build(
         let handles_per_thread = (700usize / nthreads.max(1)).max(4).min(64);
         eprintln!(
             "  {} pending files on {} threads ({} handles/thread)",
-            pending.len(), nthreads, handles_per_thread
+            pending.len(),
+            nthreads,
+            handles_per_thread
         );
         for t in 0..nthreads {
             fs::create_dir_all(df_dir.join(format!("t{}", t)))?;
         }
 
-        let counter  = AtomicUsize::new(completed.len());
-        let total    = files.len();
-        let prog_f   = Mutex::new(OpenOptions::new().create(true).append(true).open(&phase1_prog)?);
-        let min_n    = params.min_ngram;
-        let max_n    = params.max_ngram;
+        let counter = AtomicUsize::new(completed.len());
+        let total = files.len();
+        let prog_f = Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&phase1_prog)?,
+        );
+        let min_n = params.min_ngram;
+        let max_n = params.max_ngram;
         let analyze_opts = AnalyzeOptions {
             min_n,
             max_n,
@@ -744,7 +771,7 @@ pub fn build(
             let mut scratch = AnalyzeScratch::new();
 
             let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
-            let reader  = builder.build()?;
+            let reader = builder.build()?;
             for batch in reader {
                 let batch = batch?;
                 let (pids, texts) = extract_columns(&batch)?;
@@ -767,7 +794,10 @@ pub fn build(
             Ok(())
         })?;
 
-        eprintln!("  Merging {} threads × {} buckets...", nthreads, bucket_count);
+        eprintln!(
+            "  Merging {} threads × {} buckets...",
+            nthreads, bucket_count
+        );
         for bucket_idx in 0..bucket_count {
             let main = df_dir.join(format!("bucket-{:04}.bin", bucket_idx));
             let mut out = OpenOptions::new().create(true).append(true).open(&main)?;
@@ -794,9 +824,9 @@ pub fn build(
     // -----------------------------------------------------------------------
     let (mut vocab_entries, idf, term_to_id) = if phase2_vocab.exists() {
         eprintln!("\n[Phase 2] Loading saved vocabulary...");
-        let ve: Vec<VocabEntry>       = bincode::deserialize(&fs::read(&phase2_vocab)?)?;
-        let iv: Vec<f32>              = bincode::deserialize(&fs::read(&phase2_idf_f)?)?;
-        let ti: HashMap<u64, TermId>  = bincode::deserialize(&fs::read(&phase2_termid)?)?;
+        let ve: Vec<VocabEntry> = bincode::deserialize(&fs::read(&phase2_vocab)?)?;
+        let iv: Vec<f32> = bincode::deserialize(&fs::read(&phase2_idf_f)?)?;
+        let ti: HashMap<u64, TermId> = bincode::deserialize(&fs::read(&phase2_termid)?)?;
         eprintln!("  {} terms loaded", ve.len());
         (ve, iv, ti)
     } else {
@@ -814,7 +844,7 @@ pub fn build(
                 let mut records: Vec<(u64, u32)> = Vec::with_capacity(n);
                 for k in 0..n {
                     let base = k * 12;
-                    let h  = u64::from_le_bytes(raw[base..base + 8].try_into()?);
+                    let h = u64::from_le_bytes(raw[base..base + 8].try_into()?);
                     let id = u32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
                     records.push((h, id));
                 }
@@ -887,8 +917,8 @@ pub fn build(
             })
             .collect();
 
-        fs::write(&phase2_vocab,  bincode::serialize(&vocab_entries)?)?;
-        fs::write(&phase2_idf_f,  bincode::serialize(&idf)?)?;
+        fs::write(&phase2_vocab, bincode::serialize(&vocab_entries)?)?;
+        fs::write(&phase2_idf_f, bincode::serialize(&idf)?)?;
         fs::write(&phase2_termid, bincode::serialize(&term_to_id)?)?;
 
         (vocab_entries, idf, term_to_id)
@@ -936,9 +966,9 @@ pub fn build(
     };
 
     let counter3 = AtomicUsize::new(0usize);
-    let total3   = files.len();
-    let min_n    = params.min_ngram;
-    let max_n    = params.max_ngram;
+    let total3 = files.len();
+    let min_n = params.min_ngram;
+    let max_n = params.max_ngram;
     let analyze_opts = AnalyzeOptions {
         min_n,
         max_n,
@@ -948,67 +978,77 @@ pub fn build(
         count_tf: true,
     };
 
-    files.par_iter().try_for_each_with(row_tx, |tx, fp| -> Result<()> {
-        let t = rayon::current_thread_index().unwrap_or(0);
-        let mut post_w = BucketWriterCache::new(post_dir.join(format!("t{}", t)), handles_per_thread);
-        let mut scratch = AnalyzeScratch::new();
+    files
+        .par_iter()
+        .try_for_each_with(row_tx, |tx, fp| -> Result<()> {
+            let t = rayon::current_thread_index().unwrap_or(0);
+            let mut post_w =
+                BucketWriterCache::new(post_dir.join(format!("t{}", t)), handles_per_thread);
+            let mut scratch = AnalyzeScratch::new();
 
-        let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
-        let reader  = builder.build()?;
-        for batch in reader {
-            let batch = batch?;
-            let (pids, texts) = extract_columns(&batch)?;
-            for i in 0..batch.num_rows() {
-                let pid  = pids.value(i);
-                let text = texts.value(i);
-                let Some(doc_id) = doc_table.doc_id(pid) else { continue };
+            let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
+            let reader = builder.build()?;
+            for batch in reader {
+                let batch = batch?;
+                let (pids, texts) = extract_columns(&batch)?;
+                for i in 0..batch.num_rows() {
+                    let pid = pids.value(i);
+                    let text = texts.value(i);
+                    let Some(doc_id) = doc_table.doc_id(pid) else {
+                        continue;
+                    };
 
-                let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
-                analyze(text, &analyze_opts, &mut scratch);
-                for &(h, count) in &scratch.counts {
-                    if let Some(&tid) = term_to_id.get(&h) {
-                        *term_counts.entry(tid).or_insert(0) += count;
+                    let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
+                    analyze(text, &analyze_opts, &mut scratch);
+                    for &(h, count) in &scratch.counts {
+                        if let Some(&tid) = term_to_id.get(&h) {
+                            *term_counts.entry(tid).or_insert(0) += count;
+                        }
                     }
-                }
-                if term_counts.is_empty() {
-                    continue;
-                }
-
-                let total_tf: u32 = term_counts.values().sum();
-                let mut row: Vec<(TermId, f32)> = term_counts
-                    .iter()
-                    .map(|(&tid, &c)| (tid, (c as f32 / total_tf as f32) * idf[tid as usize]))
-                    .collect();
-
-                let norm = row.iter().map(|(_, w)| w * w).sum::<f32>().sqrt();
-                if norm > 0.0 {
-                    for (_, w) in row.iter_mut() {
-                        *w /= norm;
+                    if term_counts.is_empty() {
+                        continue;
                     }
-                }
-                row.sort_unstable_by_key(|(tid, _)| *tid);
 
-                let mut row_bytes = Vec::with_capacity(row.len() * ROW_F32_ENTRY);
-                for (tid, w) in &row {
-                    row_bytes.extend_from_slice(&tid.to_le_bytes());
-                    row_bytes.extend_from_slice(&w.to_le_bytes());
-                }
-                tx.send((doc_id, row_bytes))
-                    .map_err(|e| anyhow::anyhow!("row channel closed: {}", e))?;
+                    let total_tf: u32 = term_counts.values().sum();
+                    let mut row: Vec<(TermId, f32)> = term_counts
+                        .iter()
+                        .map(|(&tid, &c)| (tid, (c as f32 / total_tf as f32) * idf[tid as usize]))
+                        .collect();
 
-                for (tid, w) in &row {
-                    post_w.write_posting_record((*tid as usize) % bucket_count, *tid, doc_id, *w)?;
+                    let norm = row.iter().map(|(_, w)| w * w).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for (_, w) in row.iter_mut() {
+                            *w /= norm;
+                        }
+                    }
+                    row.sort_unstable_by_key(|(tid, _)| *tid);
+
+                    let mut row_bytes = Vec::with_capacity(row.len() * ROW_F32_ENTRY);
+                    for (tid, w) in &row {
+                        row_bytes.extend_from_slice(&tid.to_le_bytes());
+                        row_bytes.extend_from_slice(&w.to_le_bytes());
+                    }
+                    tx.send((doc_id, row_bytes))
+                        .map_err(|e| anyhow::anyhow!("row channel closed: {}", e))?;
+
+                    for (tid, w) in &row {
+                        post_w.write_posting_record(
+                            (*tid as usize) % bucket_count,
+                            *tid,
+                            doc_id,
+                            *w,
+                        )?;
+                    }
                 }
             }
-        }
-        post_w.flush_all()?;
+            post_w.flush_all()?;
 
-        let n = counter3.fetch_add(1, Ordering::Relaxed) + 1;
-        if n % 100 == 0 || n == total3 {
-            eprintln!("  {}/{}", n, total3);
-        }
-        Ok(())
-    })?;
+            let n = counter3.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 100 == 0 || n == total3 {
+                eprintln!("  {}/{}", n, total3);
+            }
+            Ok(())
+        })?;
 
     let (row_offsets_f32, row_lengths, row_blob_f32, w_max) = writer_handle
         .join()
@@ -1070,7 +1110,7 @@ pub fn build(
                 let base = k * POSTING_BUCKET_RECORD_SIZE;
                 let tid = u32::from_le_bytes(raw[base..base + 4].try_into()?);
                 let did = u32::from_le_bytes(raw[base + 4..base + 8].try_into()?);
-                let w   = f32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
+                let w = f32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
                 records.push((tid, did, w));
             }
             records.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -1102,7 +1142,7 @@ pub fn build(
     for bucket_data in bucket_results {
         for (tid, count, bytes) in bucket_data {
             vocab_entries[tid as usize].postings_offset = postings_blob.len() as u64;
-            vocab_entries[tid as usize].postings_count  = count;
+            vocab_entries[tid as usize].postings_count = count;
             postings_blob.extend_from_slice(&bytes);
         }
     }
@@ -1135,8 +1175,8 @@ pub fn build(
         for k in 0..len {
             let e = base + k * ROW_F32_ENTRY;
             let tid = u32::from_le_bytes(row_blob_f32[e..e + 4].try_into().unwrap());
-            let w   = f32::from_le_bytes(row_blob_f32[e + 4..e + 8].try_into().unwrap());
-            let wm  = vocab_entries[tid as usize].w_max;
+            let w = f32::from_le_bytes(row_blob_f32[e + 4..e + 8].try_into().unwrap());
+            let wm = vocab_entries[tid as usize].w_max;
             row_blob_q.extend_from_slice(&tid.to_le_bytes());
             row_blob_q.push(quantize_log_u8(w, wm));
         }
@@ -1198,11 +1238,11 @@ fn write_index_file(
     let row_blob_len = row_blob.len() as u64;
     let postings_blob_len = postings_blob.len() as u64;
 
-    let vocab_off     = HEADER_SIZE as u64;
-    let idf_off       = vocab_off + vocab_count as u64 * VOCAB_ENTRY_SIZE as u64;
-    let row_off_off   = idf_off + vocab_count as u64 * 4;
-    let row_len_off   = row_off_off + doc_count as u64 * 8;
-    let row_blob_off  = row_len_off + doc_count as u64 * 4;
+    let vocab_off = HEADER_SIZE as u64;
+    let idf_off = vocab_off + vocab_count as u64 * VOCAB_ENTRY_SIZE as u64;
+    let row_off_off = idf_off + vocab_count as u64 * 4;
+    let row_len_off = row_off_off + doc_count as u64 * 8;
+    let row_blob_off = row_len_off + doc_count as u64 * 4;
     let post_blob_off = row_blob_off + row_blob_len;
 
     let mut hdr = vec![0u8; HEADER_SIZE];
@@ -1297,4 +1337,6 @@ fn round_f64(value: f64, places: i32) -> f64 {
 
 // idf_at is only used internally for diagnostics; keep it from being dead-stripped.
 #[allow(dead_code)]
-fn _idf_keep_alive(t: &TfidfIndex, tid: TermId) -> f32 { t.idf_at(tid) }
+fn _idf_keep_alive(t: &TfidfIndex, tid: TermId) -> f32 {
+    t.idf_at(tid)
+}

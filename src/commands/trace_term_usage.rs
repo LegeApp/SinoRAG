@@ -11,24 +11,33 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
-pub enum GroupBy { Period, Canon, Author, Work }
+pub enum GroupBy {
+    Period,
+    Canon,
+    Author,
+    Work,
+}
 
 impl GroupBy {
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
             "period" => GroupBy::Period,
-            "canon"  => GroupBy::Canon,
+            "canon" => GroupBy::Canon,
             "author" => GroupBy::Author,
-            "work"   => GroupBy::Work,
-            other => return Err(anyhow!("unknown --group-by `{other}`; expected period|canon|author|work")),
+            "work" => GroupBy::Work,
+            other => {
+                return Err(anyhow!(
+                    "unknown --group-by `{other}`; expected period|canon|author|work"
+                ))
+            }
         })
     }
     fn key_field(&self) -> &'static str {
         match self {
             GroupBy::Period => "period",
-            GroupBy::Canon  => "canon",
+            GroupBy::Canon => "canon",
             GroupBy::Author => "author",
-            GroupBy::Work   => "source_work_id",
+            GroupBy::Work => "source_work_id",
         }
     }
 }
@@ -56,7 +65,11 @@ pub async fn run(
     // by (period_rank, doc_id). Also track work_count via a sub-set per group.
     let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
     for row in hits {
-        let key = row.get(gb.key_field()).and_then(|v| v.as_str()).unwrap_or("(unknown)").to_string();
+        let key = row
+            .get(gb.key_field())
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)")
+            .to_string();
         let acc = groups.entry(key).or_insert_with(GroupAcc::default);
         acc.hit_count += 1;
         if let Some(wid) = row.get("source_work_id").and_then(|v| v.as_str()) {
@@ -65,15 +78,26 @@ pub async fn run(
         let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("");
         let did = doc_table.doc_id(pid).unwrap_or(u32::MAX);
         let pr = if did != u32::MAX {
-            doc_table.period_ranks.get(did as usize).copied().unwrap_or(0)
-        } else { 0 };
+            doc_table
+                .period_ranks
+                .get(did as usize)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
         acc.reps.push((pr, did, row));
     }
 
     let mut out_groups: Vec<Value> = Vec::with_capacity(groups.len());
     for (key, mut acc) in groups {
         acc.reps.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        let reps: Vec<Value> = acc.reps.into_iter().take(limit_per_group).map(|(_, _, r)| r).collect();
+        let reps: Vec<Value> = acc
+            .reps
+            .into_iter()
+            .take(limit_per_group)
+            .map(|(_, _, r)| r)
+            .collect();
         let mut top_works: Vec<String> = acc.work_ids.into_iter().collect();
         top_works.sort();
         top_works.truncate(limit_per_group);

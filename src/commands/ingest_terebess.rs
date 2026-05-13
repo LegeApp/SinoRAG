@@ -26,7 +26,11 @@ pub fn run(
     fs::create_dir_all(&images_dir)?;
 
     let mut html_files: Vec<PathBuf> = Vec::new();
-    for entry in walkdir::WalkDir::new(&input).max_depth(1).into_iter().filter_map(Result::ok) {
+    for entry in walkdir::WalkDir::new(&input)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
         let p = entry.path();
         if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("html") {
             html_files.push(p.to_path_buf());
@@ -54,7 +58,11 @@ pub fn run(
                     skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(e) => {
-                    eprintln!("  ! {}: {}", p.file_name().and_then(|s| s.to_str()).unwrap_or(""), e);
+                    eprintln!(
+                        "  ! {}: {}",
+                        p.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+                        e
+                    );
                     skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
@@ -65,9 +73,11 @@ pub fn run(
         });
 
         let final_extracted = extracted.into_inner().unwrap();
-        eprintln!("Extracted {} pages, skipped {}",
+        eprintln!(
+            "Extracted {} pages, skipped {}",
             final_extracted.len(),
-            skipped.load(std::sync::atomic::Ordering::Relaxed));
+            skipped.load(std::sync::atomic::Ordering::Relaxed)
+        );
 
         // Carry the metadata_json alongside each record for the partitioned write.
         // We'll repack with metadata below.
@@ -78,14 +88,19 @@ pub fn run(
             metas.push(meta);
         }
         // Sort by passage_id for stable doc_id assignment downstream.
-        let mut paired: Vec<(PassageRecord, Option<String>)> = out_records.into_iter().zip(metas).collect();
+        let mut paired: Vec<(PassageRecord, Option<String>)> =
+            out_records.into_iter().zip(metas).collect();
         paired.sort_by(|a, b| a.0.passage_id.cmp(&b.0.passage_id));
         // Write in chunks.
         write_chunks(&paired, &out_parquet)?;
         // Return just the records for caller stats.
         paired.into_iter().map(|(r, _)| r).collect()
     };
-    eprintln!("Wrote {} passages into {}", records.len(), out_parquet.display());
+    eprintln!(
+        "Wrote {} passages into {}",
+        records.len(),
+        out_parquet.display()
+    );
     Ok(())
 }
 
@@ -108,7 +123,9 @@ fn write_chunks(paired: &[(PassageRecord, Option<String>)], out_parquet: &Path) 
 
 fn next_part_index(out_parquet: &Path, corpus: &str) -> usize {
     let dir = out_parquet.join(format!("source_corpus={corpus}"));
-    if !dir.exists() { return 0; }
+    if !dir.exists() {
+        return 0;
+    }
     let mut max_seen: i64 = -1;
     if let Ok(rd) = fs::read_dir(&dir) {
         for e in rd.filter_map(Result::ok) {
@@ -117,7 +134,9 @@ fn next_part_index(out_parquet: &Path, corpus: &str) -> usize {
             if let Some(rest) = s.strip_prefix("part-") {
                 if let Some(num_str) = rest.split('.').next() {
                     if let Ok(n) = num_str.parse::<i64>() {
-                        if n > max_seen { max_seen = n; }
+                        if n > max_seen {
+                            max_seen = n;
+                        }
                     }
                 }
             }
@@ -160,14 +179,15 @@ fn extract_page(
 
     // Stable id: hash of preserved URL (falls back to filename if URL missing).
     let key = if url.is_empty() {
-        path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        path.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
     } else {
         url.clone()
     };
     let id_hash = short_hash(&key);
     let passage_id = format!("terebess/{id_hash}");
-    let work_id = slug_from_url(&url)
-        .unwrap_or_else(|| slug_from_filename(path));
+    let work_id = slug_from_url(&url).unwrap_or_else(|| slug_from_filename(path));
     let clean_title = clean_title(&title);
 
     let metadata = json!({
@@ -187,12 +207,17 @@ fn extract_page(
     rec.edition_siglum = String::new();
     rec.edition_label = String::new();
     rec.rights_id = "terebess.hu".to_string();
-    rec.rights_notes = "scraped via SingleFile; verify usage rights before redistribution".to_string();
+    rec.rights_notes =
+        "scraped via SingleFile; verify usage rights before redistribution".to_string();
     rec.retrieval_method = "singlefile-html".to_string();
     rec.snapshot_id = String::new();
     rec.quality_flags_json = "{}".to_string();
     rec.passage_id = passage_id;
-    rec.source_rel_path = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    rec.source_rel_path = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     rec.xml_id = String::new();
     rec.div_path = String::new();
     rec.heading = clean_title.clone();
@@ -226,7 +251,11 @@ fn extract_page(
 fn capture_title(html: &str) -> Option<String> {
     static_re(r"(?is)<title[^>]*>(.*?)</title>")
         .captures(html)
-        .map(|c| c.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default())
+        .map(|c| {
+            c.get(1)
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_default()
+        })
 }
 
 fn capture_url(html: &str) -> Option<String> {
@@ -248,8 +277,12 @@ fn strip_toolbar(html: &str) -> String {
 }
 
 fn strip_scripts_and_styles(html: &str) -> String {
-    let s = static_re(r"(?is)<script[^>]*>.*?</script>").replace_all(html, " ").to_string();
-    static_re(r"(?is)<style[^>]*>.*?</style>").replace_all(&s, " ").to_string()
+    let s = static_re(r"(?is)<script[^>]*>.*?</script>")
+        .replace_all(html, " ")
+        .to_string();
+    static_re(r"(?is)<style[^>]*>.*?</style>")
+        .replace_all(&s, " ")
+        .to_string()
 }
 
 fn tags_to_text(html: &str) -> String {
@@ -274,8 +307,10 @@ fn collapse_whitespace(s: &str) -> String {
 
 fn is_placeholder_title(title: &str) -> bool {
     let t = title.trim();
-    t.starts_with("404 ") || t.starts_with("403 ")
-        || t.contains("nem található") || t.contains("Tilos")
+    t.starts_with("404 ")
+        || t.starts_with("403 ")
+        || t.contains("nem található")
+        || t.contains("Tilos")
         || t.eq_ignore_ascii_case("Page not found")
 }
 
@@ -289,20 +324,37 @@ fn clean_title(raw: &str) -> String {
 }
 
 fn slug_from_url(url: &str) -> Option<String> {
-    if url.is_empty() { return None; }
+    if url.is_empty() {
+        return None;
+    }
     let tail = url.rsplit('/').next().unwrap_or("");
     let stem = tail.split('.').next().unwrap_or("");
-    if stem.is_empty() { None } else { Some(format!("terebess-{stem}")) }
+    if stem.is_empty() {
+        None
+    } else {
+        Some(format!("terebess-{stem}"))
+    }
 }
 
 fn slug_from_filename(path: &Path) -> String {
     let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
     let trimmed = clean_title(name);
-    let safe: String = trimmed.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+    let safe: String = trimmed
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let safe = safe.trim_matches('-').to_string();
-    if safe.is_empty() { "terebess-page".to_string() } else { format!("terebess-{safe}") }
+    if safe.is_empty() {
+        "terebess-page".to_string()
+    } else {
+        format!("terebess-{safe}")
+    }
 }
 
 fn short_hash(s: &str) -> String {
@@ -320,10 +372,15 @@ fn extract_main_image(
     images_dir: &Path,
     source_path: &Path,
 ) -> Result<Option<PathBuf>> {
-    let img_re = static_re(r#"(?is)<img[^>]+src\s*=\s*["']?(data:image/([a-z0-9+\-.]+);base64,([A-Za-z0-9+/=\r\n]+))["']?[^>]*>"#);
+    let img_re = static_re(
+        r#"(?is)<img[^>]+src\s*=\s*["']?(data:image/([a-z0-9+\-.]+);base64,([A-Za-z0-9+/=\r\n]+))["']?[^>]*>"#,
+    );
     let mut best: Option<(usize, String, Vec<u8>)> = None; // (size, ext, bytes)
     for cap in img_re.captures_iter(body_html) {
-        let mime = cap.get(2).map(|m| m.as_str().to_ascii_lowercase()).unwrap_or_default();
+        let mime = cap
+            .get(2)
+            .map(|m| m.as_str().to_ascii_lowercase())
+            .unwrap_or_default();
         if mime == "svg+xml" || mime == "gif" {
             continue; // toolbar icons
         }
@@ -342,7 +399,8 @@ fn extract_main_image(
             "png" => "png",
             "webp" => "webp",
             other => other,
-        }.to_string();
+        }
+        .to_string();
         let take = match &best {
             Some((sz, _, _)) => bytes.len() > *sz,
             None => true,
@@ -352,7 +410,10 @@ fn extract_main_image(
         }
     }
     if let Some((_, ext, bytes)) = best {
-        let stem = source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("img");
+        let stem = source_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("img");
         let h = short_hash(stem);
         let name = format!("{h}.{ext}");
         let path = images_dir.join(&name);

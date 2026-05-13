@@ -102,7 +102,7 @@ pub async fn first_attestation(
             }
         }
     }
-    
+
     Ok(payload)
 }
 

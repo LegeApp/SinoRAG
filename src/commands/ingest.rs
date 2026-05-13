@@ -84,8 +84,9 @@ pub async fn run(
     let (staging_root, mut checkpoint, resuming) = match resume {
         Some(path) => {
             let p = if path.as_os_str() == "auto" {
-                find_freshest_staging(&out)?
-                    .ok_or_else(|| anyhow!("no .staging/ingest-* dir found under {}", out.display()))?
+                find_freshest_staging(&out)?.ok_or_else(|| {
+                    anyhow!("no .staging/ingest-* dir found under {}", out.display())
+                })?
             } else {
                 path
             };
@@ -94,15 +95,25 @@ pub async fn run(
             }
             let cp_path = p.join(".ingest_checkpoint.json");
             if !cp_path.exists() {
-                anyhow::bail!("staging dir has no .ingest_checkpoint.json: {}", p.display());
+                anyhow::bail!(
+                    "staging dir has no .ingest_checkpoint.json: {}",
+                    p.display()
+                );
             }
-            let cp: Checkpoint = serde_json::from_slice(&std::fs::read(&cp_path)?)
-                .context("parse checkpoint")?;
+            let cp: Checkpoint =
+                serde_json::from_slice(&std::fs::read(&cp_path)?).context("parse checkpoint")?;
             if cp.schema != CHECKPOINT_SCHEMA {
-                anyhow::bail!("checkpoint schema `{}` (expected `{}`)", cp.schema, CHECKPOINT_SCHEMA);
+                anyhow::bail!(
+                    "checkpoint schema `{}` (expected `{}`)",
+                    cp.schema,
+                    CHECKPOINT_SCHEMA
+                );
             }
-            eprintln!("resuming run {} ({} files already processed)",
-                cp.run_id, cp.processed_files.len());
+            eprintln!(
+                "resuming run {} ({} files already processed)",
+                cp.run_id,
+                cp.processed_files.len()
+            );
             (p, cp, true)
         }
         None => {
@@ -136,7 +147,7 @@ pub async fn run(
     }
 
     let staging_parquet = staging_root.join("passages.parquet");
-    let staging_jsonl   = staging_root.join("passages.jsonl");
+    let staging_jsonl = staging_root.join("passages.jsonl");
     let checkpoint_path = staging_root.join(".ingest_checkpoint.json");
 
     if let Some(parent) = out_jsonl.parent() {
@@ -157,8 +168,16 @@ pub async fn run(
     // -- Per-corpus batches + part counters ------------------------------
     let mut cbeta_batch = storage::PassageBatch::default();
     let mut kanripo_batch = storage::PassageBatch::default();
-    let mut cbeta_part_index = checkpoint.next_part_index.get("cbeta").copied().unwrap_or(0);
-    let mut kanripo_part_index = checkpoint.next_part_index.get("kanripo").copied().unwrap_or(0);
+    let mut cbeta_part_index = checkpoint
+        .next_part_index
+        .get("cbeta")
+        .copied()
+        .unwrap_or(0);
+    let mut kanripo_part_index = checkpoint
+        .next_part_index
+        .get("kanripo")
+        .copied()
+        .unwrap_or(0);
     let mut total = checkpoint.stats.total;
     let mut cbeta_count = checkpoint.stats.cbeta;
     let mut kanripo_count = checkpoint.stats.kanripo;
@@ -170,12 +189,18 @@ pub async fn run(
                 batch: &mut storage::PassageBatch,
                 part_index: &mut usize,
                 jsonl: &mut BufWriter<File>,
-                corpus_name: &str| -> Result<()> {
+                corpus_name: &str|
+     -> Result<()> {
         serde_json::to_writer(&mut *jsonl, passage)?;
         jsonl.write_all(b"\n")?;
         batch.push(passage)?;
         if batch.len() >= storage::PARQUET_BATCH_SIZE {
-            storage::write_parquet_part_partitioned(batch, &staging_parquet, corpus_name, *part_index)?;
+            storage::write_parquet_part_partitioned(
+                batch,
+                &staging_parquet,
+                corpus_name,
+                *part_index,
+            )?;
             batch.clear();
             *part_index += 1;
         }
@@ -183,9 +208,13 @@ pub async fn run(
     };
 
     let save_checkpoint = |processed: &HashSet<String>,
-                           cbeta_idx: usize, kanripo_idx: usize,
-                           cbeta_c: usize, kanripo_c: usize, tot: usize,
-                           cp: &Checkpoint| -> Result<()> {
+                           cbeta_idx: usize,
+                           kanripo_idx: usize,
+                           cbeta_c: usize,
+                           kanripo_c: usize,
+                           tot: usize,
+                           cp: &Checkpoint|
+     -> Result<()> {
         let snap = Checkpoint {
             schema: CHECKPOINT_SCHEMA.to_string(),
             run_id: cp.run_id.clone(),
@@ -197,7 +226,11 @@ pub async fn run(
                 m.insert("kanripo".to_string(), kanripo_idx);
                 m
             },
-            stats: CheckpointStats { cbeta: cbeta_c, kanripo: kanripo_c, total: tot },
+            stats: CheckpointStats {
+                cbeta: cbeta_c,
+                kanripo: kanripo_c,
+                total: tot,
+            },
         };
         std::fs::write(&checkpoint_path, serde_json::to_vec_pretty(&snap)?)?;
         Ok(())
@@ -211,7 +244,9 @@ pub async fn run(
         let pb = ProgressBar::new(paths.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
+                )
                 .unwrap()
                 .progress_chars("#>-"),
         );
@@ -228,14 +263,27 @@ pub async fn run(
                 continue;
             }
             for passage in tei::extract_passages_from_file(&xml_path, &rel_path, &meta)? {
-                emit(&passage, &mut cbeta_batch, &mut cbeta_part_index, &mut jsonl, "cbeta")?;
+                emit(
+                    &passage,
+                    &mut cbeta_batch,
+                    &mut cbeta_part_index,
+                    &mut jsonl,
+                    "cbeta",
+                )?;
                 cbeta_count += 1;
                 total += 1;
             }
             processed_files.insert(rel_path);
             if processed_files.len() % CHECKPOINT_FLUSH_INTERVAL == 0 {
-                save_checkpoint(&processed_files, cbeta_part_index, kanripo_part_index,
-                                cbeta_count, kanripo_count, total, &checkpoint)?;
+                save_checkpoint(
+                    &processed_files,
+                    cbeta_part_index,
+                    kanripo_part_index,
+                    cbeta_count,
+                    kanripo_count,
+                    total,
+                    &checkpoint,
+                )?;
             }
             pb.inc(1);
         }
@@ -261,7 +309,9 @@ pub async fn run(
         let pb = ProgressBar::new(total_sections as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
+                )
                 .unwrap()
                 .progress_chars("#>-"),
         );
@@ -269,13 +319,16 @@ pub async fn run(
 
         for repo in repos {
             let work_id = match ingest::work_id_for_repo(&repo) {
-                Some(v) => v, None => continue,
+                Some(v) => v,
+                None => continue,
             };
             let title = ingest::read_title(&repo).unwrap_or_else(|| work_id.clone());
             let (edition_siglum, edition_label) = ingest::read_edition(&repo);
             let snapshot = ingest::git_head(&repo).unwrap_or_default();
-            let rel_repo = repo.strip_prefix(&scan_root)?
-                .to_string_lossy().replace('\\', "/");
+            let rel_repo = repo
+                .strip_prefix(&scan_root)?
+                .to_string_lossy()
+                .replace('\\', "/");
             let sections = ingest::section_files(&repo, &work_id)?;
             for section in sections {
                 let section_rel = section.to_string_lossy().into_owned();
@@ -285,19 +338,38 @@ pub async fn run(
                 }
                 let mut section_passages = Vec::new();
                 ingest::extract_section_passages(
-                    &section, &work_id, &title, &edition_siglum, &edition_label,
-                    &snapshot, &rel_repo, &mut section_passages,
+                    &section,
+                    &work_id,
+                    &title,
+                    &edition_siglum,
+                    &edition_label,
+                    &snapshot,
+                    &rel_repo,
+                    &mut section_passages,
                 )?;
                 for passage in section_passages {
-                    emit(&passage, &mut kanripo_batch, &mut kanripo_part_index, &mut jsonl, "kanripo")?;
+                    emit(
+                        &passage,
+                        &mut kanripo_batch,
+                        &mut kanripo_part_index,
+                        &mut jsonl,
+                        "kanripo",
+                    )?;
                     kanripo_count += 1;
                     total += 1;
                 }
                 processed_files.insert(section_rel);
                 pb.inc(1);
                 if kanripo_count % 1000 == 0 {
-                    save_checkpoint(&processed_files, cbeta_part_index, kanripo_part_index,
-                                    cbeta_count, kanripo_count, total, &checkpoint)?;
+                    save_checkpoint(
+                        &processed_files,
+                        cbeta_part_index,
+                        kanripo_part_index,
+                        cbeta_count,
+                        kanripo_count,
+                        total,
+                        &checkpoint,
+                    )?;
                 }
             }
         }
@@ -306,20 +378,43 @@ pub async fn run(
 
     // -- Final flush -----------------------------------------------------
     if !cbeta_batch.is_empty() {
-        storage::write_parquet_part_partitioned(&cbeta_batch, &staging_parquet, "cbeta", cbeta_part_index)?;
+        storage::write_parquet_part_partitioned(
+            &cbeta_batch,
+            &staging_parquet,
+            "cbeta",
+            cbeta_part_index,
+        )?;
         cbeta_part_index += 1;
     }
     if !kanripo_batch.is_empty() {
-        storage::write_parquet_part_partitioned(&kanripo_batch, &staging_parquet, "kanripo", kanripo_part_index)?;
+        storage::write_parquet_part_partitioned(
+            &kanripo_batch,
+            &staging_parquet,
+            "kanripo",
+            kanripo_part_index,
+        )?;
         kanripo_part_index += 1;
     }
     jsonl.flush()?;
-    save_checkpoint(&processed_files, cbeta_part_index, kanripo_part_index,
-                    cbeta_count, kanripo_count, total, &checkpoint)?;
+    save_checkpoint(
+        &processed_files,
+        cbeta_part_index,
+        kanripo_part_index,
+        cbeta_count,
+        kanripo_count,
+        total,
+        &checkpoint,
+    )?;
 
     // -- Atomic promotion to final location ------------------------------
     eprintln!("\n=== promoting staging → {} ===", out_parquet.display());
-    promote_staging(&staging_root, &staging_parquet, &staging_jsonl, &out_jsonl, &out_parquet)?;
+    promote_staging(
+        &staging_root,
+        &staging_parquet,
+        &staging_jsonl,
+        &out_jsonl,
+        &out_parquet,
+    )?;
 
     println!("wrote {}", out_jsonl.display());
     println!("wrote {}/", out_parquet.display());
@@ -359,21 +454,35 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let append_to = doc_table_path.exists().then(|| doc_table_path.clone());
-    crate::commands::document_table::build(opts.out_parquet.clone(), doc_table_path.clone(), append_to)?;
+    crate::commands::document_table::build(
+        opts.out_parquet.clone(),
+        doc_table_path.clone(),
+        append_to,
+    )?;
 
     let parquet_file_count = crate::phrase_index::parquet_files(&opts.out_parquet)
-        .map(|v| v.len()).unwrap_or(0);
+        .map(|v| v.len())
+        .unwrap_or(0);
 
     if opts.build_phrase_index {
         println!("\n=== Building phrase index ===");
-        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
-        println!("  buckets: {} (parquet files: {}, memory budget: {})",
-            buckets, parquet_file_count,
-            opts.phrase_max_memory.map(|b| format!("{} MB", b / 1024 / 1024))
-                .unwrap_or_else(|| "default".into()));
+        let buckets =
+            crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
+        println!(
+            "  buckets: {} (parquet files: {}, memory budget: {})",
+            buckets,
+            parquet_file_count,
+            opts.phrase_max_memory
+                .map(|b| format!("{} MB", b / 1024 / 1024))
+                .unwrap_or_else(|| "default".into())
+        );
         crate::phrase_index::build(
-            opts.out_parquet.clone(), doc_table_path.clone(),
-            opts.phrase_index_out.clone(), opts.phrase_gram_len, buckets, None,
+            opts.out_parquet.clone(),
+            doc_table_path.clone(),
+            opts.phrase_index_out.clone(),
+            opts.phrase_gram_len,
+            buckets,
+            None,
         )?;
         println!("wrote {}", opts.phrase_index_out.display());
     }
@@ -381,10 +490,15 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
     if opts.build_tfidf {
         println!("\n=== Building TF-IDF index ===");
         let params = crate::tfidf::index::TfidfParams::default_v2();
-        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
+        let buckets =
+            crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
         crate::tfidf::index::build(
-            opts.out_parquet.clone(), doc_table_path.clone(),
-            tfidf_out_path.clone(), params, buckets, None,
+            opts.out_parquet.clone(),
+            doc_table_path.clone(),
+            tfidf_out_path.clone(),
+            params,
+            buckets,
+            None,
         )?;
         println!("wrote {}", tfidf_out_path.display());
     }
@@ -392,8 +506,10 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
     if let Some(catalog_index_out) = opts.catalog_index_out {
         println!("\n=== Building catalog index ===");
         crate::commands::catalog_index::build(
-            opts.out_parquet.clone(), catalog_index_out.clone(),
-            None, Some(doc_table_path.clone()),
+            opts.out_parquet.clone(),
+            catalog_index_out.clone(),
+            None,
+            Some(doc_table_path.clone()),
         )?;
     }
 
@@ -472,18 +588,31 @@ fn promote_staging(
         }
     }
     if out_jsonl.exists() {
-        anyhow::bail!("target jsonl already exists: {}. Move/delete first.", out_jsonl.display());
+        anyhow::bail!(
+            "target jsonl already exists: {}. Move/delete first.",
+            out_jsonl.display()
+        );
     }
 
     std::fs::create_dir_all(out_parquet)?;
     for (src, dst) in &to_move {
-        if let Some(parent) = dst.parent() { std::fs::create_dir_all(parent)?; }
-        std::fs::rename(src, dst).with_context(|| format!("rename {} → {}", src.display(), dst.display()))?;
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(src, dst)
+            .with_context(|| format!("rename {} → {}", src.display(), dst.display()))?;
     }
     if staging_jsonl.exists() {
-        if let Some(parent) = out_jsonl.parent() { std::fs::create_dir_all(parent)?; }
-        std::fs::rename(staging_jsonl, out_jsonl)
-            .with_context(|| format!("rename {} → {}", staging_jsonl.display(), out_jsonl.display()))?;
+        if let Some(parent) = out_jsonl.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(staging_jsonl, out_jsonl).with_context(|| {
+            format!(
+                "rename {} → {}",
+                staging_jsonl.display(),
+                out_jsonl.display()
+            )
+        })?;
     }
     // Sweep staging dir; if anything unexpected remains, leave it.
     let _ = std::fs::remove_file(staging_root.join(".ingest_checkpoint.json"));
@@ -494,13 +623,19 @@ fn promote_staging(
 
 fn find_freshest_staging(out: &Path) -> Result<Option<PathBuf>> {
     let dir = out.join(".staging");
-    if !dir.is_dir() { return Ok(None); }
+    if !dir.is_dir() {
+        return Ok(None);
+    }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() { continue; }
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with("ingest-") { continue; }
+        if !name.to_string_lossy().starts_with("ingest-") {
+            continue;
+        }
         let mtime = entry.metadata()?.modified()?;
         match &best {
             Some((m, _)) if *m >= mtime => {}

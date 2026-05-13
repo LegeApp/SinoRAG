@@ -8,14 +8,18 @@ pub fn char_ngram_hashes(text: &str, min_n: usize, max_n: usize) -> Vec<u64> {
     let mut result = Vec::new();
 
     for n in min_n..=max_n {
-        if chars.len() < n { continue; }
+        if chars.len() < n {
+            continue;
+        }
 
         for i in 0..=chars.len() - n {
             let mut gram = String::new();
             for ch in &chars[i..i + n] {
                 gram.push(*ch);
             }
-            if low_value_ngram(&gram) { continue; }
+            if low_value_ngram(&gram) {
+                continue;
+            }
 
             let hash = xxh3_64(gram.as_bytes());
             if seen.insert(hash) {
@@ -37,13 +41,17 @@ pub fn char_ngram_hashes_all(text: &str, min_n: usize, max_n: usize) -> Vec<u64>
     let mut result = Vec::new();
 
     for n in min_n..=max_n {
-        if chars.len() < n { continue; }
+        if chars.len() < n {
+            continue;
+        }
         for i in 0..=chars.len() - n {
             let mut gram = String::with_capacity(n * 4);
             for ch in &chars[i..i + n] {
                 gram.push(*ch);
             }
-            if low_value_ngram(&gram) { continue; }
+            if low_value_ngram(&gram) {
+                continue;
+            }
             result.push(xxh3_64(gram.as_bytes()));
         }
     }

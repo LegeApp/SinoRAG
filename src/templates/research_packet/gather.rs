@@ -32,10 +32,10 @@ pub async fn run(
 ) -> Result<Vec<ToolInvocation>> {
     std::fs::create_dir_all(tools_dir)?;
 
-    let parquet      = pack.passages_path();
+    let parquet = pack.passages_path();
     let phrase_index = pack.phrase_path();
-    let tfidf_index  = pack.tfidf_path();
-    let catalog      = pack.catalog_path();
+    let tfidf_index = pack.tfidf_path();
+    let catalog = pack.catalog_path();
 
     let mut invocations = Vec::new();
 
@@ -48,12 +48,7 @@ pub async fn run(
             if !step.when.matches_seed_kind(seed.kind()) {
                 continue;
             }
-            let out_name = format!(
-                "{:02}_{}--{}.json",
-                step_idx + 1,
-                step.tool,
-                seed.slug(),
-            );
+            let out_name = format!("{:02}_{}--{}.json", step_idx + 1, step.tool, seed.slug(),);
             let out_path = tools_dir.join(&out_name);
             let rel_out = out_path
                 .strip_prefix(packet_root)
@@ -72,18 +67,31 @@ pub async fn run(
             };
 
             let result = dispatch(
-                &step.tool, seed, &step.args,
-                &parquet, phrase_index.as_deref(), tfidf_index.as_deref(), &catalog,
+                &step.tool,
+                seed,
+                &step.args,
+                &parquet,
+                phrase_index.as_deref(),
+                tfidf_index.as_deref(),
+                &catalog,
                 &out_path,
-            ).await;
+            )
+            .await;
 
             if let Err(e) = result {
                 inv.error = Some(format!("{e:#}"));
-                eprintln!("  ! step {} `{}` on seed `{}`: {}",
-                    inv.step_index, inv.tool, inv.seed_slug, e);
+                eprintln!(
+                    "  ! step {} `{}` on seed `{}`: {}",
+                    inv.step_index, inv.tool, inv.seed_slug, e
+                );
             } else {
-                eprintln!("  ok step {} `{}` on seed `{}` -> {}",
-                    inv.step_index, inv.tool, inv.seed_slug, inv.output_relpath.display());
+                eprintln!(
+                    "  ok step {} `{}` on seed `{}` -> {}",
+                    inv.step_index,
+                    inv.tool,
+                    inv.seed_slug,
+                    inv.output_relpath.display()
+                );
             }
             invocations.push(inv);
         }
@@ -94,8 +102,11 @@ pub async fn run(
 
 fn seed_value_for_log(seed: &Seed) -> String {
     match seed {
-        Seed::Phrase { value } | Seed::Passage { value } | Seed::Work { value }
-        | Seed::Canon { value } | Seed::Period { value } => value.clone(),
+        Seed::Phrase { value }
+        | Seed::Passage { value }
+        | Seed::Work { value }
+        | Seed::Canon { value }
+        | Seed::Period { value } => value.clone(),
         Seed::Person { name, .. } => name.clone(),
     }
 }
@@ -126,67 +137,85 @@ async fn dispatch(
             // phrase-history pulls timeline buckets internally when timeline=true
             let timeline = barg(args, "timeline", false);
             crate::commands::phrase_history::run(
-                value.clone(), pq, include_variants, timeline, pi, out_opt,
-            ).await?;
+                value.clone(),
+                pq,
+                include_variants,
+                timeline,
+                pi,
+                out_opt,
+            )
+            .await?;
             // phrase-history caps at the internal default; the explicit limit is informational.
             let _ = limit;
             Ok(())
         }
         ("first-attestation", Seed::Phrase { value }) => {
             let limit = uarg(args, "limit", 200);
-            crate::commands::first_attestation::run(
-                value.clone(), pq, limit, pi, out_opt,
-            ).await
+            crate::commands::first_attestation::run(value.clone(), pq, limit, pi, out_opt).await
         }
         ("timeline", Seed::Phrase { value }) => {
             let limit = uarg(args, "limit", 200);
             let include_variants = barg(args, "include_variants", true);
-            crate::commands::timeline::run(
-                value.clone(), pq, include_variants, limit, pi, out_opt,
-            ).await
+            crate::commands::timeline::run(value.clone(), pq, include_variants, limit, pi, out_opt)
+                .await
         }
         ("canonical-source", Seed::Phrase { value }) => {
             let limit = uarg(args, "limit", 100);
-            let canon: Vec<String> = args.get("canon")
+            let canon: Vec<String> = args
+                .get("canon")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_else(|| vec!["T".to_string()]);
-            crate::commands::canonical_source::run(
-                value.clone(), pq, canon, limit, pi, out_opt,
-            ).await
+            crate::commands::canonical_source::run(value.clone(), pq, canon, limit, pi, out_opt)
+                .await
         }
         ("person-history", Seed::Person { name, aliases }) => {
             let limit = uarg(args, "limit", 200);
-            crate::commands::person_history::run(
-                name.clone(), aliases.clone(), pq, limit, out_opt,
-            ).await
+            crate::commands::person_history::run(name.clone(), aliases.clone(), pq, limit, out_opt)
+                .await
         }
         ("person-resolve", Seed::Person { name, aliases }) => {
-            crate::commands::person_resolve::run(
-                name.clone(), aliases.clone(), pq, out_opt,
-            ).await
+            crate::commands::person_resolve::run(name.clone(), aliases.clone(), pq, out_opt).await
         }
         ("similar", Seed::Passage { value }) => {
-            let idx = tfidf_index.map(|p| p.to_path_buf())
+            let idx = tfidf_index
+                .map(|p| p.to_path_buf())
                 .context("tfidf index missing in pack")?;
             let limit = uarg(args, "limit", 25);
             let shared_ngram_limit = uarg(args, "shared_ngram_limit", 12);
             let shared_phrase_limit = uarg(args, "shared_phrase_limit", 8);
             let min_shared_phrase_len = uarg(args, "min_shared_phrase_len", 4);
             crate::commands::tfidf::similar(
-                pq, idx, value.clone(), limit,
-                shared_ngram_limit, shared_phrase_limit, min_shared_phrase_len,
+                pq,
+                idx,
+                value.clone(),
+                limit,
+                shared_ngram_limit,
+                shared_phrase_limit,
+                min_shared_phrase_len,
                 out_opt,
-            ).await
+            )
+            .await
         }
         _ => {
-            anyhow::bail!("no dispatch for tool=`{}` seed-kind=`{}`", tool, seed.kind())
+            anyhow::bail!(
+                "no dispatch for tool=`{}` seed-kind=`{}`",
+                tool,
+                seed.kind()
+            )
         }
     }
 }
 
 fn uarg(args: &Value, key: &str, default: usize) -> usize {
-    args.get(key).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(default)
+    args.get(key)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(default)
 }
 fn barg(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(default)

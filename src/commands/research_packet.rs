@@ -28,19 +28,30 @@ pub async fn build(
         Brief::from_file(&path)?
     } else {
         Brief::from_flags(BriefArgs {
-            topic, notes, phrase, seed_passage, person, person_alias,
-            work, canon, period,
+            topic,
+            notes,
+            phrase,
+            seed_passage,
+            person,
+            person_alias,
+            work,
+            canon,
+            period,
         })?
     };
 
     let out_zip = out.unwrap_or_else(|| default_out(&brief.topic));
 
-    research_packet::build(brief, BuildOptions {
-        pack_root: pack,
-        out_zip,
-        recipe_name_or_path: recipe,
-        keep_temp,
-    }).await?;
+    research_packet::build(
+        brief,
+        BuildOptions {
+            pack_root: pack,
+            out_zip,
+            recipe_name_or_path: recipe,
+            keep_temp,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -48,7 +59,15 @@ fn default_out(topic: &str) -> PathBuf {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let safe: String = topic
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else if c.is_alphanumeric() { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else if c.is_alphanumeric() {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let safe = safe.trim_matches('-').to_string();
     let safe = if safe.is_empty() {

@@ -9,7 +9,12 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
-pub enum ExpandMode { Variants, Orthographic, Persons, All }
+pub enum ExpandMode {
+    Variants,
+    Orthographic,
+    Persons,
+    All,
+}
 
 impl ExpandMode {
     pub fn parse(s: &str) -> Result<Self> {
@@ -18,7 +23,9 @@ impl ExpandMode {
             "orthographic" => ExpandMode::Orthographic,
             "persons" => ExpandMode::Persons,
             "all" => ExpandMode::All,
-            other => anyhow::bail!("unknown --mode `{other}`; expected variants|orthographic|persons|all"),
+            other => anyhow::bail!(
+                "unknown --mode `{other}`; expected variants|orthographic|persons|all"
+            ),
         })
     }
 }
@@ -39,7 +46,9 @@ pub fn run(
 
     if matches!(m, ExpandMode::Variants | ExpandMode::All) {
         for v in tables.term_variants(&phrase) {
-            if v != phrase { variants_bucket.insert(v); }
+            if v != phrase {
+                variants_bucket.insert(v);
+            }
         }
     }
     if matches!(m, ExpandMode::Orthographic | ExpandMode::All) {
@@ -68,10 +77,16 @@ pub fn run(
     let mut combined: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     seen.insert(phrase.clone());
-    for v in variants_bucket.iter().chain(orthographic_bucket.iter()).chain(persons_bucket.iter()) {
+    for v in variants_bucket
+        .iter()
+        .chain(orthographic_bucket.iter())
+        .chain(persons_bucket.iter())
+    {
         if seen.insert(v.clone()) {
             combined.push(v.clone());
-            if combined.len() >= max { break; }
+            if combined.len() >= max {
+                break;
+            }
         }
     }
 
@@ -100,8 +115,12 @@ fn detect_lang(s: &str) -> &'static str {
         if (0x4E00..=0x9FFF).contains(&(ch as u32))
             || (0x3400..=0x4DBF).contains(&(ch as u32))
             || (0xF900..=0xFAFF).contains(&(ch as u32))
-        { has_han = true; }
-        if ch.is_ascii_alphabetic() { has_latin = true; }
+        {
+            has_han = true;
+        }
+        if ch.is_ascii_alphabetic() {
+            has_latin = true;
+        }
     }
     match (has_han, has_latin) {
         (true, false) => "zh",

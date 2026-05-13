@@ -47,13 +47,22 @@ pub async fn phrase_rows_with_explicit_doc_table(
 
             let mut rows = store.passages_by_ids(&passage_ids, PASSAGE_SELECT).await?;
             rows.retain(|row| {
-                let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
-                if !text.contains(&normalized) { return false; }
+                let text = row
+                    .get("zh_text_normalized")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !text.contains(&normalized) {
+                    return false;
+                }
                 if let Some(canon) = canon {
-                    if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon { return false; }
+                    if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
+                        return false;
+                    }
                 }
                 if let Some(period) = period {
-                    if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period { return false; }
+                    if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period {
+                        return false;
+                    }
                 }
                 true
             });
@@ -63,12 +72,15 @@ pub async fn phrase_rows_with_explicit_doc_table(
             });
             rows.truncate(limit);
 
-            return Ok((rows, json!({
-                "used_phrase_index": true,
-                "candidate_stats": candidate_stats,
-                "after_doc_scope": scoped_doc_ids.len(),
-                "limit": limit,
-            })));
+            return Ok((
+                rows,
+                json!({
+                    "used_phrase_index": true,
+                    "candidate_stats": candidate_stats,
+                    "after_doc_scope": scoped_doc_ids.len(),
+                    "limit": limit,
+                }),
+            ));
         }
     }
 
@@ -78,13 +90,22 @@ pub async fn phrase_rows_with_explicit_doc_table(
             .collect();
         let mut rows = store.passages_by_ids(&passage_ids, PASSAGE_SELECT).await?;
         rows.retain(|row| {
-            let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
-            if !text.contains(&normalized) { return false; }
+            let text = row
+                .get("zh_text_normalized")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !text.contains(&normalized) {
+                return false;
+            }
             if let Some(canon) = canon {
-                if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon { return false; }
+                if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
+                    return false;
+                }
             }
             if let Some(period) = period {
-                if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period { return false; }
+                if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period {
+                    return false;
+                }
             }
             true
         });
@@ -93,11 +114,14 @@ pub async fn phrase_rows_with_explicit_doc_table(
             doc_table.doc_id(pid).unwrap_or(u32::MAX)
         });
         rows.truncate(limit);
-        return Ok((rows, json!({
-            "used_phrase_index": false,
-            "scope_scan": "doc_range",
-            "limit": limit,
-        })));
+        return Ok((
+            rows,
+            json!({
+                "used_phrase_index": false,
+                "scope_scan": "doc_range",
+                "limit": limit,
+            }),
+        ));
     }
 
     let mut spec = SearchSpec::exact_phrase(phrase.to_string(), limit);
@@ -109,14 +133,18 @@ pub async fn phrase_rows_with_explicit_doc_table(
         rows.retain(|row| row.get("period").and_then(|v| v.as_str()).unwrap_or("") == period);
         rows.truncate(limit);
     }
-    Ok((rows, json!({
-        "used_phrase_index": false,
-        "scope_scan": "parquet_global",
-        "limit": limit,
-    })))
+    Ok((
+        rows,
+        json!({
+            "used_phrase_index": false,
+            "scope_scan": "parquet_global",
+            "limit": limit,
+        }),
+    ))
 }
 
-const PASSAGE_SELECT: &str = "passage_id, source_rel_path, xml_id, div_path, heading, heading_path, \
+const PASSAGE_SELECT: &str =
+    "passage_id, source_rel_path, xml_id, div_path, heading, heading_path, \
 from_lb, to_lb, zh_text_raw, zh_text_normalized, text_type, contains_person, \
 contains_term, contains_foreign, canon, canon_name, traditions, period, origin, \
 author, main_title, period_rank, source_corpus, source_work_id, source_section_id, \

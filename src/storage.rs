@@ -103,7 +103,11 @@ impl PassageBatch {
 
     /// Variant of `push` that also records corpus-specific metadata as JSON.
     /// Used by non-TEI ingesters whose extra fields don't fit the typed schema.
-    pub fn push_with_metadata(&mut self, passage: &PassageRecord, metadata_json: Option<String>) -> Result<()> {
+    pub fn push_with_metadata(
+        &mut self,
+        passage: &PassageRecord,
+        metadata_json: Option<String>,
+    ) -> Result<()> {
         self.push(passage)?;
         // Replace the trailing None we just pushed.
         let last = self.metadata_json.len() - 1;

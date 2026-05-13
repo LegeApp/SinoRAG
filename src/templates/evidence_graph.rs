@@ -37,7 +37,12 @@ fn edges_from_accepted_claims(payload: &Value) -> Vec<Value> {
             .get("graph_hint")
             .and_then(|h| h.get("render"))
             .and_then(|v| v.as_str())
-            .or_else(|| claim.get("graph_hint").and_then(|h| h.get("render_policy")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                claim
+                    .get("graph_hint")
+                    .and_then(|h| h.get("render_policy"))
+                    .and_then(|v| v.as_str())
+            })
             .unwrap_or("render_default");
 
         edges.push(json!({

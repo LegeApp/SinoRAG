@@ -75,8 +75,8 @@ pub fn build(
     debug_json: Option<PathBuf>,
     doc_table_param: Option<PathBuf>,
 ) -> Result<()> {
-    let doc_table_path = doc_table_param
-        .unwrap_or_else(|| PathBuf::from("data/derived/doc_table.bin"));
+    let doc_table_path =
+        doc_table_param.unwrap_or_else(|| PathBuf::from("data/derived/doc_table.bin"));
     if !doc_table_path.exists() {
         anyhow::bail!(
             "DocumentTable not found at {}. Run `sinoragd doc-table-build` first.",
@@ -163,7 +163,9 @@ pub fn build(
 
     println!("[2/3] sorting by (corpus, canon, work, source_rel_path, doc_id)…");
     rows.sort_by(|a, b| {
-        a.source_corpus.as_ref().cmp(b.source_corpus.as_ref())
+        a.source_corpus
+            .as_ref()
+            .cmp(b.source_corpus.as_ref())
             .then_with(|| a.canon.as_ref().cmp(b.canon.as_ref()))
             .then_with(|| a.source_work_id.as_ref().cmp(b.source_work_id.as_ref()))
             .then_with(|| a.source_rel_path.as_ref().cmp(b.source_rel_path.as_ref()))
@@ -172,8 +174,12 @@ pub fn build(
 
     println!("[3/3] building tree…");
     let catalog = build_catalog_from_passages(&rows, dt_fp);
-    println!("      works {}, nodes {}, doc_parent entries {}",
-        catalog.works.len(), catalog.nodes.len(), catalog.doc_parent.len());
+    println!(
+        "      works {}, nodes {}, doc_parent entries {}",
+        catalog.works.len(),
+        catalog.nodes.len(),
+        catalog.doc_parent.len()
+    );
 
     if let Some(debug_path) = debug_json {
         let bytes = serde_json::to_vec_pretty(&catalog)?;
@@ -197,8 +203,7 @@ fn scan_file(
     doc_table: &DocumentTable,
     interner: &mut LocalInterner,
 ) -> Result<Vec<PassageRow>> {
-    let file = File::open(file_path)
-        .with_context(|| format!("open {}", file_path.display()))?;
+    let file = File::open(file_path).with_context(|| format!("open {}", file_path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let reader = builder.build()?;
 
@@ -208,31 +213,39 @@ fn scan_file(
         let batch = batch?;
         let cols = CatalogColumns::bind(&batch)?;
         for i in 0..batch.num_rows() {
-            if cols.passage_ids.is_null(i) { continue; }
+            if cols.passage_ids.is_null(i) {
+                continue;
+            }
             let pid = cols.passage_ids.value(i);
-            let Some(doc_id) = doc_table.doc_id(pid) else { continue };
+            let Some(doc_id) = doc_table.doc_id(pid) else {
+                continue;
+            };
 
             let zh = cols.zh_texts.value(i);
             let cjk_chars = zh.chars().filter(|c| is_cjk(*c)).count() as u32;
 
             rows.push(PassageRow {
                 doc_id,
-                source_corpus:   intern(interner, cols.source_corpuses.value(i)),
-                canon:           intern(interner, cols.canons.value(i)),
-                canon_name:      intern(interner, cols.canon_names.value(i)),
-                source_work_id:  intern(interner, cols.source_work_ids.value(i)),
+                source_corpus: intern(interner, cols.source_corpuses.value(i)),
+                canon: intern(interner, cols.canons.value(i)),
+                canon_name: intern(interner, cols.canon_names.value(i)),
+                source_work_id: intern(interner, cols.source_work_ids.value(i)),
                 source_rel_path: intern(interner, cols.source_rel_paths.value(i)),
-                div_path:        intern(interner, cols.div_paths.value(i)),
-                heading:         intern(interner, cols.headings.value(i)),
-                main_title:      intern(interner, cols.main_titles.value(i)),
-                author:          intern(interner, cols.authors.value(i)),
-                period:          intern(interner, cols.periods.value(i)),
-                period_rank:     if cols.period_ranks.is_null(i) { 0 } else { cols.period_ranks.value(i) },
-                origin:          intern(interner, cols.origins.value(i)),
-                traditions:      parse_traditions(cols.traditions.value(i), interner),
-                cjk_char_count:  cjk_chars,
-                from_lb:         opt_intern_local(cols.from_lbs, i, interner, &empty),
-                to_lb:           opt_intern_local(cols.to_lbs, i, interner, &empty),
+                div_path: intern(interner, cols.div_paths.value(i)),
+                heading: intern(interner, cols.headings.value(i)),
+                main_title: intern(interner, cols.main_titles.value(i)),
+                author: intern(interner, cols.authors.value(i)),
+                period: intern(interner, cols.periods.value(i)),
+                period_rank: if cols.period_ranks.is_null(i) {
+                    0
+                } else {
+                    cols.period_ranks.value(i)
+                },
+                origin: intern(interner, cols.origins.value(i)),
+                traditions: parse_traditions(cols.traditions.value(i), interner),
+                cjk_char_count: cjk_chars,
+                from_lb: opt_intern_local(cols.from_lbs, i, interner, &empty),
+                to_lb: opt_intern_local(cols.to_lbs, i, interner, &empty),
             });
         }
     }
@@ -268,8 +281,14 @@ fn build_catalog_from_passages(rows: &[PassageRow], dt_fp: String) -> CorpusCata
             let canon = rows[j].canon.clone();
             let canon_end = j + count_run(&rows[j..corpus_end], |r| r.canon == canon);
             let canon_label = if rows[j].canon_name.is_empty() {
-                if canon.is_empty() { "(no canon)".to_string() } else { canon.to_string() }
-            } else { rows[j].canon_name.to_string() };
+                if canon.is_empty() {
+                    "(no canon)".to_string()
+                } else {
+                    canon.to_string()
+                }
+            } else {
+                rows[j].canon_name.to_string()
+            };
             let canon_node = catalog.push_node(OutlineNode::leaf(
                 OutlineNodeKind::Canon,
                 Some(corpus_node),
@@ -286,7 +305,9 @@ fn build_catalog_from_passages(rows: &[PassageRow], dt_fp: String) -> CorpusCata
                 let work_end = k + count_run(&rows[k..canon_end], |r| r.source_work_id == work_id);
                 let work_label = if rows[k].main_title.is_empty() {
                     work_id.to_string()
-                } else { rows[k].main_title.to_string() };
+                } else {
+                    rows[k].main_title.to_string()
+                };
                 let work_node = catalog.push_node(OutlineNode::leaf(
                     OutlineNodeKind::Work,
                     Some(canon_node),
@@ -377,7 +398,9 @@ fn build_catalog_from_passages(rows: &[PassageRow], dt_fp: String) -> CorpusCata
 /// Contiguous runs of doc_ids sharing the same full div_path become
 /// PassageRange leaves; doc_parent points each doc at its leaf.
 fn build_div_subtree(catalog: &mut CorpusCatalogIndex, parent: NodeId, rows: &[PassageRow]) {
-    if rows.is_empty() { return; }
+    if rows.is_empty() {
+        return;
+    }
     // Cache of `joined_path -> node_id` so sibling divisions share nodes
     // when a passage falls back into a previously-opened branch.
     let mut path_nodes: FxHashMap<String, NodeId> = FxHashMap::default();
@@ -411,7 +434,9 @@ fn build_div_subtree(catalog: &mut CorpusCatalogIndex, parent: NodeId, rows: &[P
         let cjk: u32 = rows[i..run_end].iter().map(|r| r.cjk_char_count).sum();
         let label = if rows[i].heading.is_empty() {
             div_path.to_string()
-        } else { rows[i].heading.to_string() };
+        } else {
+            rows[i].heading.to_string()
+        };
 
         let mut range_node = OutlineNode::leaf(
             OutlineNodeKind::PassageRange,
@@ -427,8 +452,16 @@ fn build_div_subtree(catalog: &mut CorpusCatalogIndex, parent: NodeId, rows: &[P
         range_node.last_doc_id = Some(last);
         range_node.passage_count = passage_count;
         range_node.cjk_char_count = cjk;
-        range_node.from_lb = if rows[i].from_lb.is_empty() { None } else { Some(rows[i].from_lb.to_string()) };
-        range_node.to_lb   = if rows[run_end-1].to_lb.is_empty() { None } else { Some(rows[run_end-1].to_lb.to_string()) };
+        range_node.from_lb = if rows[i].from_lb.is_empty() {
+            None
+        } else {
+            Some(rows[i].from_lb.to_string())
+        };
+        range_node.to_lb = if rows[run_end - 1].to_lb.is_empty() {
+            None
+        } else {
+            Some(rows[run_end - 1].to_lb.to_string())
+        };
         let range_id = catalog.push_node(range_node);
         catalog.add_child(leaf_node, range_id);
 
@@ -454,13 +487,19 @@ fn ensure_path(
     div_path: &str,
     sample_row: &PassageRow,
 ) -> NodeId {
-    if div_path.is_empty() { return file_node; }
+    if div_path.is_empty() {
+        return file_node;
+    }
     let mut cur = file_node;
     let mut joined = String::new();
     for seg in div_path.split(" / ") {
         let seg = seg.trim();
-        if seg.is_empty() { continue; }
-        if !joined.is_empty() { joined.push_str(" / "); }
+        if seg.is_empty() {
+            continue;
+        }
+        if !joined.is_empty() {
+            joined.push_str(" / ");
+        }
         joined.push_str(seg);
         if let Some(&existing) = path_nodes.get(&joined) {
             cur = existing;
@@ -516,9 +555,11 @@ fn roll_up(
 // ---------------------------------------------------------------------------
 
 fn aggregate_work(rows: &[PassageRow]) -> (Option<DocId>, Option<DocId>, u32, u32) {
-    if rows.is_empty() { return (None, None, 0, 0); }
+    if rows.is_empty() {
+        return (None, None, 0, 0);
+    }
     let first = rows.iter().map(|r| r.doc_id).min();
-    let last  = rows.iter().map(|r| r.doc_id).max();
+    let last = rows.iter().map(|r| r.doc_id).max();
     let passage_count = rows.len() as u32;
     let cjk: u32 = rows.iter().map(|r| r.cjk_char_count).sum();
     (first, last, passage_count, cjk)
@@ -529,7 +570,9 @@ fn aggregate_canon(rows: &[PassageRow]) -> (Option<DocId>, Option<DocId>, u32, u
 
 fn count_run<F: Fn(&PassageRow) -> bool>(rows: &[PassageRow], pred: F) -> usize {
     let mut n = 0;
-    while n < rows.len() && pred(&rows[n]) { n += 1; }
+    while n < rows.len() && pred(&rows[n]) {
+        n += 1;
+    }
     n
 }
 
@@ -560,41 +603,62 @@ struct CatalogColumns<'a> {
 impl<'a> CatalogColumns<'a> {
     fn bind(batch: &'a RecordBatch) -> Result<Self> {
         Ok(Self {
-            passage_ids:      str_col(batch, "passage_id")?,
-            zh_texts:         str_col(batch, "zh_text_normalized")?,
-            source_corpuses:  str_col(batch, "source_corpus")?,
-            source_work_ids:  str_col(batch, "source_work_id")?,
+            passage_ids: str_col(batch, "passage_id")?,
+            zh_texts: str_col(batch, "zh_text_normalized")?,
+            source_corpuses: str_col(batch, "source_corpus")?,
+            source_work_ids: str_col(batch, "source_work_id")?,
             source_rel_paths: str_col(batch, "source_rel_path")?,
-            canons:           str_col(batch, "canon")?,
-            canon_names:      str_col(batch, "canon_name")?,
-            traditions:       str_col(batch, "traditions")?,
-            periods:          str_col(batch, "period")?,
-            period_ranks:     i32_col(batch, "period_rank")?,
-            origins:          str_col(batch, "origin")?,
-            authors:          str_col(batch, "author")?,
-            main_titles:      str_col(batch, "main_title")?,
-            div_paths:        str_col(batch, "div_path")?,
-            headings:         str_col(batch, "heading")?,
-            from_lbs:         str_col(batch, "from_lb")?,
-            to_lbs:           str_col(batch, "to_lb")?,
+            canons: str_col(batch, "canon")?,
+            canon_names: str_col(batch, "canon_name")?,
+            traditions: str_col(batch, "traditions")?,
+            periods: str_col(batch, "period")?,
+            period_ranks: i32_col(batch, "period_rank")?,
+            origins: str_col(batch, "origin")?,
+            authors: str_col(batch, "author")?,
+            main_titles: str_col(batch, "main_title")?,
+            div_paths: str_col(batch, "div_path")?,
+            headings: str_col(batch, "heading")?,
+            from_lbs: str_col(batch, "from_lb")?,
+            to_lbs: str_col(batch, "to_lb")?,
         })
     }
 }
 
 fn str_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
-    let idx = batch.schema().column_with_name(name)
-        .ok_or_else(|| anyhow!("Column '{name}' not found"))?.0;
-    batch.column(idx).as_any().downcast_ref::<StringArray>()
+    let idx = batch
+        .schema()
+        .column_with_name(name)
+        .ok_or_else(|| anyhow!("Column '{name}' not found"))?
+        .0;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<StringArray>()
         .ok_or_else(|| anyhow!("{name} is not StringArray"))
 }
 fn i32_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
-    let idx = batch.schema().column_with_name(name)
-        .ok_or_else(|| anyhow!("Column '{name}' not found"))?.0;
-    batch.column(idx).as_any().downcast_ref::<Int32Array>()
+    let idx = batch
+        .schema()
+        .column_with_name(name)
+        .ok_or_else(|| anyhow!("Column '{name}' not found"))?
+        .0;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<Int32Array>()
         .ok_or_else(|| anyhow!("{name} is not Int32Array"))
 }
-fn opt_intern_local(arr: &StringArray, i: usize, interner: &mut LocalInterner, empty: &Arc<str>) -> Arc<str> {
-    if arr.is_null(i) { empty.clone() } else { intern(interner, arr.value(i)) }
+fn opt_intern_local(
+    arr: &StringArray,
+    i: usize,
+    interner: &mut LocalInterner,
+    empty: &Arc<str>,
+) -> Arc<str> {
+    if arr.is_null(i) {
+        empty.clone()
+    } else {
+        intern(interner, arr.value(i))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -674,26 +738,42 @@ pub fn works(
         let p = crate::taxonomy_legend::resolve_period(&p).to_string();
         filtered.retain(|w| w.period == p);
     }
-    if let Some(c) = canon { filtered.retain(|w| w.canon == c); }
-    if let Some(a) = author { filtered.retain(|w| w.author == a); }
+    if let Some(c) = canon {
+        filtered.retain(|w| w.canon == c);
+    }
+    if let Some(a) = author {
+        filtered.retain(|w| w.author == a);
+    }
     filtered.truncate(limit);
-    let results: Vec<serde_json::Value> = filtered.iter().map(|w| {
-        serde_json::json!({
-            "work_id": w.work_id, "main_title": w.main_title, "author": w.author,
-            "period": w.period, "canon": w.canon, "traditions": w.traditions,
-            "passage_count": w.passage_count,
+    let results: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "work_id": w.work_id, "main_title": w.main_title, "author": w.author,
+                "period": w.period, "canon": w.canon, "traditions": w.traditions,
+                "passage_count": w.passage_count,
+            })
         })
-    }).collect();
+        .collect();
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
 }
 
-pub fn outline(index_path: PathBuf, work: Option<String>, node: Option<u32>, max_depth: usize) -> Result<()> {
+pub fn outline(
+    index_path: PathBuf,
+    work: Option<String>,
+    node: Option<u32>,
+    max_depth: usize,
+) -> Result<()> {
     let catalog = CorpusCatalogIndex::load(&index_path)?;
     let root_node_id = if let Some(work_id) = work {
-        catalog.get_work(&work_id).map(|w| w.root_node)
+        catalog
+            .get_work(&work_id)
+            .map(|w| w.root_node)
             .ok_or_else(|| anyhow!("Work not found"))?
-    } else if let Some(n) = node { n } else {
+    } else if let Some(n) = node {
+        n
+    } else {
         anyhow::bail!("Must specify either --work or --node");
     };
     let tree = build_outline_tree(&catalog, root_node_id, max_depth, 0);
@@ -705,7 +785,9 @@ pub fn sections(index_path: PathBuf, work: Option<String>, max_depth: usize) -> 
     let catalog = CorpusCatalogIndex::load(&index_path)?;
     let mut out = Vec::new();
     if let Some(work_id) = work {
-        let w = catalog.get_work(&work_id).ok_or_else(|| anyhow!("Work not found"))?;
+        let w = catalog
+            .get_work(&work_id)
+            .ok_or_else(|| anyhow!("Work not found"))?;
         out = collect_sections(&catalog, w.root_node, max_depth, 0);
     } else {
         for w in &catalog.works {
@@ -718,7 +800,9 @@ pub fn sections(index_path: PathBuf, work: Option<String>, max_depth: usize) -> 
 
 pub fn scope(index_path: PathBuf, node_id: u32) -> Result<()> {
     let catalog = CorpusCatalogIndex::load(&index_path)?;
-    let node = catalog.get_node(node_id).ok_or_else(|| anyhow!("Node not found"))?;
+    let node = catalog
+        .get_node(node_id)
+        .ok_or_else(|| anyhow!("Node not found"))?;
     let scope = serde_json::json!({
         "node_id": node.node_id,
         "node_kind": format!("{:?}", node.node_kind),
@@ -734,13 +818,24 @@ pub fn scope(index_path: PathBuf, node_id: u32) -> Result<()> {
     Ok(())
 }
 
-fn build_outline_tree(catalog: &CorpusCatalogIndex, node_id: u32, max_depth: usize, depth: usize) -> serde_json::Value {
+fn build_outline_tree(
+    catalog: &CorpusCatalogIndex,
+    node_id: u32,
+    max_depth: usize,
+    depth: usize,
+) -> serde_json::Value {
     let node = match catalog.get_node(node_id) {
-        Some(n) => n, None => return serde_json::json!(null),
+        Some(n) => n,
+        None => return serde_json::json!(null),
     };
     let children = if depth < max_depth {
-        node.children.iter().map(|&c| build_outline_tree(catalog, c, max_depth, depth + 1)).collect::<Vec<_>>()
-    } else { Vec::new() };
+        node.children
+            .iter()
+            .map(|&c| build_outline_tree(catalog, c, max_depth, depth + 1))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     serde_json::json!({
         "node_id": node.node_id,
         "node_kind": format!("{:?}", node.node_kind),
@@ -752,9 +847,15 @@ fn build_outline_tree(catalog: &CorpusCatalogIndex, node_id: u32, max_depth: usi
     })
 }
 
-fn collect_sections(catalog: &CorpusCatalogIndex, node_id: u32, max_depth: usize, depth: usize) -> Vec<serde_json::Value> {
+fn collect_sections(
+    catalog: &CorpusCatalogIndex,
+    node_id: u32,
+    max_depth: usize,
+    depth: usize,
+) -> Vec<serde_json::Value> {
     let node = match catalog.get_node(node_id) {
-        Some(n) => n, None => return Vec::new(),
+        Some(n) => n,
+        None => return Vec::new(),
     };
     let mut out = Vec::new();
     if depth > 0 {

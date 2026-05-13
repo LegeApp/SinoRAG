@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
 use regex::Regex;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -230,7 +230,7 @@ pub fn populate_identity_from_pack(
     doc_table: &crate::document_table::DocumentTable,
     catalog: &crate::catalog_index::CorpusCatalogIndex,
     phrase: Option<(&Path, &serde_json::Value)>,
-    tfidf:  Option<(&Path, &serde_json::Value)>,
+    tfidf: Option<(&Path, &serde_json::Value)>,
     pack_root: &Path,
 ) -> Result<()> {
     init_registry(db_path)?;
@@ -253,20 +253,42 @@ pub fn populate_identity_from_pack(
         )?;
         for w in &catalog.works {
             let work_id_u32 = doc_table.work_id(&w.work_id);
-            let traditions_json = serde_json::to_string(&w.traditions).unwrap_or_else(|_| "[]".into());
+            let traditions_json =
+                serde_json::to_string(&w.traditions).unwrap_or_else(|_| "[]".into());
             // work_id_map may not contain catalog work_id if catalog and doc_table
             // are out of sync; in that case fall back to row order via NULL.
             match work_id_u32 {
                 Some(wid) => stmt.execute(params![
-                    wid as i64, w.work_id, w.source_corpus, w.canon, w.canon_name,
-                    w.main_title, w.author, w.period, w.period_rank, w.origin,
-                    traditions_json, w.passage_count, w.cjk_char_count, w.root_node as i64
+                    wid as i64,
+                    w.work_id,
+                    w.source_corpus,
+                    w.canon,
+                    w.canon_name,
+                    w.main_title,
+                    w.author,
+                    w.period,
+                    w.period_rank,
+                    w.origin,
+                    traditions_json,
+                    w.passage_count,
+                    w.cjk_char_count,
+                    w.root_node as i64
                 ])?,
                 None => stmt.execute(params![
                     rusqlite::types::Null,
-                    w.work_id, w.source_corpus, w.canon, w.canon_name,
-                    w.main_title, w.author, w.period, w.period_rank, w.origin,
-                    traditions_json, w.passage_count, w.cjk_char_count, w.root_node as i64
+                    w.work_id,
+                    w.source_corpus,
+                    w.canon,
+                    w.canon_name,
+                    w.main_title,
+                    w.author,
+                    w.period,
+                    w.period_rank,
+                    w.origin,
+                    traditions_json,
+                    w.passage_count,
+                    w.cjk_char_count,
+                    w.root_node as i64
                 ])?,
             };
         }
@@ -319,36 +341,68 @@ pub fn populate_identity_from_pack(
         let dt_path = pack_root.join(crate::pack::DEFAULT_DOC_TABLE);
         let dt_bytes = fs::metadata(&dt_path).map(|m| m.len() as i64).unwrap_or(0);
         sec.execute(params![
-            "doc_table", "doc_table", rel(&dt_path), 1i64,
-            doc_table.source_fingerprint, rusqlite::types::Null, dt_bytes, now
+            "doc_table",
+            "doc_table",
+            rel(&dt_path),
+            1i64,
+            doc_table.source_fingerprint,
+            rusqlite::types::Null,
+            dt_bytes,
+            now
         ])?;
 
         // catalog
         let cat_path = pack_root.join(crate::pack::DEFAULT_CATALOG);
         let cat_bytes = fs::metadata(&cat_path).map(|m| m.len() as i64).unwrap_or(0);
-        let cat_fp = catalog.doc_table_fingerprint.clone()
+        let cat_fp = catalog
+            .doc_table_fingerprint
+            .clone()
             .unwrap_or_else(|| doc_table.source_fingerprint.clone());
         sec.execute(params![
-            "catalog", "catalog", rel(&cat_path), 2i64,
-            cat_fp, rusqlite::types::Null, cat_bytes, now
+            "catalog",
+            "catalog",
+            rel(&cat_path),
+            2i64,
+            cat_fp,
+            rusqlite::types::Null,
+            cat_bytes,
+            now
         ])?;
 
         if let Some((path, info)) = phrase {
             let bytes = fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
-            let fp = info.get("doc_table_fingerprint")
-                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let fp = info
+                .get("doc_table_fingerprint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             sec.execute(params![
-                "phrase", "phrase", rel(path), 2i64,
-                fp, info.to_string(), bytes, now
+                "phrase",
+                "phrase",
+                rel(path),
+                2i64,
+                fp,
+                info.to_string(),
+                bytes,
+                now
             ])?;
         }
         if let Some((path, info)) = tfidf {
             let bytes = fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
-            let fp = info.get("doc_table_fingerprint")
-                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let fp = info
+                .get("doc_table_fingerprint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             sec.execute(params![
-                "tfidf", "tfidf", rel(path), 2i64,
-                fp, info.to_string(), bytes, now
+                "tfidf",
+                "tfidf",
+                rel(path),
+                2i64,
+                fp,
+                info.to_string(),
+                bytes,
+                now
             ])?;
         }
     }
@@ -356,7 +410,10 @@ pub fn populate_identity_from_pack(
     if let Some((_, info)) = phrase {
         let gram_len = info.get("gram_len").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
         let num_grams = info.get("num_grams").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
-        let postings_bytes = info.get("postings_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let postings_bytes = info
+            .get("postings_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as i64;
         tx.execute(
             "INSERT INTO pack_phrase_index_meta (index_name, gram_len, num_grams, postings_bytes)
              VALUES (?1,?2,?3,?4)",
@@ -369,25 +426,52 @@ pub fn populate_identity_from_pack(
         let (min_n, max_n) = params_obj
             .and_then(|p| p.get("ngram_range"))
             .and_then(|r| r.as_array())
-            .map(|a| (
-                a.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as i64,
-                a.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as i64,
-            ))
+            .map(|a| {
+                (
+                    a.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as i64,
+                    a.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as i64,
+                )
+            })
             .unwrap_or((0, 0));
-        let min_df = params_obj.and_then(|p| p.get("min_df")).and_then(|v| v.as_u64()).unwrap_or(0) as i64;
-        let max_df = params_obj.and_then(|p| p.get("max_df")).and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let max_features = params_obj.and_then(|p| p.get("max_features")).and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let min_df = params_obj
+            .and_then(|p| p.get("min_df"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as i64;
+        let max_df = params_obj
+            .and_then(|p| p.get("max_df"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let max_features = params_obj
+            .and_then(|p| p.get("max_features"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as i64;
         let docs = info.get("documents").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
         let feats = info.get("features").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
-        let row_bytes  = info.get("row_blob_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
-        let post_bytes = info.get("postings_blob_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let row_bytes = info
+            .get("row_blob_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as i64;
+        let post_bytes = info
+            .get("postings_blob_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as i64;
         tx.execute(
             "INSERT INTO pack_tfidf_index_meta
                (index_name, min_ngram, max_ngram, min_df, max_df_ratio, max_features,
                 doc_count, vocab_count, row_blob_bytes, postings_blob_bytes)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params!["tfidf", min_n, max_n, min_df, max_df, max_features,
-                    docs, feats, row_bytes, post_bytes],
+            params![
+                "tfidf",
+                min_n,
+                max_n,
+                min_df,
+                max_df,
+                max_features,
+                docs,
+                feats,
+                row_bytes,
+                post_bytes
+            ],
         )?;
     }
 
@@ -530,23 +614,24 @@ pub fn upsert_items(db_path: &Path, parsed_items: &[ParsedArtifact]) -> Result<(
 }
 
 fn upsert_items_batch(db_path: &Path, parsed_items: &[ParsedArtifact]) -> Result<()> {
-    let mut con = rusqlite::Connection::open(db_path).context("Failed to open registry database")?;
-    
+    let mut con =
+        rusqlite::Connection::open(db_path).context("Failed to open registry database")?;
+
     // Configure connection for concurrency
     con.execute("PRAGMA busy_timeout=5000", [])
         .context("Failed to set busy timeout")?;
-    
+
     let tx = con.transaction()?;
 
     {
         let mut work_stmt = tx.prepare_cached(
             "INSERT OR REPLACE INTO work_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
-        let mut phrase_del = tx.prepare_cached("DELETE FROM phrase_observations WHERE item_id = ?")?;
+        let mut phrase_del =
+            tx.prepare_cached("DELETE FROM phrase_observations WHERE item_id = ?")?;
         let mut seed_del = tx.prepare_cached("DELETE FROM seed_observations WHERE item_id = ?")?;
-        let mut phrase_stmt = tx.prepare_cached(
-            "INSERT INTO phrase_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )?;
+        let mut phrase_stmt = tx
+            .prepare_cached("INSERT INTO phrase_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
         let mut seed_stmt = tx.prepare_cached(
             "INSERT INTO seed_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )?;

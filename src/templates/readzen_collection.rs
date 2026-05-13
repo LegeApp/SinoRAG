@@ -6,7 +6,9 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub fn render(payload: &Value, name_override: Option<&str>) -> Value {
-    let name = name_override.map(ToString::to_string).unwrap_or_else(|| default_title(payload));
+    let name = name_override
+        .map(ToString::to_string)
+        .unwrap_or_else(|| default_title(payload));
     let evidence = evidence_items(payload);
     let mut seen = BTreeSet::new();
     let mut passages = Vec::new();

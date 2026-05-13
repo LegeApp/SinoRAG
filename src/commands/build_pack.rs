@@ -8,8 +8,8 @@
 use crate::catalog_index::CorpusCatalogIndex;
 use crate::document_table::{match_index_fingerprint, DocumentTable, IndexCoverage};
 use crate::pack::{
-    self, IndexRef, IndexSet, Pack,
-    DEFAULT_CATALOG, DEFAULT_DOC_TABLE, DEFAULT_PHRASE, DEFAULT_TFIDF,
+    self, IndexRef, IndexSet, Pack, DEFAULT_CATALOG, DEFAULT_DOC_TABLE, DEFAULT_PHRASE,
+    DEFAULT_TFIDF,
 };
 use crate::phrase_index::PhraseIndex;
 use crate::tfidf::index::TfidfIndex;
@@ -35,17 +35,20 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
     let doc_table = DocumentTable::load(&doc_table_path)
         .with_context(|| format!("load {}", doc_table_path.display()))?;
     let dt_fp = doc_table.source_fingerprint.clone();
-    eprintln!("      {} passages, fingerprint {}...{}",
+    eprintln!(
+        "      {} passages, fingerprint {}...{}",
         doc_table.passage_ids.len(),
         &dt_fp[..8.min(dt_fp.len())],
-        &dt_fp[dt_fp.len().saturating_sub(8)..]);
+        &dt_fp[dt_fp.len().saturating_sub(8)..]
+    );
 
     // --- catalog ----------------------------------------------------------
     let catalog_path = pack_root.join(DEFAULT_CATALOG);
     if !catalog_path.exists() {
         anyhow::bail!(
             "catalog.index missing at {}. Run `catalog-index-build --doc-table {}` first.",
-            catalog_path.display(), doc_table_path.display()
+            catalog_path.display(),
+            doc_table_path.display()
         );
     }
     eprintln!("[2/5] Loading catalog...");
@@ -58,7 +61,8 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
         Some(fp) => {
             return Err(anyhow!(
                 "catalog fingerprint {} != doc_table {}. Rebuild catalog.",
-                short(fp), short(&dt_fp)
+                short(fp),
+                short(&dt_fp)
             ));
         }
         None => {
@@ -68,7 +72,11 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
             );
         }
     }
-    eprintln!("      {} works, {} nodes", catalog.works.len(), catalog.nodes.len());
+    eprintln!(
+        "      {} works, {} nodes",
+        catalog.works.len(),
+        catalog.nodes.len()
+    );
 
     // --- phrase index (optional) -----------------------------------------
     let phrase_path = pack_root.join(DEFAULT_PHRASE);
@@ -79,17 +87,27 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
         eprintln!("[3/5] Validating phrase index...");
         let info = PhraseIndex::header_info(&phrase_path)
             .with_context(|| format!("read header {}", phrase_path.display()))?;
-        let fp = info.get("doc_table_fingerprint").and_then(|v| v.as_str()).unwrap_or("");
+        let fp = info
+            .get("doc_table_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         match match_index_fingerprint(&doc_table, &doc_table_path, fp)? {
             Some(IndexCoverage::Full) => {
-                eprintln!("      OK (full coverage): {} grams, {} postings bytes",
+                eprintln!(
+                    "      OK (full coverage): {} grams, {} postings bytes",
                     info.get("num_grams").and_then(|v| v.as_u64()).unwrap_or(0),
-                    info.get("postings_bytes").and_then(|v| v.as_u64()).unwrap_or(0));
+                    info.get("postings_bytes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                );
                 phrase_coverage = Some(IndexCoverage::Full);
             }
             Some(IndexCoverage::Base { base_doc_count }) => {
-                eprintln!("      OK (lineage match): covers doc_ids 0..{} of {}; rebuild to extend",
-                    base_doc_count, doc_table.passage_ids.len());
+                eprintln!(
+                    "      OK (lineage match): covers doc_ids 0..{} of {}; rebuild to extend",
+                    base_doc_count,
+                    doc_table.passage_ids.len()
+                );
                 phrase_coverage = Some(IndexCoverage::Base { base_doc_count });
             }
             None => {
@@ -113,17 +131,25 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
         eprintln!("[4/5] Validating TF-IDF index...");
         let info = TfidfIndex::header_info(&tfidf_path)
             .with_context(|| format!("read header {}", tfidf_path.display()))?;
-        let fp = info.get("doc_table_fingerprint").and_then(|v| v.as_str()).unwrap_or("");
+        let fp = info
+            .get("doc_table_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         match match_index_fingerprint(&doc_table, &doc_table_path, fp)? {
             Some(IndexCoverage::Full) => {
-                eprintln!("      OK (full coverage): {} docs, {} features",
+                eprintln!(
+                    "      OK (full coverage): {} docs, {} features",
                     info.get("documents").and_then(|v| v.as_u64()).unwrap_or(0),
-                    info.get("features").and_then(|v| v.as_u64()).unwrap_or(0));
+                    info.get("features").and_then(|v| v.as_u64()).unwrap_or(0)
+                );
                 tfidf_coverage = Some(IndexCoverage::Full);
             }
             Some(IndexCoverage::Base { base_doc_count }) => {
-                eprintln!("      OK (lineage match): covers doc_ids 0..{} of {}; rebuild to extend",
-                    base_doc_count, doc_table.passage_ids.len());
+                eprintln!(
+                    "      OK (lineage match): covers doc_ids 0..{} of {}; rebuild to extend",
+                    base_doc_count,
+                    doc_table.passage_ids.len()
+                );
                 tfidf_coverage = Some(IndexCoverage::Base { base_doc_count });
             }
             None => {
@@ -147,9 +173,11 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let phrase_for_db = phrase_info_holder.as_ref()
+    let phrase_for_db = phrase_info_holder
+        .as_ref()
         .map(|i| (phrase_path.as_path(), i));
-    let tfidf_for_db = tfidf_info_holder.as_ref()
+    let tfidf_for_db = tfidf_info_holder
+        .as_ref()
         .map(|i| (tfidf_path.as_path(), i));
 
     crate::registry::populate_identity_from_pack(
@@ -161,9 +189,7 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
         &pack_root,
     )?;
 
-    let mut manifest = Pack::default_layout(
-        pack_id.unwrap_or_else(|| default_pack_id(&pack_root))
-    );
+    let mut manifest = Pack::default_layout(pack_id.unwrap_or_else(|| default_pack_id(&pack_root)));
     manifest.fingerprints.doc_table = dt_fp.clone();
     manifest.indexes = IndexSet {
         phrase: phrase_present.then(|| IndexRef {
@@ -187,8 +213,10 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
 }
 
 fn short(s: &str) -> String {
-    if s.len() <= 16 { return s.to_string(); }
-    format!("{}…{}", &s[..8], &s[s.len()-8..])
+    if s.len() <= 16 {
+        return s.to_string();
+    }
+    format!("{}…{}", &s[..8], &s[s.len() - 8..])
 }
 
 fn default_pack_id(root: &Path) -> String {

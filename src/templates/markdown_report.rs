@@ -9,10 +9,19 @@ pub fn render(payload: &Value, title_override: Option<&str>) -> String {
     render_with_options(payload, title_override, 3)
 }
 
-pub fn render_with_options(payload: &Value, title_override: Option<&str>, essay_max_pages: usize) -> String {
+pub fn render_with_options(
+    payload: &Value,
+    title_override: Option<&str>,
+    essay_max_pages: usize,
+) -> String {
     let title = title_override
         .map(ToString::to_string)
-        .or_else(|| payload.get("title").and_then(Value::as_str).map(ToString::to_string))
+        .or_else(|| {
+            payload
+                .get("title")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
         .unwrap_or_else(|| default_title(payload));
 
     let mut out = String::new();
@@ -20,7 +29,10 @@ pub fn render_with_options(payload: &Value, title_override: Option<&str>, essay_
     out.push_str("format: graphdiscovery-report-md-v1\n");
     out.push_str(&format!("created_utc: {}\n", Utc::now().to_rfc3339()));
     out.push_str("report_kind: evidence_scaffold_not_final_prose\n");
-    out.push_str(&format!("max_length_hint: up to {} pages\n", essay_max_pages.max(1)));
+    out.push_str(&format!(
+        "max_length_hint: up to {} pages\n",
+        essay_max_pages.max(1)
+    ));
     out.push_str("---\n\n");
     out.push_str(&format!("# {}\n\n", title));
     out.push_str("> This report is an evidence scaffold for an LLM or researcher. Claims should stay tied to the cited Chinese evidence below.\n\n");
@@ -64,14 +76,31 @@ pub fn render_with_options(payload: &Value, title_override: Option<&str>, essay_
             ));
             out.push_str(&format!(
                 "- Source: `{}`",
-                item.get("source_rel_path").and_then(Value::as_str).unwrap_or("")
+                item.get("source_rel_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
             ));
-            if let Some(lb) = item.get("lb_range").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            if let Some(lb) = item
+                .get("lb_range")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+            {
                 out.push_str(&format!(" ({lb})"));
             }
             out.push('\n');
-            for key in ["main_title", "author", "period", "canon", "source_corpus", "rights_id"] {
-                if let Some(value) = item.get(key).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            for key in [
+                "main_title",
+                "author",
+                "period",
+                "canon",
+                "source_corpus",
+                "rights_id",
+            ] {
+                if let Some(value) = item
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                {
                     out.push_str(&format!("- {}: {}\n", key.replace('_', " "), value));
                 }
             }

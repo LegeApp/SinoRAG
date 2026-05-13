@@ -10,36 +10,36 @@ pub struct CorpusToml {
     pub name: String,
     pub language: String,
     pub snapshot_id: String,
-    
+
     #[serde(default)]
     pub script: Option<String>,
-    
+
     #[serde(default)]
     pub description: Option<String>,
-    
+
     #[serde(default)]
     pub source_url: Option<String>,
-    
+
     #[serde(default)]
     pub source_type: Option<String>,
-    
+
     pub rights_id: String,
-    
+
     #[serde(default)]
     pub rights_notes: Option<String>,
-    
+
     #[serde(default)]
     pub default_period: Option<String>,
-    
+
     #[serde(default)]
     pub default_period_rank: Option<i32>,
-    
+
     #[serde(default)]
     pub default_origin: Option<String>,
-    
+
     #[serde(default)]
     pub default_traditions: Vec<String>,
-    
+
     #[serde(default)]
     pub conversion: Option<ConversionInfo>,
 }
@@ -48,13 +48,13 @@ pub struct CorpusToml {
 pub struct ConversionInfo {
     #[serde(default)]
     pub converter_name: Option<String>,
-    
+
     #[serde(default)]
     pub converter_version: Option<String>,
-    
+
     #[serde(default)]
     pub conversion_date: Option<String>,
-    
+
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -63,46 +63,46 @@ pub struct ConversionInfo {
 pub struct WorkRecord {
     pub work_id: String,
     pub title_zh: String,
-    
+
     #[serde(default)]
     pub title_en: Option<String>,
-    
+
     #[serde(default)]
     pub author: Option<String>,
-    
+
     #[serde(default)]
     pub dynasty: Option<String>,
-    
+
     #[serde(default)]
     pub period: Option<String>,
-    
+
     #[serde(default)]
     pub period_rank: Option<i32>,
-    
+
     #[serde(default)]
     pub date_start: Option<i32>,
-    
+
     #[serde(default)]
     pub date_end: Option<i32>,
-    
+
     #[serde(default)]
     pub date_certainty: Option<String>,
-    
+
     #[serde(default)]
     pub traditions: Vec<String>,
-    
+
     #[serde(default)]
     pub genre: Option<String>,
-    
+
     #[serde(default)]
     pub source_rel_path: Option<String>,
-    
+
     #[serde(default)]
     pub source_url: Option<String>,
-    
+
     #[serde(default)]
     pub rights_id: Option<String>,
-    
+
     #[serde(default)]
     pub quality_flags: Option<serde_json::Value>,
 }
@@ -112,46 +112,46 @@ pub struct PassageRecord {
     pub passage_id: String,
     pub work_id: String,
     pub text: String,
-    
+
     #[serde(default)]
     pub rights_id: Option<String>,
-    
+
     #[serde(default)]
     pub section_id: Option<String>,
-    
+
     #[serde(default)]
     pub section_title: Option<String>,
-    
+
     #[serde(default)]
     pub locator: Option<String>,
-    
+
     #[serde(default)]
     pub source_rel_path: Option<String>,
-    
+
     #[serde(default)]
     pub source_url: Option<String>,
-    
+
     #[serde(default)]
     pub text_normalized: Option<String>,
-    
+
     #[serde(default)]
     pub text_type: Option<String>,
-    
+
     #[serde(default)]
     pub heading_path: Option<String>,
-    
+
     #[serde(default)]
     pub line_start: Option<String>,
-    
+
     #[serde(default)]
     pub line_end: Option<String>,
-    
+
     #[serde(default)]
     pub contains_person: Option<bool>,
-    
+
     #[serde(default)]
     pub contains_term: Option<bool>,
-    
+
     #[serde(default)]
     pub quality_flags: Option<serde_json::Value>,
 }

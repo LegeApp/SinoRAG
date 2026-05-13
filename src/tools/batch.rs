@@ -1,11 +1,11 @@
+use anyhow::Result;
 use serde::Deserialize;
 use std::path::PathBuf;
-use anyhow::Result;
 
-use crate::tools::engine::ToolEngine;
-use crate::tools::registry::call_tool_enveloped;
-use crate::tools::errors::ToolErrorBody;
 use crate::tools;
+use crate::tools::engine::ToolEngine;
+use crate::tools::errors::ToolErrorBody;
+use crate::tools::registry::call_tool_enveloped;
 
 /// A batch job definition
 #[derive(Debug, Clone, Deserialize)]
@@ -74,9 +74,9 @@ pub struct RunToolsArgs {
 
 /// Run a batch of tools from a JSONL file
 pub async fn run(args: RunToolsArgs) -> Result<()> {
+    use futures::{stream, StreamExt};
     use std::io::{BufRead, Write};
     use std::sync::Arc;
-    use futures::{stream, StreamExt};
 
     let config = crate::tools::EngineConfig {
         pack: args.pack,
@@ -148,12 +148,7 @@ pub async fn run(args: RunToolsArgs) -> Result<()> {
     }
 
     if jobs.iter().any(|job| !job.depends_on.is_empty()) {
-        return run_jobs_with_dependencies(
-            engine,
-            jobs,
-            &mut writer,
-            args.continue_on_error,
-        ).await;
+        return run_jobs_with_dependencies(engine, jobs, &mut writer, args.continue_on_error).await;
     }
 
     if args.jobs.max(1) == 1 {
@@ -298,7 +293,10 @@ fn skipped_dependency_envelope(job: &BatchJob, dep: &str) -> tools::registry::To
     }
 }
 
-fn unresolved_dependency_envelope(job: &BatchJob, missing: Vec<String>) -> tools::registry::ToolCallEnvelope {
+fn unresolved_dependency_envelope(
+    job: &BatchJob,
+    missing: Vec<String>,
+) -> tools::registry::ToolCallEnvelope {
     tools::registry::ToolCallEnvelope {
         id: job.id.clone(),
         ok: false,
@@ -318,7 +316,10 @@ fn unresolved_dependency_envelope(job: &BatchJob, missing: Vec<String>) -> tools
     }
 }
 
-async fn run_one_job(engine: std::sync::Arc<ToolEngine>, job: BatchJob) -> tools::registry::ToolCallEnvelope {
+async fn run_one_job(
+    engine: std::sync::Arc<ToolEngine>,
+    job: BatchJob,
+) -> tools::registry::ToolCallEnvelope {
     let fut = call_tool_enveloped(
         engine.as_ref(),
         job.id.clone(),

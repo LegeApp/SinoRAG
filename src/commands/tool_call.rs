@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 
 #[derive(clap::Args, Debug)]
 pub struct ToolCallArgs {
@@ -43,7 +43,7 @@ pub struct ToolCallArgs {
 }
 
 pub async fn run(args: ToolCallArgs) -> Result<()> {
-    use crate::tools::{ToolEngine, EngineConfig, call_tool_enveloped};
+    use crate::tools::{call_tool_enveloped, EngineConfig, ToolEngine};
 
     let json_text = match (&args.json, &args.json_file) {
         (Some(s), None) => s.clone(),

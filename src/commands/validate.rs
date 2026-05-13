@@ -99,7 +99,10 @@ fn validate_confidence(claim: &serde_json::Value, cid: &str, errors: &mut Vec<St
         return;
     }
 
-    errors.push(format!("{}: confidence must be number or low/medium/high", cid));
+    errors.push(format!(
+        "{}: confidence must be number or low/medium/high",
+        cid
+    ));
 }
 
 pub fn run(adjudication: PathBuf) -> Result<()> {
@@ -185,10 +188,8 @@ fn check_adjudication(payload: &Value) -> Vec<String> {
                         evidence.len()
                     ));
                 } else {
-                    let roles: std::collections::HashSet<&str> = evidence
-                        .iter()
-                        .filter_map(|e| evidence_role(e))
-                        .collect();
+                    let roles: std::collections::HashSet<&str> =
+                        evidence.iter().filter_map(|e| evidence_role(e)).collect();
                     if !roles.contains("seed") {
                         errors.push(format!("{}: evidence missing a 'seed' role item", cid));
                     }

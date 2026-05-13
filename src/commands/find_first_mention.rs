@@ -31,17 +31,27 @@ pub async fn run(
     let raw_hits = exact_phrase_rows_with_index(&store, &spec, phrase_index.as_deref()).await?;
     // Apply scope_period and scope_source_work_id post-hoc since SearchSpec
     // doesn't carry those fields.
-    let hits: Vec<Value> = raw_hits.into_iter().filter(|row| {
-        if !scope_period.is_empty() {
-            let p = row.get("period").and_then(|v| v.as_str()).unwrap_or("");
-            if !scope_period.iter().any(|s| s == p) { return false; }
-        }
-        if let Some(work) = &scope_source_work_id {
-            let w = row.get("source_work_id").and_then(|v| v.as_str()).unwrap_or("");
-            if w != work { return false; }
-        }
-        true
-    }).collect();
+    let hits: Vec<Value> = raw_hits
+        .into_iter()
+        .filter(|row| {
+            if !scope_period.is_empty() {
+                let p = row.get("period").and_then(|v| v.as_str()).unwrap_or("");
+                if !scope_period.iter().any(|s| s == p) {
+                    return false;
+                }
+            }
+            if let Some(work) = &scope_source_work_id {
+                let w = row
+                    .get("source_work_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if w != work {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
     let verified = hits.len();
 
     // Sort by (period_rank, doc_id) — both come from the row payload + doc_table.
@@ -49,7 +59,11 @@ pub async fn run(
     for row in hits {
         let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(did) = doc_table.doc_id(pid) {
-            let pr = doc_table.period_ranks.get(did as usize).copied().unwrap_or(0);
+            let pr = doc_table
+                .period_ranks
+                .get(did as usize)
+                .copied()
+                .unwrap_or(0);
             scored.push((pr, did, row));
         }
     }
@@ -65,13 +79,15 @@ pub async fn run(
         }
         row
     });
-    let next_earlier: Vec<Value> = iter.map(|(pr, did, mut row)| {
-        if let Some(obj) = row.as_object_mut() {
-            obj.insert("period_rank".to_string(), json!(pr));
-            obj.insert("doc_id".to_string(), json!(did));
-        }
-        row
-    }).collect();
+    let next_earlier: Vec<Value> = iter
+        .map(|(pr, did, mut row)| {
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("period_rank".to_string(), json!(pr));
+                obj.insert("doc_id".to_string(), json!(did));
+            }
+            row
+        })
+        .collect();
 
     let payload = json!({
         "schema": "sinoragd-first-mention-v1",

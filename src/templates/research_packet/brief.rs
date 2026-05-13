@@ -22,12 +22,26 @@ pub struct Brief {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Seed {
-    Phrase { value: String },
-    Passage { value: String },
-    Person { name: String, #[serde(default)] aliases: Vec<String> },
-    Work { value: String },
-    Canon { value: String },
-    Period { value: String },
+    Phrase {
+        value: String,
+    },
+    Passage {
+        value: String,
+    },
+    Person {
+        name: String,
+        #[serde(default)]
+        aliases: Vec<String>,
+    },
+    Work {
+        value: String,
+    },
+    Canon {
+        value: String,
+    },
+    Period {
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -74,7 +88,8 @@ impl Brief {
         if brief.schema != BRIEF_SCHEMA {
             return Err(anyhow!(
                 "brief schema `{}` (expected `{}`)",
-                brief.schema, BRIEF_SCHEMA
+                brief.schema,
+                BRIEF_SCHEMA
             ));
         }
         if brief.seeds.is_empty() {
@@ -90,13 +105,26 @@ impl Brief {
     /// Compose a brief from individual CLI flags (each may contribute one seed).
     pub fn from_flags(args: BriefArgs) -> Result<Self> {
         let mut seeds = Vec::new();
-        if let Some(v) = args.phrase { seeds.push(Seed::Phrase { value: v }); }
-        if let Some(v) = args.seed_passage { seeds.push(Seed::Passage { value: v }); }
-        if let Some(v) = args.work { seeds.push(Seed::Work { value: v }); }
-        if let Some(v) = args.canon { seeds.push(Seed::Canon { value: v }); }
-        if let Some(v) = args.period { seeds.push(Seed::Period { value: v }); }
+        if let Some(v) = args.phrase {
+            seeds.push(Seed::Phrase { value: v });
+        }
+        if let Some(v) = args.seed_passage {
+            seeds.push(Seed::Passage { value: v });
+        }
+        if let Some(v) = args.work {
+            seeds.push(Seed::Work { value: v });
+        }
+        if let Some(v) = args.canon {
+            seeds.push(Seed::Canon { value: v });
+        }
+        if let Some(v) = args.period {
+            seeds.push(Seed::Period { value: v });
+        }
         if let Some(name) = args.person {
-            seeds.push(Seed::Person { name, aliases: args.person_alias });
+            seeds.push(Seed::Person {
+                name,
+                aliases: args.person_alias,
+            });
         }
         if seeds.is_empty() {
             return Err(anyhow!(
@@ -122,7 +150,7 @@ impl Brief {
         s.push_str("## Seeds\n\n");
         for seed in &self.seeds {
             match seed {
-                Seed::Phrase { value }  => s.push_str(&format!("- **phrase**: `{value}`\n")),
+                Seed::Phrase { value } => s.push_str(&format!("- **phrase**: `{value}`\n")),
                 Seed::Passage { value } => s.push_str(&format!("- **passage**: `{value}`\n")),
                 Seed::Person { name, aliases } => {
                     s.push_str(&format!("- **person**: {name}"));
@@ -131,8 +159,8 @@ impl Brief {
                     }
                     s.push('\n');
                 }
-                Seed::Work { value }   => s.push_str(&format!("- **work**: `{value}`\n")),
-                Seed::Canon { value }  => s.push_str(&format!("- **canon**: `{value}`\n")),
+                Seed::Work { value } => s.push_str(&format!("- **work**: `{value}`\n")),
+                Seed::Canon { value } => s.push_str(&format!("- **canon**: `{value}`\n")),
                 Seed::Period { value } => s.push_str(&format!("- **period**: `{value}`\n")),
             }
         }
@@ -167,5 +195,9 @@ fn slugify(s: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() { "seed".to_string() } else { trimmed }
+    if trimmed.is_empty() {
+        "seed".to_string()
+    } else {
+        trimmed
+    }
 }

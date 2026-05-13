@@ -31,9 +31,7 @@ pub fn system_memory_info() -> Option<MemoryInfo> {
 #[cfg(target_os = "windows")]
 fn system_memory_info_impl() -> anyhow::Result<MemoryInfo> {
     use std::mem::size_of;
-    use windows_sys::Win32::System::SystemInformation::{
-        GlobalMemoryStatusEx, MEMORYSTATUSEX,
-    };
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
     let mut status = MEMORYSTATUSEX {
         dwLength: size_of::<MEMORYSTATUSEX>() as u32,
@@ -77,7 +75,7 @@ fn linux_memory_info() -> anyhow::Result<MemoryInfo> {
     use std::fs::read_to_string;
 
     let meminfo = read_to_string("/proc/meminfo")?;
-    
+
     let mut total: Option<u64> = None;
     let mut available: Option<u64> = None;
     let mut free: Option<u64> = None;
@@ -101,14 +99,11 @@ fn linux_memory_info() -> anyhow::Result<MemoryInfo> {
         }
     }
 
-    let total = total.ok_or_else(|| anyhow::anyhow!("Could not read MemTotal from /proc/meminfo"))?;
-    let available = available.or_else(|| {
-        free.and_then(|f| {
-            buffers.and_then(|b| {
-                cached.map(|c| f + b + c)
-            })
-        })
-    }).ok_or_else(|| anyhow::anyhow!("Could not determine available memory"))?;
+    let total =
+        total.ok_or_else(|| anyhow::anyhow!("Could not read MemTotal from /proc/meminfo"))?;
+    let available = available
+        .or_else(|| free.and_then(|f| buffers.and_then(|b| cached.map(|c| f + b + c))))
+        .ok_or_else(|| anyhow::anyhow!("Could not determine available memory"))?;
 
     let used = total.saturating_sub(available);
     let memory_load_percent = if total > 0 {
@@ -132,9 +127,7 @@ fn linux_memory_info() -> anyhow::Result<MemoryInfo> {
 fn macos_memory_info() -> anyhow::Result<MemoryInfo> {
     use std::process::Command;
 
-    let output = Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()?;
+    let output = Command::new("sysctl").args(["-n", "hw.memsize"]).output()?;
 
     if !output.status.success() {
         anyhow::bail!("sysctl hw.memsize failed");
@@ -144,8 +137,7 @@ fn macos_memory_info() -> anyhow::Result<MemoryInfo> {
         .trim()
         .parse::<u64>()?;
 
-    let vm_output = Command::new("vm_stat")
-        .output()?;
+    let vm_output = Command::new("vm_stat").output()?;
 
     if !vm_output.status.success() {
         anyhow::bail!("vm_stat failed");
@@ -161,8 +153,12 @@ fn macos_memory_info() -> anyhow::Result<MemoryInfo> {
             continue;
         }
         if let Some(value_str) = line.split(':').nth(1) {
-            let value = value_str.trim().trim_end_matches('.').parse::<u64>().unwrap_or(0);
-            
+            let value = value_str
+                .trim()
+                .trim_end_matches('.')
+                .parse::<u64>()
+                .unwrap_or(0);
+
             if line.contains("page size") {
                 page_size = value;
             } else if line.contains("Pages free") {
@@ -205,13 +201,9 @@ pub fn compute_memory_budget(
 ) -> MemoryBudget {
     let info = system_memory_info();
 
-    let total = info
-        .map(|m| m.total_physical_bytes)
-        .unwrap_or(0);
+    let total = info.map(|m| m.total_physical_bytes).unwrap_or(0);
 
-    let available = info
-        .map(|m| m.available_physical_bytes)
-        .unwrap_or(0);
+    let available = info.map(|m| m.available_physical_bytes).unwrap_or(0);
 
     let auto_budget = if available > 0 {
         ((available as f64) * fraction_of_available.clamp(0.05, 0.95)) as u64
@@ -277,20 +269,21 @@ pub fn parse_memory_size(input: &str) -> anyhow::Result<u64> {
 /// Returns Ok(()) if sufficient, Err with message if not
 pub fn check_memory_available(min_required_gb: f64) -> anyhow::Result<()> {
     let min_required_bytes = (min_required_gb * 1024.0 * 1024.0 * 1024.0) as u64;
-    
+
     if let Some(info) = system_memory_info() {
         let available = info.available_physical_bytes;
-        
+
         if available < min_required_bytes {
             let available_gb = available as f64 / 1024.0 / 1024.0 / 1024.0;
             anyhow::bail!(
                 "Insufficient memory: {:.1} GB available, {:.1} GB required. \
                  Reduce RAYON_NUM_THREADS or close other applications.",
-                available_gb, min_required_gb
+                available_gb,
+                min_required_gb
             );
         }
     }
-    
+
     Ok(())
 }
 
@@ -299,12 +292,12 @@ pub fn check_memory_available(min_required_gb: f64) -> anyhow::Result<()> {
 pub fn recommended_thread_count(per_thread_memory_gb: f64) -> usize {
     if let Some(info) = system_memory_info() {
         let available_gb = info.available_physical_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
-        
+
         // Reserve 2 GB for system overhead
         let usable_gb = (available_gb - 2.0).max(1.0);
-        
+
         let recommended = (usable_gb / per_thread_memory_gb).floor() as usize;
-        
+
         // Cap at physical CPU count and minimum of 1
         let max_threads = num_cpus::get();
         recommended.min(max_threads).max(1)
@@ -324,7 +317,10 @@ pub fn recommended_thread_count(per_thread_memory_gb: f64) -> usize {
 /// CJK text per part file is typical). bucket_count is the next power
 /// of two that brings `total / bucket_count` under target. Clamped to
 /// `[64, 8192]`.
-pub fn bucket_count_for_corpus(parquet_file_count: usize, memory_budget_bytes: Option<u64>) -> usize {
+pub fn bucket_count_for_corpus(
+    parquet_file_count: usize,
+    memory_budget_bytes: Option<u64>,
+) -> usize {
     let budget = memory_budget_bytes
         .map(|b| b as f64)
         .or_else(|| system_memory_info().map(|m| (m.available_physical_bytes as f64) * 0.6))

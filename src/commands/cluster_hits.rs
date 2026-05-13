@@ -32,7 +32,11 @@ pub async fn run(
     let target = match cluster_by.as_str() {
         "work" => OutlineSearchLevel::Work,
         "division" => OutlineSearchLevel::Division,
-        other => return Err(anyhow!("unknown --cluster-by `{other}`; expected work|division")),
+        other => {
+            return Err(anyhow!(
+                "unknown --cluster-by `{other}`; expected work|division"
+            ))
+        }
     };
 
     let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
@@ -44,7 +48,8 @@ pub async fn run(
         None,
         None,
         None,
-    ).await?;
+    )
+    .await?;
 
     // Collect (doc_id, row) pairs.
     let mut doc_rows: Vec<(u32, Value)> = Vec::with_capacity(hits.len());
@@ -65,12 +70,11 @@ pub async fn run(
     let mut clusters: Vec<Value> = Vec::new();
     for (node_id, count) in sorted_groups.iter().take(limit_per_cluster) {
         let node = catalog.get_node(*node_id);
-        let node_doc_range = node.and_then(|n| {
-            n.first_doc_id.zip(n.last_doc_id)
-        });
+        let node_doc_range = node.and_then(|n| n.first_doc_id.zip(n.last_doc_id));
 
         // Pick top representative passages within this cluster.
-        let mut reps: Vec<Value> = doc_rows.iter()
+        let mut reps: Vec<Value> = doc_rows
+            .iter()
             .filter(|(did, _)| {
                 if let Some((lo, hi)) = node_doc_range {
                     *did >= lo && *did <= hi

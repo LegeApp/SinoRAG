@@ -31,13 +31,16 @@ pub async fn run(
 
     // Determine the doc range for the scope.
     let doc_range: Option<(u32, u32)> = if let Some(nid) = scope_node_id {
-        let node = catalog.get_node(nid)
+        let node = catalog
+            .get_node(nid)
             .ok_or_else(|| anyhow!("unknown node_id: {nid}"))?;
         node.first_doc_id.zip(node.last_doc_id)
     } else if let Some(wid) = &scope_work_id {
-        let work = catalog.get_work(wid)
+        let work = catalog
+            .get_work(wid)
             .ok_or_else(|| anyhow!("unknown work_id: {wid}"))?;
-        let root = catalog.get_node(work.root_node)
+        let root = catalog
+            .get_node(work.root_node)
             .ok_or_else(|| anyhow!("work root node missing"))?;
         root.first_doc_id.zip(root.last_doc_id)
     } else {
@@ -53,7 +56,8 @@ pub async fn run(
         doc_range,
         scope_canon.as_deref(),
         scope_period.as_deref(),
-    ).await?;
+    )
+    .await?;
 
     let found = !scoped_hits.is_empty();
     let hit_count = scoped_hits.len();

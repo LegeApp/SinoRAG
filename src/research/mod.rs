@@ -1,6 +1,6 @@
 pub mod context_expand;
 
-use crate::datafusion_store::{DataFusionStore, sql_literal, string_contains_sql};
+use crate::datafusion_store::{sql_literal, string_contains_sql, DataFusionStore};
 use crate::document_table::DocumentTable;
 use crate::normalize::normalize_zh;
 use crate::phrase_index::{ids_to_sql_list, PhraseIndex};
@@ -29,10 +29,7 @@ impl SearchSpec {
     }
 }
 
-pub async fn exact_phrase_rows(
-    store: &DataFusionStore,
-    spec: &SearchSpec,
-) -> Result<Vec<Value>> {
+pub async fn exact_phrase_rows(store: &DataFusionStore, spec: &SearchSpec) -> Result<Vec<Value>> {
     exact_phrase_rows_with_index(store, spec, None).await
 }
 
@@ -284,9 +281,9 @@ pub fn format_citation(row: &Value, from_lb: &str, to_lb: &str) -> String {
     } else {
         String::new()
     };
-    
+
     let mut parts = Vec::new();
-    
+
     if !author.is_empty() {
         parts.push(author.clone());
     }
@@ -296,9 +293,9 @@ pub fn format_citation(row: &Value, from_lb: &str, to_lb: &str) -> String {
     if !canon_name.is_empty() {
         parts.push(format!("[{}]", canon_name));
     }
-    
+
     let citation = parts.join(", ");
-    
+
     if !locator.is_empty() {
         format!("{} ({})", citation, locator)
     } else {

@@ -1,4 +1,4 @@
-use crate::datafusion_store::{DataFusionStore, sql_literal, string_contains_sql};
+use crate::datafusion_store::{sql_literal, string_contains_sql, DataFusionStore};
 use crate::jsonout::write_or_print;
 use crate::normalize::normalize_zh;
 use crate::registry;
@@ -24,17 +24,24 @@ pub async fn search(
     let mut where_parts = Vec::new();
     let normalized_phrase = phrase.as_deref().map(normalize_zh).unwrap_or_default();
     if !normalized_phrase.is_empty() {
-        where_parts.push(string_contains_sql("zh_text_normalized", &normalized_phrase));
+        where_parts.push(string_contains_sql(
+            "zh_text_normalized",
+            &normalized_phrase,
+        ));
     }
     for t in expand_values(&tradition) {
         let t = crate::taxonomy_legend::resolve_tradition(&t);
         let token = serde_json::to_string(t).unwrap_or_else(|_| format!("\"{t}\""));
         where_parts.push(string_contains_sql("traditions", &token));
     }
-    let resolved_periods: Vec<String> = expand_values(&period).into_iter()
-        .map(|p| crate::taxonomy_legend::resolve_period(&p).to_string()).collect();
-    let resolved_origins: Vec<String> = expand_values(&origin).into_iter()
-        .map(|o| crate::taxonomy_legend::resolve_origin(&o).to_string()).collect();
+    let resolved_periods: Vec<String> = expand_values(&period)
+        .into_iter()
+        .map(|p| crate::taxonomy_legend::resolve_period(&p).to_string())
+        .collect();
+    let resolved_origins: Vec<String> = expand_values(&origin)
+        .into_iter()
+        .map(|o| crate::taxonomy_legend::resolve_origin(&o).to_string())
+        .collect();
     exact_any(&mut where_parts, "period", &resolved_periods);
     exact_any(&mut where_parts, "origin", &resolved_origins);
     exact_any(&mut where_parts, "canon", &expand_values(&canon));
@@ -53,10 +60,7 @@ pub async fn search(
 
     // Catalog index scope filters
     if let Some(work_id) = &source_work_id {
-        where_parts.push(format!(
-            "source_work_id = {}",
-            sql_literal(work_id)
-        ));
+        where_parts.push(format!("source_work_id = {}", sql_literal(work_id)));
     }
     if let Some(prefix) = &heading_path_prefix {
         where_parts.push(format!(
@@ -87,11 +91,19 @@ pub async fn search(
         "#
     );
     let mut results = store.query_json(&sql).await?;
-    
+
     // Add citation field to each result
     for result in &mut results {
-        let from_lb = result.get("from_lb").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let to_lb = result.get("to_lb").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let from_lb = result
+            .get("from_lb")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let to_lb = result
+            .get("to_lb")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let citation = format_citation(result, &from_lb, &to_lb);
         if let Some(obj) = result.as_object_mut() {
             obj.insert("citation".to_string(), json!(citation));
@@ -160,7 +172,8 @@ pub async fn run(
         source_work_id,
         heading_path_prefix,
         limit,
-    ).await?;
+    )
+    .await?;
 
     let _ = registry::record_payload(
         &registry_path,

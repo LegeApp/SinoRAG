@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
-use crate::research::context_expand::expand_passage_context;
 use crate::datafusion_store::DataFusionStore;
+use crate::research::context_expand::expand_passage_context;
 use crate::search_packet::SearchResultPacket;
 
 pub async fn run(
@@ -17,14 +17,9 @@ pub async fn run(
     let resolved = resolve_passage_id(passage_id, session, hit)?;
     let store = DataFusionStore::open(&parquet).await?;
 
-    let payload = expand_passage_context(
-        &store,
-        &resolved.passage_id,
-        resolved.hit_id,
-        before,
-        after,
-    )
-    .await?;
+    let payload =
+        expand_passage_context(&store, &resolved.passage_id, resolved.hit_id, before, after)
+            .await?;
 
     let text = serde_json::to_string_pretty(&payload)? + "\n";
 

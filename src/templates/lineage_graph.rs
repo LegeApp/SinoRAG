@@ -1,7 +1,9 @@
 //! Lineage-graph draft — `readzen-lineage-graph-draft-v1`. Person extraction
 //! is conservative and rule-based; not authority control.
 
-use super::{dedup_graph, evidence_items, extract_names, node_from_evidence, stable_id, with_layout};
+use super::{
+    dedup_graph, evidence_items, extract_names, node_from_evidence, stable_id, with_layout,
+};
 use serde_json::{json, Value};
 
 pub fn render(payload: &Value, title: &str) -> Value {
@@ -16,7 +18,11 @@ pub fn render(payload: &Value, title: &str) -> Value {
             (nodes.len() as i32) * 120,
             "vertical",
         );
-        let passage_id = passage_node.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let passage_id = passage_node
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         nodes.push(passage_node);
         for name in extract_names(item.get("zh_quote").and_then(Value::as_str).unwrap_or("")) {
             let person_id = stable_id("person", &name);

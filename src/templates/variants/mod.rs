@@ -9,7 +9,8 @@ const ORTHO_JSON: &str = include_str!("orthographic.json");
 
 #[derive(Debug, Deserialize)]
 struct TermsFile {
-    #[allow(dead_code)] schema: String,
+    #[allow(dead_code)]
+    schema: String,
     entries: Vec<TermEntry>,
 }
 #[derive(Debug, Deserialize)]
@@ -20,7 +21,8 @@ struct TermEntry {
 
 #[derive(Debug, Deserialize)]
 struct OrthoFile {
-    #[allow(dead_code)] schema: String,
+    #[allow(dead_code)]
+    schema: String,
     pairs: Vec<(String, String)>,
 }
 
@@ -48,7 +50,10 @@ impl VariantTables {
                 }
             }
         }
-        VariantTables { terms, orthographic_chars }
+        VariantTables {
+            terms,
+            orthographic_chars,
+        }
     }
 
     /// Look up bundled term variants.
@@ -65,13 +70,17 @@ impl VariantTables {
         let mut out: Vec<String> = Vec::new();
         for (i, ch) in chars.iter().enumerate() {
             if let Some(&alt) = self.orthographic_chars.get(ch) {
-                if alt == *ch { continue; }
+                if alt == *ch {
+                    continue;
+                }
                 let mut new_chars = chars.clone();
                 new_chars[i] = alt;
                 let v: String = new_chars.iter().collect();
                 if !out.contains(&v) {
                     out.push(v);
-                    if out.len() >= max { break; }
+                    if out.len() >= max {
+                        break;
+                    }
                 }
             }
         }

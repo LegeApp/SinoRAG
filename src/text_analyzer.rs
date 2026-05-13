@@ -82,9 +82,11 @@ pub fn analyze(text: &str, opts: &AnalyzeOptions, scratch: &mut AnalyzeScratch) 
 
     let bytes = scratch.filtered.as_bytes();
     for n in opts.min_n..=opts.max_n {
-        if num_chars < n { continue; }
+        if num_chars < n {
+            continue;
+        }
         for i in 0..=(num_chars - n) {
-            let s = scratch.char_byte_offsets[i]     as usize;
+            let s = scratch.char_byte_offsets[i] as usize;
             let e = scratch.char_byte_offsets[i + n] as usize;
             let slice = &bytes[s..e];
             if opts.apply_low_value_filter && is_low_value(slice, n) {
@@ -125,11 +127,17 @@ fn build_filtered_normalized(
         let first = bytes[idx];
         let len = utf8_len(first);
         let end = idx + len;
-        if end > bytes.len() { break; }
+        if end > bytes.len() {
+            break;
+        }
         let keep = match filter {
             FilterMode::WhitespaceOnly => {
                 // normalize_zh already stripped whitespace; this is a safety net.
-                if len == 1 { !(bytes[idx] as char).is_whitespace() } else { true }
+                if len == 1 {
+                    !(bytes[idx] as char).is_whitespace()
+                } else {
+                    true
+                }
             }
             FilterMode::CjkOnly => is_cjk_utf8(&bytes[idx..end]),
         };
@@ -143,11 +151,19 @@ fn build_filtered_normalized(
 
 #[inline]
 fn utf8_len(b: u8) -> usize {
-    if b < 0x80 { 1 }
-    else if b < 0xC0 { 1 } // continuation byte — shouldn't start a char; advance 1 defensively
-    else if b < 0xE0 { 2 }
-    else if b < 0xF0 { 3 }
-    else { 4 }
+    if b < 0x80 {
+        1
+    } else if b < 0xC0 {
+        1
+    }
+    // continuation byte — shouldn't start a char; advance 1 defensively
+    else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
 }
 
 #[inline]
@@ -158,17 +174,17 @@ fn is_cjk_utf8(bytes: &[u8]) -> bool {
         3 => {
             // Decode codepoint from 3-byte UTF-8.
             let cp = ((bytes[0] as u32 & 0x0F) << 12)
-                   | ((bytes[1] as u32 & 0x3F) << 6)
-                   |  (bytes[2] as u32 & 0x3F);
+                | ((bytes[1] as u32 & 0x3F) << 6)
+                | (bytes[2] as u32 & 0x3F);
             (0x3400..=0x4DBF).contains(&cp)
                 || (0x4E00..=0x9FFF).contains(&cp)
                 || (0xF900..=0xFAFF).contains(&cp)
         }
         4 => {
             let cp = ((bytes[0] as u32 & 0x07) << 18)
-                   | ((bytes[1] as u32 & 0x3F) << 12)
-                   | ((bytes[2] as u32 & 0x3F) << 6)
-                   |  (bytes[3] as u32 & 0x3F);
+                | ((bytes[1] as u32 & 0x3F) << 12)
+                | ((bytes[2] as u32 & 0x3F) << 6)
+                | (bytes[3] as u32 & 0x3F);
             (0x20000..=0x2A6DF).contains(&cp)
         }
         _ => false,
@@ -178,8 +194,12 @@ fn is_cjk_utf8(bytes: &[u8]) -> bool {
 /// `bytes` covers exactly `n_chars` Chinese characters (each UTF-8 length-3
 /// or length-4). Detect: all-same-char, or ABAB-period repeat.
 fn is_low_value(bytes: &[u8], n_chars: usize) -> bool {
-    if n_chars == 0 { return true; }
-    if n_chars == 1 { return false; }
+    if n_chars == 0 {
+        return true;
+    }
+    if n_chars == 1 {
+        return false;
+    }
     // All same char.
     let first_len = utf8_len(bytes[0]);
     if bytes.len() >= 2 * first_len {
@@ -188,11 +208,19 @@ fn is_low_value(bytes: &[u8], n_chars: usize) -> bool {
         let mut same = true;
         while idx < bytes.len() {
             let l = utf8_len(bytes[idx]);
-            if idx + l > bytes.len() { same = false; break; }
-            if &bytes[idx..idx + l] != first_char { same = false; break; }
+            if idx + l > bytes.len() {
+                same = false;
+                break;
+            }
+            if &bytes[idx..idx + l] != first_char {
+                same = false;
+                break;
+            }
             idx += l;
         }
-        if same { return true; }
+        if same {
+            return true;
+        }
     }
     // ABAB period repeat (only meaningful when n_chars is even and >= 4).
     if n_chars >= 4 && n_chars % 2 == 0 {
@@ -217,7 +245,8 @@ fn run_length_count(sorted: &[u64], out: &mut Vec<(u64, u32)>) {
         let mut c = 1u32;
         i += 1;
         while i < sorted.len() && sorted[i] == h {
-            c += 1; i += 1;
+            c += 1;
+            i += 1;
         }
         out.push((h, c));
     }
@@ -229,7 +258,8 @@ mod tests {
 
     fn opts_phrase(n: usize) -> AnalyzeOptions {
         AnalyzeOptions {
-            min_n: n, max_n: n,
+            min_n: n,
+            max_n: n,
             filter: FilterMode::WhitespaceOnly,
             apply_low_value_filter: false,
             dedup: true,
@@ -258,7 +288,8 @@ mod tests {
     fn count_tf_runs() {
         let mut s = AnalyzeScratch::new();
         let opts = AnalyzeOptions {
-            min_n: 2, max_n: 2,
+            min_n: 2,
+            max_n: 2,
             filter: FilterMode::CjkOnly,
             apply_low_value_filter: false,
             dedup: false,
@@ -267,7 +298,9 @@ mod tests {
         analyze("如是如是", &opts, &mut s);
         // 3 bigrams: 如是 是如 如是 → counts: {如是:2, 是如:1}
         let mut total: u32 = 0;
-        for (_, c) in &s.counts { total += c; }
+        for (_, c) in &s.counts {
+            total += c;
+        }
         assert_eq!(total, 3);
     }
 
@@ -277,14 +310,18 @@ mod tests {
         old.sort_unstable();
 
         let mut s = AnalyzeScratch::new();
-        analyze("中A國", &AnalyzeOptions {
-            min_n: 2,
-            max_n: 2,
-            filter: FilterMode::CjkOnly,
-            apply_low_value_filter: false,
-            dedup: true,
-            count_tf: false,
-        }, &mut s);
+        analyze(
+            "中A國",
+            &AnalyzeOptions {
+                min_n: 2,
+                max_n: 2,
+                filter: FilterMode::CjkOnly,
+                apply_low_value_filter: false,
+                dedup: true,
+                count_tf: false,
+            },
+            &mut s,
+        );
 
         assert_eq!(s.filtered, "中國");
         assert_eq!(s.unique, old);
@@ -296,14 +333,18 @@ mod tests {
         old.sort_unstable();
 
         let mut s = AnalyzeScratch::new();
-        analyze("中A國。中 國", &AnalyzeOptions {
-            min_n: 2,
-            max_n: 2,
-            filter: FilterMode::CjkOnly,
-            apply_low_value_filter: false,
-            dedup: false,
-            count_tf: true,
-        }, &mut s);
+        analyze(
+            "中A國。中 國",
+            &AnalyzeOptions {
+                min_n: 2,
+                max_n: 2,
+                filter: FilterMode::CjkOnly,
+                apply_low_value_filter: false,
+                dedup: false,
+                count_tf: true,
+            },
+            &mut s,
+        );
 
         assert_eq!(s.all_hashes, old);
     }

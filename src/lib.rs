@@ -1,5 +1,5 @@
-pub mod cef;
 pub mod catalog_index;
+pub mod cef;
 pub mod cli;
 pub mod commands;
 pub mod datafusion_store;
@@ -18,8 +18,8 @@ pub mod research;
 pub mod research_tools;
 pub mod search_packet;
 pub mod storage;
-pub mod tei;
 pub mod taxonomy_legend;
+pub mod tei;
 pub mod templates;
 pub mod text_analyzer;
 pub mod tfidf;

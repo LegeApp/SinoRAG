@@ -52,8 +52,8 @@ fn render(parquet_bytes: u64, r: &EstimateRatios) -> String {
 
     let disk_lo = (pb * r.disk_lo) as u64;
     let disk_hi = (pb * r.disk_hi) as u64;
-    let min_lo  = (gb * r.minutes_per_gb_lo).max(1.0);
-    let min_hi  = (gb * r.minutes_per_gb_hi).max(1.0);
+    let min_lo = (gb * r.minutes_per_gb_lo).max(1.0);
+    let min_hi = (gb * r.minutes_per_gb_hi).max(1.0);
 
     format!(
         "~{}–{} disk, ~{} build",
@@ -65,7 +65,9 @@ fn render(parquet_bytes: u64, r: &EstimateRatios) -> String {
 
 /// Recursively measure on-disk size of a parquet root (sum of all files).
 pub fn dir_size(path: &Path) -> u64 {
-    let Ok(meta) = fs::metadata(path) else { return 0; };
+    let Ok(meta) = fs::metadata(path) else {
+        return 0;
+    };
     if meta.is_file() {
         return meta.len();
     }

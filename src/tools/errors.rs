@@ -74,7 +74,9 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             ToolError::UnknownTool(name) => ToolErrorBody {
                 code: "unknown_tool".to_string(),
                 message: format!("Unknown tool: {}", name),
-                suggested_command: Some("Run 'sinoragd tools-manifest' to see available tools".to_string()),
+                suggested_command: Some(
+                    "Run 'sinoragd tools-manifest' to see available tools".to_string(),
+                ),
                 details: None,
             },
             ToolError::MissingPhraseIndex { path } => ToolErrorBody {
@@ -98,13 +100,17 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             ToolError::MissingCatalogIndex { path } => ToolErrorBody {
                 code: "missing_catalog_index".to_string(),
                 message: format!("Catalog index not found at {}", path.display()),
-                suggested_command: Some("Run 'sinoragd catalog-index-build' to build the catalog index".to_string()),
+                suggested_command: Some(
+                    "Run 'sinoragd catalog-index-build' to build the catalog index".to_string(),
+                ),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
             ToolError::MissingDocTable { path } => ToolErrorBody {
                 code: "missing_doc_table".to_string(),
                 message: format!("Document table not found at {}", path.display()),
-                suggested_command: Some("Run 'sinoragd doc-table-build' to build the document table".to_string()),
+                suggested_command: Some(
+                    "Run 'sinoragd doc-table-build' to build the document table".to_string(),
+                ),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
             ToolError::MissingPassages { path } => ToolErrorBody {
@@ -115,21 +121,34 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             },
             ToolError::ReadonlyViolation { tool } => ToolErrorBody {
                 code: "readonly_violation".to_string(),
-                message: format!("Tool '{}' writes output but engine is in readonly mode", tool),
+                message: format!(
+                    "Tool '{}' writes output but engine is in readonly mode",
+                    tool
+                ),
                 suggested_command: Some("Remove --readonly flag to allow writes".to_string()),
                 details: Some(serde_json::json!({ "tool": tool })),
             },
             ToolError::AdminToolDisabled { tool } => ToolErrorBody {
                 code: "admin_tool_disabled".to_string(),
                 message: format!("Tool '{}' requires --allow-admin-tools flag", tool),
-                suggested_command: Some("Add --allow-admin-tools flag to enable admin tools".to_string()),
+                suggested_command: Some(
+                    "Add --allow-admin-tools flag to enable admin tools".to_string(),
+                ),
                 details: Some(serde_json::json!({ "tool": tool })),
             },
             ToolError::OutputPathViolation { path, root } => ToolErrorBody {
                 code: "output_path_denied".to_string(),
-                message: format!("Output path {} is outside output root {}", path.display(), root.display()),
-                suggested_command: Some("Specify --output-root or use a path inside the allowed directory".to_string()),
-                details: Some(serde_json::json!({ "path": path.display().to_string(), "root": root.display().to_string() })),
+                message: format!(
+                    "Output path {} is outside output root {}",
+                    path.display(),
+                    root.display()
+                ),
+                suggested_command: Some(
+                    "Specify --output-root or use a path inside the allowed directory".to_string(),
+                ),
+                details: Some(
+                    serde_json::json!({ "path": path.display().to_string(), "root": root.display().to_string() }),
+                ),
             },
             ToolError::InvalidJson(s) => ToolErrorBody {
                 code: "invalid_json".to_string(),
@@ -140,7 +159,9 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             ToolError::InvalidArgs(s) => ToolErrorBody {
                 code: "invalid_args".to_string(),
                 message: format!("Invalid arguments: {}", s),
-                suggested_command: Some("Run 'sinoragd explain-tool <tool>' for usage information".to_string()),
+                suggested_command: Some(
+                    "Run 'sinoragd explain-tool <tool>' for usage information".to_string(),
+                ),
                 details: None,
             },
             ToolError::Internal(s) => ToolErrorBody {
@@ -179,7 +200,9 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
         return ToolErrorBody {
             code: "missing_catalog_index".to_string(),
             message: msg,
-            suggested_command: Some("Run 'sinoragd catalog-index-build' to build the catalog index".to_string()),
+            suggested_command: Some(
+                "Run 'sinoragd catalog-index-build' to build the catalog index".to_string(),
+            ),
             details: None,
         };
     }

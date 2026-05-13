@@ -9,13 +9,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn run(data: PathBuf) -> Result<()> {
-    let parquet_root  = data.join("passages.parquet");
-    let derived       = data.join("derived");
-    let doc_table     = derived.join("doc_table.bin");
+    let parquet_root = data.join("passages.parquet");
+    let derived = data.join("derived");
+    let doc_table = derived.join("doc_table.bin");
     let catalog_index = derived.join("catalog.index");
-    let phrase_index  = derived.join("phrase_v3.index");
-    let tfidf_index   = derived.join("tfidf_v3.index");
-    let registry      = derived.join("registry.sqlite");
+    let phrase_index = derived.join("phrase_v3.index");
+    let tfidf_index = derived.join("tfidf_v3.index");
+    let registry = derived.join("registry.sqlite");
 
     println!("SinoRAGD status — data root: {}", data.display());
     println!();
@@ -34,10 +34,18 @@ pub fn run(data: PathBuf) -> Result<()> {
 
     // --- Indexes --------------------------------------------------------
     println!("Indexes:");
-    report("doc_table",     &doc_table,     "base");
+    report("doc_table", &doc_table, "base");
     report("catalog.index", &catalog_index, "base");
-    report("phrase_v3.index", &phrase_index, "optional — exact phrase search");
-    report("tfidf_v3.index",   &tfidf_index,   "optional — similarity / frontier");
+    report(
+        "phrase_v3.index",
+        &phrase_index,
+        "optional — exact phrase search",
+    );
+    report(
+        "tfidf_v3.index",
+        &tfidf_index,
+        "optional — similarity / frontier",
+    );
     println!();
 
     // --- Registry -------------------------------------------------------
@@ -80,7 +88,9 @@ pub fn run(data: PathBuf) -> Result<()> {
         shown_any = true;
     }
     println!("  • Single tool call:  `sinoragd tool-call search --json '{{\"phrase\":\"...\"}}'`");
-    println!("  • Batch tool calls:  `sinoragd run-tools --input jobs.jsonl --output results.jsonl`");
+    println!(
+        "  • Batch tool calls:  `sinoragd run-tools --input jobs.jsonl --output results.jsonl`"
+    );
     if !shown_any {
         println!("  (all heavy indexes already built — you're ready.)");
     }
@@ -90,16 +100,21 @@ pub fn run(data: PathBuf) -> Result<()> {
 
 fn list_partitions(parquet_root: &Path) -> Vec<(String, usize)> {
     let mut out: Vec<(String, usize)> = Vec::new();
-    let Ok(read) = fs::read_dir(parquet_root) else { return out; };
+    let Ok(read) = fs::read_dir(parquet_root) else {
+        return out;
+    };
     for entry in read.flatten() {
         let name = entry.file_name();
         let s = name.to_string_lossy();
         if let Some(corpus) = s.strip_prefix("source_corpus=") {
             let count = fs::read_dir(entry.path())
-                .map(|r| r.flatten()
-                          .filter(|e| e.path().extension()
-                                          .and_then(|x| x.to_str()) == Some("parquet"))
-                          .count())
+                .map(|r| {
+                    r.flatten()
+                        .filter(|e| {
+                            e.path().extension().and_then(|x| x.to_str()) == Some("parquet")
+                        })
+                        .count()
+                })
                 .unwrap_or(0);
             out.push((corpus.to_string(), count));
         }
@@ -118,7 +133,9 @@ fn report(label: &str, path: &Path, note: &str) {
 }
 
 fn path_size(path: &Path) -> u64 {
-    let Ok(meta) = fs::metadata(path) else { return 0; };
+    let Ok(meta) = fs::metadata(path) else {
+        return 0;
+    };
     if meta.is_file() {
         return meta.len();
     }

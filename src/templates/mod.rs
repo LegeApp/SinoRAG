@@ -36,20 +36,14 @@ pub fn evidence_items(payload: &Value) -> Vec<Value> {
 
     if let Some(claims) = payload.get("accepted_claims").and_then(Value::as_array) {
         for claim in claims {
-            let claim_id = claim
-                .get("claim_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let claim_id = claim.get("claim_id").and_then(|v| v.as_str()).unwrap_or("");
 
             let claim_type = claim
                 .get("claim_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let ring = claim
-                .get("ring")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let ring = claim.get("ring").and_then(|v| v.as_str()).unwrap_or("");
 
             let matched_phrases = claim
                 .get("matched_phrases")

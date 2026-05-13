@@ -100,9 +100,7 @@ impl CorpusCatalogIndex {
         }
         let tmp = path.with_extension(format!(
             "{}.tmp",
-            path.extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("bin")
+            path.extension().and_then(|s| s.to_str()).unwrap_or("bin")
         ));
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, path)?;
@@ -125,7 +123,9 @@ impl CorpusCatalogIndex {
     }
 
     pub fn get_work(&self, work_id: &str) -> Option<&WorkRecord> {
-        self.work_id_map.get(work_id).and_then(|idx| self.works.get(*idx))
+        self.work_id_map
+            .get(work_id)
+            .and_then(|idx| self.works.get(*idx))
     }
 
     pub fn get_node(&self, node_id: NodeId) -> Option<&OutlineNode> {
@@ -138,7 +138,7 @@ impl CorpusCatalogIndex {
             node.children
                 .iter()
                 .filter_map(|&child_id| self.get_node(child_id))
-                .collect()
+                .collect(),
         )
     }
 

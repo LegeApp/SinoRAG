@@ -95,12 +95,10 @@ pub async fn expand_passage_context(
 
     let center_index = rows
         .iter()
-        .position(|row| {
-            row.get("passage_id")
-                .and_then(|v| v.as_str())
-                == Some(passage_id)
-        })
-        .ok_or_else(|| anyhow!("center passage not found in source_rel_path query: {passage_id}"))?;
+        .position(|row| row.get("passage_id").and_then(|v| v.as_str()) == Some(passage_id))
+        .ok_or_else(|| {
+            anyhow!("center passage not found in source_rel_path query: {passage_id}")
+        })?;
 
     let start = center_index.saturating_sub(before);
     let end_exclusive = (center_index + after + 1).min(rows.len());
@@ -110,7 +108,11 @@ pub async fn expand_passage_context(
     for (idx, row) in rows[start..end_exclusive].iter().enumerate() {
         let absolute_idx = start + idx;
         let relative_index = absolute_idx as isize - center_index as isize;
-        context.push(row_to_context_passage(row, relative_index, absolute_idx == center_index)?);
+        context.push(row_to_context_passage(
+            row,
+            relative_index,
+            absolute_idx == center_index,
+        )?);
     }
 
     let first_passage_id = context.first().map(|p| p.passage_id.clone());
@@ -143,24 +145,47 @@ pub async fn expand_passage_context(
     })
 }
 
-fn row_to_context_passage(row: &Value, relative_index: isize, is_center: bool) -> Result<ContextPassage> {
-    let from_lb = row.get("from_lb").and_then(|v| v.as_str()).map(str::to_string);
-    let to_lb = row.get("to_lb").and_then(|v| v.as_str()).map(str::to_string);
+fn row_to_context_passage(
+    row: &Value,
+    relative_index: isize,
+    is_center: bool,
+) -> Result<ContextPassage> {
+    let from_lb = row
+        .get("from_lb")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let to_lb = row
+        .get("to_lb")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
-    let citation = format_citation(row, from_lb.as_deref().unwrap_or(""), to_lb.as_deref().unwrap_or(""));
-let zh_text_raw = str_field(row, "zh_text_raw").unwrap_or_default().to_string();
-    let zh_text_normalized = str_field(row, "zh_text_normalized").unwrap_or_default().to_string();
-    
-    
+    let citation = format_citation(
+        row,
+        from_lb.as_deref().unwrap_or(""),
+        to_lb.as_deref().unwrap_or(""),
+    );
+    let zh_text_raw = str_field(row, "zh_text_raw")
+        .unwrap_or_default()
+        .to_string();
+    let zh_text_normalized = str_field(row, "zh_text_normalized")
+        .unwrap_or_default()
+        .to_string();
+
     Ok(ContextPassage {
         relative_index,
         passage_id: str_field(row, "passage_id")?.to_string(),
         citation,
-        source_rel_path: str_field(row, "source_rel_path").unwrap_or_default().to_string(),
-        source_work_id: str_field(row, "source_work_id").unwrap_or_default().to_string(),
+        source_rel_path: str_field(row, "source_rel_path")
+            .unwrap_or_default()
+            .to_string(),
+        source_work_id: str_field(row, "source_work_id")
+            .unwrap_or_default()
+            .to_string(),
         xml_id: str_field(row, "xml_id").unwrap_or_default().to_string(),
         heading: str_field(row, "heading").unwrap_or_default().to_string(),
-        heading_path: str_field(row, "heading_path").unwrap_or_default().to_string(),
+        heading_path: str_field(row, "heading_path")
+            .unwrap_or_default()
+            .to_string(),
         div_path: str_field(row, "div_path").unwrap_or_default().to_string(),
         from_lb,
         to_lb,

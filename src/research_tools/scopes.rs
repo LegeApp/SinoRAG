@@ -62,7 +62,12 @@ impl<'a> CompiledScope<'a> {
         }
 
         if let Some(ref work_ids) = self.source_work_ids {
-            let wid = self.doc_table.source_work_ids.get(doc_id as usize).copied().unwrap_or(u32::MAX);
+            let wid = self
+                .doc_table
+                .source_work_ids
+                .get(doc_id as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
             if !work_ids.contains(&wid) {
                 return false;
             }
@@ -76,10 +81,7 @@ impl<'a> CompiledScope<'a> {
     }
 
     /// Get the doc range for a catalog node.
-    pub fn scope_from_node(
-        catalog: &CorpusCatalogIndex,
-        node_id: NodeId,
-    ) -> Result<(u32, u32)> {
+    pub fn scope_from_node(catalog: &CorpusCatalogIndex, node_id: NodeId) -> Result<(u32, u32)> {
         let node = catalog
             .get_node(node_id)
             .ok_or_else(|| anyhow::anyhow!("unknown catalog node_id {}", node_id))?;

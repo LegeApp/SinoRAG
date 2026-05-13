@@ -27,13 +27,9 @@ impl DataFusionStore {
             .to_string_lossy()
             .replace('\\', "/");
 
-        ctx.register_parquet(
-            "passages",
-            &source,
-            ParquetReadOptions::default(),
-        )
-        .await
-        .with_context(|| format!("register parquet source {source}"))?;
+        ctx.register_parquet("passages", &source, ParquetReadOptions::default())
+            .await
+            .with_context(|| format!("register parquet source {source}"))?;
 
         Ok(Self { ctx, parquet_dir })
     }
@@ -63,8 +59,16 @@ impl DataFusionStore {
 
         let rows = self.query_json(&sql).await?;
         if let Some(mut row) = rows.into_iter().next() {
-            let from_lb = row.get("from_lb").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let to_lb = row.get("to_lb").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let from_lb = row
+                .get("from_lb")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let to_lb = row
+                .get("to_lb")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let citation = format_citation(&row, &from_lb, &to_lb);
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("citation".to_string(), json!(citation));
@@ -90,8 +94,16 @@ impl DataFusionStore {
         let rows = self.query_json(&sql).await?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let id = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = row
+                .get("passage_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = row
+                .get("zh_text_normalized")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !id.is_empty() && !text.is_empty() {
                 out.push((id, text));
             }
@@ -105,10 +117,12 @@ impl DataFusionStore {
         }
         let mut out = Vec::new();
         for chunk in ids.chunks(4000) {
-            let id_list = chunk.iter().map(|id| sql_literal(id)).collect::<Vec<_>>().join(", ");
-            let sql = format!(
-                "SELECT {select_cols} FROM passages WHERE passage_id IN ({id_list})"
-            );
+            let id_list = chunk
+                .iter()
+                .map(|id| sql_literal(id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("SELECT {select_cols} FROM passages WHERE passage_id IN ({id_list})");
             out.extend(self.query_json(&sql).await?);
         }
         Ok(out)

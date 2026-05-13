@@ -28,15 +28,25 @@ pub fn log_odds_distinctive_terms(
         let ap = (ac + alpha) / (a_total as f32 + alpha * vocab_n);
         let bp = (bc + alpha) / (b_total as f32 + alpha * vocab_n);
         scored.push(DistinctiveTerm {
-            term_hash: term, term_display: None,
+            term_hash: term,
+            term_display: None,
             score: (ap / bp).ln(),
-            a_count: ac as u32, b_count: bc as u32,
+            a_count: ac as u32,
+            b_count: bc as u32,
         });
     }
     scored.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap());
     let a_top = scored.iter().take(top_k).cloned().collect();
     scored.sort_by(|x, y| x.score.partial_cmp(&y.score).unwrap());
-    let b_top = scored.iter().take(top_k).cloned().map(|mut t| { t.score = -t.score; t }).collect();
+    let b_top = scored
+        .iter()
+        .take(top_k)
+        .cloned()
+        .map(|mut t| {
+            t.score = -t.score;
+            t
+        })
+        .collect();
     (a_top, b_top)
 }
 
@@ -58,14 +68,18 @@ pub fn score_collocates(
     let bg_total: u32 = background.values().sum::<u32>().max(1);
     let mut out = Vec::new();
     for (&term, &near_count) in near {
-        if near_count < 2 { continue; }
+        if near_count < 2 {
+            continue;
+        }
         let bg_count = *background.get(&term).unwrap_or(&0);
         let near_p = (near_count as f32 + 1.0) / (near_total as f32 + 1.0);
         let bg_p = (bg_count as f32 + 1.0) / (bg_total as f32 + 1.0);
         out.push(Collocate {
-            term_hash: term, display: None,
+            term_hash: term,
+            display: None,
             score: (near_p / bg_p).ln(),
-            near_count, background_count: bg_count,
+            near_count,
+            background_count: bg_count,
         });
     }
     out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());

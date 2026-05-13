@@ -9,8 +9,8 @@ use std::path::Path;
 pub const RECIPE_SCHEMA: &str = "sinoragd-recipe-v1";
 
 const BUILTIN_ACADEMIC_DEFAULT: &str = include_str!("recipes/academic-default.json");
-const BUILTIN_PHRASE_FOCUSED:   &str = include_str!("recipes/phrase-focused.json");
-const BUILTIN_FULL_GENEALOGY:   &str = include_str!("recipes/full-genealogy.json");
+const BUILTIN_PHRASE_FOCUSED: &str = include_str!("recipes/phrase-focused.json");
+const BUILTIN_FULL_GENEALOGY: &str = include_str!("recipes/full-genealogy.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recipe {
@@ -49,9 +49,15 @@ pub enum WhenFilter {
     AnySeed,
 }
 
-fn default_full_work_threshold() -> usize { 5 }
-fn default_context_before() -> usize { 5 }
-fn default_context_after() -> usize { 5 }
+fn default_full_work_threshold() -> usize {
+    5
+}
+fn default_context_before() -> usize {
+    5
+}
+fn default_context_after() -> usize {
+    5
+}
 
 impl Recipe {
     /// Resolve `name_or_path`: a bundled name like `academic-default`,
@@ -71,11 +77,13 @@ impl Recipe {
                 )),
             }
         };
-        let recipe: Recipe = serde_json::from_str(&raw)
-            .with_context(|| format!("parse recipe `{name_or_path}`"))?;
+        let recipe: Recipe =
+            serde_json::from_str(&raw).with_context(|| format!("parse recipe `{name_or_path}`"))?;
         if recipe.schema != RECIPE_SCHEMA {
             return Err(anyhow!(
-                "recipe schema `{}` (expected `{}`)", recipe.schema, RECIPE_SCHEMA
+                "recipe schema `{}` (expected `{}`)",
+                recipe.schema,
+                RECIPE_SCHEMA
             ));
         }
         Ok(recipe)
@@ -94,12 +102,12 @@ impl WhenFilter {
         match self {
             WhenFilter::AnySeed => true,
             WhenFilter::AnyHit | WhenFilter::AnyWork => false, // fan-out, not seed-driven
-            WhenFilter::Phrase  => kind == "phrase",
+            WhenFilter::Phrase => kind == "phrase",
             WhenFilter::Passage => kind == "passage",
-            WhenFilter::Person  => kind == "person",
-            WhenFilter::Work    => kind == "work",
-            WhenFilter::Canon   => kind == "canon",
-            WhenFilter::Period  => kind == "period",
+            WhenFilter::Person => kind == "person",
+            WhenFilter::Work => kind == "work",
+            WhenFilter::Canon => kind == "canon",
+            WhenFilter::Period => kind == "period",
         }
     }
 }

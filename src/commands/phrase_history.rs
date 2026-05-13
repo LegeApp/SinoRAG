@@ -111,7 +111,7 @@ pub async fn phrase_history(
             }
         }
     }
-    
+
     Ok(payload)
 }
 

@@ -30,7 +30,12 @@ pub struct EvidencePassage {
 
 /// Build an EvidencePassage from a serde_json row Value (as returned by
 /// DataFusionStore queries).
-pub fn evidence_from_row(row: &serde_json::Value, doc_id: u32, zh_quote: String, score: Option<f32>) -> EvidencePassage {
+pub fn evidence_from_row(
+    row: &serde_json::Value,
+    doc_id: u32,
+    zh_quote: String,
+    score: Option<f32>,
+) -> EvidencePassage {
     EvidencePassage {
         passage_id: crate::research::field_str(row, "passage_id"),
         doc_id,
@@ -38,7 +43,10 @@ pub fn evidence_from_row(row: &serde_json::Value, doc_id: u32, zh_quote: String,
         main_title: opt_str(row, "main_title"),
         author: opt_str(row, "author"),
         period: opt_str(row, "period"),
-        period_rank: row.get("period_rank").and_then(|v| v.as_i64()).map(|v| v as i32),
+        period_rank: row
+            .get("period_rank")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
         canon: opt_str(row, "canon"),
         from_lb: opt_str(row, "from_lb"),
         to_lb: opt_str(row, "to_lb"),
@@ -49,5 +57,9 @@ pub fn evidence_from_row(row: &serde_json::Value, doc_id: u32, zh_quote: String,
 
 fn opt_str(row: &serde_json::Value, field: &str) -> Option<String> {
     let s = row.get(field).and_then(|v| v.as_str()).unwrap_or("");
-    if s.is_empty() { None } else { Some(s.to_string()) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }

@@ -43,8 +43,8 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -58,15 +58,15 @@ const SCHEMA_LABEL: &[u8] = b"sinorag-phrase-index-v3";
 const ENC_VARINT: u8 = 0;
 const ENC_ROARING: u8 = 1;
 
-const HDR_GRAM_LEN:        std::ops::Range<usize> = 10..12;
-const HDR_NUM_GRAMS:       std::ops::Range<usize> = 12..16;
-const HDR_FP:              std::ops::Range<usize> = 16..80;
-const HDR_SCHEMA:          std::ops::Range<usize> = 80..144;
-const HDR_GRAM_TABLE_OFF:  std::ops::Range<usize> = 144..152;
-const HDR_POSTINGS_SIZE:   std::ops::Range<usize> = 152..160;
-const HDR_DENSE_GRAMS:     std::ops::Range<usize> = 160..164;
-const HDR_VARINT_GRAMS:    std::ops::Range<usize> = 164..168;
-const HDR_NUM_DOCS:        std::ops::Range<usize> = 168..172;
+const HDR_GRAM_LEN: std::ops::Range<usize> = 10..12;
+const HDR_NUM_GRAMS: std::ops::Range<usize> = 12..16;
+const HDR_FP: std::ops::Range<usize> = 16..80;
+const HDR_SCHEMA: std::ops::Range<usize> = 80..144;
+const HDR_GRAM_TABLE_OFF: std::ops::Range<usize> = 144..152;
+const HDR_POSTINGS_SIZE: std::ops::Range<usize> = 152..160;
+const HDR_DENSE_GRAMS: std::ops::Range<usize> = 160..164;
+const HDR_VARINT_GRAMS: std::ops::Range<usize> = 164..168;
+const HDR_NUM_DOCS: std::ops::Range<usize> = 168..172;
 
 /// Mmap-backed phrase index. Each gram's postings carry an encoding flag so
 /// dense grams use Roaring bitmaps (fast bitwise AND) while sparse ones stay
@@ -147,10 +147,18 @@ impl PhraseIndex {
         Self::open(path)
     }
 
-    pub fn schema(&self) -> &str { &self.schema }
-    pub fn gram_len(&self) -> usize { self.gram_len }
-    pub fn doc_table_fingerprint(&self) -> &str { &self.doc_table_fingerprint }
-    pub fn num_grams(&self) -> usize { self.num_grams }
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+    pub fn gram_len(&self) -> usize {
+        self.gram_len
+    }
+    pub fn doc_table_fingerprint(&self) -> &str {
+        &self.doc_table_fingerprint
+    }
+    pub fn num_grams(&self) -> usize {
+        self.num_grams
+    }
 
     /// Read a single gram entry from the mmap.
     fn gram_entry(&self, idx: usize) -> (u64, u64, u32, u8) {
@@ -219,7 +227,11 @@ impl PhraseIndex {
             };
             let abs = self.postings_offset + p_off as usize;
             let slice = &self.mmap[abs..abs + p_len as usize];
-            postings.push(PostingSlice { bytes: slice, encoded_len: p_len as usize, encoding: enc });
+            postings.push(PostingSlice {
+                bytes: slice,
+                encoded_len: p_len as usize,
+                encoding: enc,
+            });
         }
 
         if missing > 0 {
@@ -234,14 +246,20 @@ impl PhraseIndex {
                     final_candidates: 0,
                     decoded_full_lists: 0,
                     streamed_lists: 0,
-                    roaring_lists: postings.iter().filter(|p| p.encoding == ENC_ROARING).count(),
+                    roaring_lists: postings
+                        .iter()
+                        .filter(|p| p.encoding == ENC_ROARING)
+                        .count(),
                     varint_lists: postings.iter().filter(|p| p.encoding == ENC_VARINT).count(),
                 },
             });
         }
 
         let postings_encoded_bytes: Vec<usize> = postings.iter().map(|p| p.encoded_len).collect();
-        let roaring_lists = postings.iter().filter(|p| p.encoding == ENC_ROARING).count();
+        let roaring_lists = postings
+            .iter()
+            .filter(|p| p.encoding == ENC_ROARING)
+            .count();
         let varint_lists_total = postings.len() - roaring_lists;
 
         // Compute Roaring AND across all dense postings.
@@ -256,10 +274,15 @@ impl PhraseIndex {
                     };
                     roaring_acc = Some(match roaring_acc.take() {
                         None => bm,
-                        Some(mut acc) => { acc &= &bm; acc }
+                        Some(mut acc) => {
+                            acc &= &bm;
+                            acc
+                        }
                     });
                     if let Some(ref acc) = roaring_acc {
-                        if acc.is_empty() { break; }
+                        if acc.is_empty() {
+                            break;
+                        }
                     }
                 }
                 _ => varint_slices.push(p.bytes),
@@ -287,7 +310,9 @@ impl PhraseIndex {
         let smallest_bytes = postings_encoded_bytes.iter().copied().min().unwrap_or(0);
 
         for vbytes in &varint_slices {
-            if candidates.is_empty() { break; }
+            if candidates.is_empty() {
+                break;
+            }
             intersect_candidates_with_stream(&mut candidates, DeltaDocIdIter::new(vbytes));
             streamed += 1;
         }
@@ -331,9 +356,7 @@ impl PhraseIndex {
         let mut hdr = [0u8; HEADER_SIZE];
         file.read_exact(&mut hdr)?;
         if &hdr[0..8] != MAGIC {
-            anyhow::bail!(
-                "PhraseIndex magic mismatch (expected v3 `SRPH3VAA`; rebuild required)"
-            );
+            anyhow::bail!("PhraseIndex magic mismatch (expected v3 `SRPH3VAA`; rebuild required)");
         }
         let version = u16::from_le_bytes([hdr[8], hdr[9]]);
         if version != 3 {
@@ -517,7 +540,12 @@ pub struct DeltaDocIdIter<'a> {
 
 impl<'a> DeltaDocIdIter<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0, current: 0, done: false }
+        Self {
+            bytes,
+            pos: 0,
+            current: 0,
+            done: false,
+        }
     }
 
     fn next_internal(&mut self) -> Option<DocId> {
@@ -596,7 +624,9 @@ impl BucketWriterCache {
 
     fn evict_if_needed(&mut self) -> Result<()> {
         while self.writers.len() >= self.max_open {
-            let Some(victim) = self.lru.pop_front() else { break };
+            let Some(victim) = self.lru.pop_front() else {
+                break;
+            };
             if let Some(mut w) = self.writers.remove(&victim) {
                 w.flush()?;
             }
@@ -741,7 +771,10 @@ pub fn build(
 
     // Density threshold: above which a gram's postings switch to Roaring.
     let density_threshold = (num_docs as u64 / 64).max(1) as u32;
-    eprintln!("Density threshold: df > {} → Roaring encoding", density_threshold);
+    eprintln!(
+        "Density threshold: df > {} → Roaring encoding",
+        density_threshold
+    );
 
     let files = parquet_files(&parquet_path)?;
     eprintln!("Found {} parquet file(s)", files.len());
@@ -781,7 +814,9 @@ pub fn build(
                 for i in 0..batch.num_rows() {
                     let pid = passage_ids.value(i);
                     let text = text_arr.value(i);
-                    let Some(doc_id) = doc_table.doc_id(pid) else { continue };
+                    let Some(doc_id) = doc_table.doc_id(pid) else {
+                        continue;
+                    };
 
                     crate::text_analyzer::analyze(text, &analyze_opts, &mut scratch);
                     for &hash in &scratch.unique {
@@ -796,15 +831,23 @@ pub fn build(
                 let elapsed = phase1_start.elapsed().as_secs();
                 let eta = if processed > 0 {
                     elapsed * (total_files - processed) as u64 / processed as u64
-                } else { 0 };
-                eprintln!("  [Phase 1] {}/{} files  |  {} records  |  {}s elapsed  |  ~{}s remaining",
-                    processed, total_files, total_records, elapsed, eta);
+                } else {
+                    0
+                };
+                eprintln!(
+                    "  [Phase 1] {}/{} files  |  {} records  |  {}s elapsed  |  ~{}s remaining",
+                    processed, total_files, total_records, elapsed, eta
+                );
                 last_report = Instant::now();
             }
         }
         writers.flush_all()?;
-        eprintln!("  [Phase 1] done — {} files, {} records, {}s",
-            total_files, total_records, phase1_start.elapsed().as_secs());
+        eprintln!(
+            "  [Phase 1] done — {} files, {} records, {}s",
+            total_files,
+            total_records,
+            phase1_start.elapsed().as_secs()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -816,58 +859,62 @@ pub fn build(
         let phase2_start = Instant::now();
         let mut last_report = Instant::now();
         for bucket_idx in 0..bucket_count {
-        let bucket_path = temp_dir.join(format!("bucket-{:04}.bin", bucket_idx));
-        if !bucket_path.exists() {
-            all_sorted_chunks.push(Vec::new());
-            continue;
-        }
-        if last_report.elapsed() >= REPORT_INTERVAL {
-            let elapsed = phase2_start.elapsed().as_secs();
-            let eta = if bucket_idx > 0 {
-                elapsed * (bucket_count - bucket_idx) as u64 / bucket_idx as u64
-            } else { 0 };
-            eprintln!("  [Phase 2] {}/{} buckets  |  {}s elapsed  |  ~{}s remaining",
-                bucket_idx, bucket_count, elapsed, eta);
-            last_report = Instant::now();
-        }
-
-        let file_size = fs::metadata(&bucket_path)?.len() as usize;
-        let record_count = file_size / 12;
-        let mut sorted_chunks = Vec::new();
-        let mut bucket_file = File::open(&bucket_path)?;
-        let mut chunk_idx = 0usize;
-        let mut remaining = record_count;
-
-        while remaining > 0 {
-            let to_read = SORT_CHUNK_RECORDS.min(remaining);
-            let mut buf = vec![0u8; to_read * 12];
-            bucket_file.read_exact(&mut buf)?;
-
-            let mut records: Vec<BucketRecord> = Vec::with_capacity(to_read);
-            for chunk in buf.chunks_exact(12) {
-                let gram_hash = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-                let doc_id = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
-                records.push(BucketRecord { gram_hash, doc_id });
+            let bucket_path = temp_dir.join(format!("bucket-{:04}.bin", bucket_idx));
+            if !bucket_path.exists() {
+                all_sorted_chunks.push(Vec::new());
+                continue;
             }
-            records.sort_unstable_by_key(|r| (r.gram_hash, r.doc_id));
-
-            let sorted_path =
-                temp_dir.join(format!("sorted-{:04}-{:04}.bin", bucket_idx, chunk_idx));
-            let mut sorted_file = BufWriter::new(File::create(&sorted_path)?);
-            for r in &records {
-                sorted_file.write_all(&r.gram_hash.to_le_bytes())?;
-                sorted_file.write_all(&r.doc_id.to_le_bytes())?;
+            if last_report.elapsed() >= REPORT_INTERVAL {
+                let elapsed = phase2_start.elapsed().as_secs();
+                let eta = if bucket_idx > 0 {
+                    elapsed * (bucket_count - bucket_idx) as u64 / bucket_idx as u64
+                } else {
+                    0
+                };
+                eprintln!(
+                    "  [Phase 2] {}/{} buckets  |  {}s elapsed  |  ~{}s remaining",
+                    bucket_idx, bucket_count, elapsed, eta
+                );
+                last_report = Instant::now();
             }
-            sorted_file.flush()?;
-            drop(sorted_file);
 
-            sorted_chunks.push(sorted_path);
-            chunk_idx += 1;
-            remaining -= to_read;
-        }
-        drop(bucket_file);
-        fs::remove_file(&bucket_path)?;
-        all_sorted_chunks.push(sorted_chunks);
+            let file_size = fs::metadata(&bucket_path)?.len() as usize;
+            let record_count = file_size / 12;
+            let mut sorted_chunks = Vec::new();
+            let mut bucket_file = File::open(&bucket_path)?;
+            let mut chunk_idx = 0usize;
+            let mut remaining = record_count;
+
+            while remaining > 0 {
+                let to_read = SORT_CHUNK_RECORDS.min(remaining);
+                let mut buf = vec![0u8; to_read * 12];
+                bucket_file.read_exact(&mut buf)?;
+
+                let mut records: Vec<BucketRecord> = Vec::with_capacity(to_read);
+                for chunk in buf.chunks_exact(12) {
+                    let gram_hash = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+                    let doc_id = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                    records.push(BucketRecord { gram_hash, doc_id });
+                }
+                records.sort_unstable_by_key(|r| (r.gram_hash, r.doc_id));
+
+                let sorted_path =
+                    temp_dir.join(format!("sorted-{:04}-{:04}.bin", bucket_idx, chunk_idx));
+                let mut sorted_file = BufWriter::new(File::create(&sorted_path)?);
+                for r in &records {
+                    sorted_file.write_all(&r.gram_hash.to_le_bytes())?;
+                    sorted_file.write_all(&r.doc_id.to_le_bytes())?;
+                }
+                sorted_file.flush()?;
+                drop(sorted_file);
+
+                sorted_chunks.push(sorted_path);
+                chunk_idx += 1;
+                remaining -= to_read;
+            }
+            drop(bucket_file);
+            fs::remove_file(&bucket_path)?;
+            all_sorted_chunks.push(sorted_chunks);
         } // end bucket loop
         eprintln!("  [Phase 2] done — {}s", phase2_start.elapsed().as_secs());
     } // end Phase 2 block
@@ -895,9 +942,13 @@ pub fn build(
             let elapsed = phase3_start.elapsed().as_secs();
             let eta = if bucket_idx > 0 {
                 elapsed * (bucket_count - bucket_idx) as u64 / bucket_idx as u64
-            } else { 0 };
-            eprintln!("  [Phase 3] {}/{} buckets  |  {} grams  |  {}s elapsed  |  ~{}s remaining",
-                bucket_idx, bucket_count, gram_count, elapsed, eta);
+            } else {
+                0
+            };
+            eprintln!(
+                "  [Phase 3] {}/{} buckets  |  {} grams  |  {}s elapsed  |  ~{}s remaining",
+                bucket_idx, bucket_count, gram_count, elapsed, eta
+            );
             last_report = Instant::now();
         }
 
@@ -912,7 +963,10 @@ pub fn build(
         let mut heap = BinaryHeap::new();
         for (idx, reader) in readers.iter_mut().enumerate() {
             if let Some(record) = reader.next()? {
-                heap.push(HeapItem { record, reader_idx: idx });
+                heap.push(HeapItem {
+                    record,
+                    reader_idx: idx,
+                });
             }
         }
 
@@ -943,7 +997,10 @@ pub fn build(
                 last_doc = Some(r.doc_id);
             }
             if let Some(next) = readers[item.reader_idx].next()? {
-                heap.push(HeapItem { record: next, reader_idx: item.reader_idx });
+                heap.push(HeapItem {
+                    record: next,
+                    reader_idx: item.reader_idx,
+                });
             }
         }
         emit_gram(
@@ -968,7 +1025,10 @@ pub fn build(
     drop(postings_writer);
     eprintln!(
         "  [Phase 3] done — {} grams (roaring: {}, varint: {}), {}s",
-        gram_count, dense_gram_count, varint_gram_count, phase3_start.elapsed().as_secs()
+        gram_count,
+        dense_gram_count,
+        varint_gram_count,
+        phase3_start.elapsed().as_secs()
     );
 
     // -----------------------------------------------------------------------
@@ -1007,7 +1067,9 @@ fn emit_gram(
     varint_gram_count: &mut u64,
     density_threshold: u32,
 ) -> Result<()> {
-    let Some(hash) = current_hash else { return Ok(()) };
+    let Some(hash) = current_hash else {
+        return Ok(());
+    };
     if current_docs.is_empty() {
         return Ok(());
     }
@@ -1247,7 +1309,9 @@ mod tests {
     fn roaring_round_trip() {
         let docs: Vec<DocId> = (0u32..1000).filter(|d| d % 3 == 0).collect();
         let mut bm = RoaringBitmap::new();
-        for &d in &docs { bm.insert(d); }
+        for &d in &docs {
+            bm.insert(d);
+        }
         let mut buf: Vec<u8> = Vec::new();
         bm.serialize_into(&mut buf).unwrap();
         let bm2 = RoaringBitmap::deserialize_from(buf.as_slice()).unwrap();

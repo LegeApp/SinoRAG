@@ -38,12 +38,14 @@ pub async fn run(
         None,
         None,
         None,
-    ).await?;
+    )
+    .await?;
 
     let normalized_phrase = normalize_zh(&phrase);
 
     let analyze_opts = AnalyzeOptions {
-        min_n: gram_len, max_n: gram_len,
+        min_n: gram_len,
+        max_n: gram_len,
         filter: FilterMode::WhitespaceOnly,
         apply_low_value_filter: false,
         dedup: true,
@@ -58,7 +60,10 @@ pub async fn run(
     let mut bg_total = 0u32;
 
     for row in &hits {
-        let norm = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
+        let norm = row
+            .get("zh_text_normalized")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         // Background: all n-grams in the passage.
         analyze(norm, &analyze_opts, &mut scratch);
@@ -74,7 +79,11 @@ pub async fn run(
             let window_start = char_pos.saturating_sub(window_chars);
             let window_end = (char_pos + phrase_chars + window_chars).min(norm.chars().count());
 
-            let window_text: String = norm.chars().skip(window_start).take(window_end - window_start).collect();
+            let window_text: String = norm
+                .chars()
+                .skip(window_start)
+                .take(window_end - window_start)
+                .collect();
             analyze(&window_text, &analyze_opts, &mut scratch);
             for &h in &scratch.unique {
                 *near_counts.entry(h).or_insert(0) += 1;

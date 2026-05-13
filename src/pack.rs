@@ -24,12 +24,12 @@ use std::path::{Path, PathBuf};
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const PACK_SCHEMA: &str = "sinoragd-pack-v1";
 
-pub const DEFAULT_PASSAGES: &str  = "data/passages.parquet";
+pub const DEFAULT_PASSAGES: &str = "data/passages.parquet";
 pub const DEFAULT_DOC_TABLE: &str = "derived/doc_table.bin";
-pub const DEFAULT_CATALOG: &str   = "derived/catalog.index";
-pub const DEFAULT_REGISTRY: &str  = "derived/registry.sqlite";
-pub const DEFAULT_PHRASE: &str    = "derived/phrase_v3.index";
-pub const DEFAULT_TFIDF: &str     = "derived/tfidf_v3.index";
+pub const DEFAULT_CATALOG: &str = "derived/catalog.index";
+pub const DEFAULT_REGISTRY: &str = "derived/registry.sqlite";
+pub const DEFAULT_PHRASE: &str = "derived/phrase_v3.index";
+pub const DEFAULT_TFIDF: &str = "derived/tfidf_v3.index";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackManifest {
@@ -90,10 +90,14 @@ impl Pack {
         if manifest.schema != PACK_SCHEMA {
             return Err(anyhow!(
                 "unknown pack schema `{}` (expected `{}`)",
-                manifest.schema, PACK_SCHEMA
+                manifest.schema,
+                PACK_SCHEMA
             ));
         }
-        Ok(Pack { root: root.to_path_buf(), manifest })
+        Ok(Pack {
+            root: root.to_path_buf(),
+            manifest,
+        })
     }
 
     /// Build a fresh manifest with the default layout, no fingerprints yet.
@@ -103,10 +107,10 @@ impl Pack {
             pack_id: pack_id.into(),
             created_at: chrono::Utc::now().to_rfc3339(),
             layout: Layout {
-                passages:  PathBuf::from(DEFAULT_PASSAGES),
+                passages: PathBuf::from(DEFAULT_PASSAGES),
                 doc_table: PathBuf::from(DEFAULT_DOC_TABLE),
-                catalog:   PathBuf::from(DEFAULT_CATALOG),
-                registry:  PathBuf::from(DEFAULT_REGISTRY),
+                catalog: PathBuf::from(DEFAULT_CATALOG),
+                registry: PathBuf::from(DEFAULT_REGISTRY),
             },
             fingerprints: Fingerprints::default(),
             indexes: IndexSet::default(),
@@ -123,17 +127,37 @@ impl Pack {
     }
 
     pub fn resolve(&self, rel: &Path) -> PathBuf {
-        if rel.is_absolute() { rel.to_path_buf() } else { self.root.join(rel) }
+        if rel.is_absolute() {
+            rel.to_path_buf()
+        } else {
+            self.root.join(rel)
+        }
     }
 
-    pub fn passages_path(&self) -> PathBuf { self.resolve(&self.manifest.layout.passages) }
-    pub fn doc_table_path(&self) -> PathBuf { self.resolve(&self.manifest.layout.doc_table) }
-    pub fn catalog_path(&self)   -> PathBuf { self.resolve(&self.manifest.layout.catalog) }
-    pub fn registry_path(&self)  -> PathBuf { self.resolve(&self.manifest.layout.registry) }
+    pub fn passages_path(&self) -> PathBuf {
+        self.resolve(&self.manifest.layout.passages)
+    }
+    pub fn doc_table_path(&self) -> PathBuf {
+        self.resolve(&self.manifest.layout.doc_table)
+    }
+    pub fn catalog_path(&self) -> PathBuf {
+        self.resolve(&self.manifest.layout.catalog)
+    }
+    pub fn registry_path(&self) -> PathBuf {
+        self.resolve(&self.manifest.layout.registry)
+    }
     pub fn phrase_path(&self) -> Option<PathBuf> {
-        self.manifest.indexes.phrase.as_ref().map(|i| self.resolve(&i.path))
+        self.manifest
+            .indexes
+            .phrase
+            .as_ref()
+            .map(|i| self.resolve(&i.path))
     }
     pub fn tfidf_path(&self) -> Option<PathBuf> {
-        self.manifest.indexes.tfidf.as_ref().map(|i| self.resolve(&i.path))
+        self.manifest
+            .indexes
+            .tfidf
+            .as_ref()
+            .map(|i| self.resolve(&i.path))
     }
 }

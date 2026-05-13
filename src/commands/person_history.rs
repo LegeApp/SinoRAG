@@ -27,7 +27,8 @@ pub async fn run(
 
     let mut by_passage: BTreeMap<String, Value> = BTreeMap::new();
     for (idx, form) in forms.iter().enumerate() {
-        let rows = exact_phrase_rows(&store, &SearchSpec::exact_phrase(form.clone(), limit)).await?;
+        let rows =
+            exact_phrase_rows(&store, &SearchSpec::exact_phrase(form.clone(), limit)).await?;
         for mut row in rows {
             let passage_id = field_str(&row, "passage_id");
             let mention_class = classify_mention(&row, form);

@@ -39,7 +39,8 @@ pub async fn run(
     let range_b = resolve_doc_range(&catalog, scope_b_node_id, scope_b_work_id.as_deref())?;
 
     let analyze_opts = AnalyzeOptions {
-        min_n: gram_len, max_n: gram_len,
+        min_n: gram_len,
+        max_n: gram_len,
         filter: FilterMode::WhitespaceOnly,
         apply_low_value_filter: false,
         dedup: true,
@@ -56,7 +57,8 @@ pub async fn run(
         limit_passages,
         &analyze_opts,
         &mut scratch,
-    ).await?;
+    )
+    .await?;
 
     let (b_terms, b_passage_count) = collect_scope_terms(
         &store,
@@ -67,23 +69,34 @@ pub async fn run(
         limit_passages,
         &analyze_opts,
         &mut scratch,
-    ).await?;
+    )
+    .await?;
 
     let (a_top, b_top) = log_odds_distinctive_terms(&a_terms, &b_terms, limit_terms);
 
-    let distinctive_to_a: Vec<Value> = a_top.iter().map(|t| json!({
-        "term_hash": t.term_hash,
-        "score": t.score,
-        "a_count": t.a_count,
-        "b_count": t.b_count,
-    })).collect();
+    let distinctive_to_a: Vec<Value> = a_top
+        .iter()
+        .map(|t| {
+            json!({
+                "term_hash": t.term_hash,
+                "score": t.score,
+                "a_count": t.a_count,
+                "b_count": t.b_count,
+            })
+        })
+        .collect();
 
-    let distinctive_to_b: Vec<Value> = b_top.iter().map(|t| json!({
-        "term_hash": t.term_hash,
-        "score": t.score,
-        "a_count": t.a_count,
-        "b_count": t.b_count,
-    })).collect();
+    let distinctive_to_b: Vec<Value> = b_top
+        .iter()
+        .map(|t| {
+            json!({
+                "term_hash": t.term_hash,
+                "score": t.score,
+                "a_count": t.a_count,
+                "b_count": t.b_count,
+            })
+        })
+        .collect();
 
     let payload = json!({
         "schema": "sinoragd-compare-usage-v1",
@@ -118,14 +131,17 @@ fn resolve_doc_range(
     work_id: Option<&str>,
 ) -> Result<Option<(u32, u32)>> {
     if let Some(nid) = node_id {
-        let node = catalog.get_node(nid)
+        let node = catalog
+            .get_node(nid)
             .ok_or_else(|| anyhow!("unknown node_id: {nid}"))?;
         return Ok(node.first_doc_id.zip(node.last_doc_id));
     }
     if let Some(wid) = work_id {
-        let work = catalog.get_work(wid)
+        let work = catalog
+            .get_work(wid)
             .ok_or_else(|| anyhow!("unknown work_id: {wid}"))?;
-        let root = catalog.get_node(work.root_node)
+        let root = catalog
+            .get_node(work.root_node)
             .ok_or_else(|| anyhow!("work root node missing"))?;
         return Ok(root.first_doc_id.zip(root.last_doc_id));
     }
@@ -147,23 +163,33 @@ async fn collect_scope_terms(
             .filter_map(|did| doc_table.passage_id(did).map(String::from))
             .take(limit_passages.max(1))
             .collect();
-        store.passages_by_ids(
-            &passage_ids,
-            "passage_id, zh_text_normalized, canon, period",
-        ).await?
+        store
+            .passages_by_ids(
+                &passage_ids,
+                "passage_id, zh_text_normalized, canon, period",
+            )
+            .await?
     } else {
         let mut where_parts = vec!["zh_text_normalized IS NOT NULL".to_string()];
         if let Some(canon) = canon {
-            where_parts.push(format!("canon = {}", crate::datafusion_store::sql_literal(canon)));
+            where_parts.push(format!(
+                "canon = {}",
+                crate::datafusion_store::sql_literal(canon)
+            ));
         }
         if let Some(period) = period {
-            where_parts.push(format!("period = {}", crate::datafusion_store::sql_literal(period)));
+            where_parts.push(format!(
+                "period = {}",
+                crate::datafusion_store::sql_literal(period)
+            ));
         }
-        store.query_json(&format!(
+        store
+            .query_json(&format!(
             "SELECT passage_id, zh_text_normalized, canon, period FROM passages WHERE {} LIMIT {}",
             where_parts.join(" AND "),
             limit_passages.max(1),
-        )).await?
+        ))
+            .await?
     };
 
     let mut terms: FxHashMap<u64, u32> = FxHashMap::default();
@@ -171,13 +197,20 @@ async fn collect_scope_terms(
     for row in &rows {
         if let Some(canon) = canon {
             let c = row.get("canon").and_then(|v| v.as_str()).unwrap_or("");
-            if c != canon { continue; }
+            if c != canon {
+                continue;
+            }
         }
         if let Some(period) = period {
             let p = row.get("period").and_then(|v| v.as_str()).unwrap_or("");
-            if p != period { continue; }
+            if p != period {
+                continue;
+            }
         }
-        let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
+        let text = row
+            .get("zh_text_normalized")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if text.is_empty() {
             continue;
         }

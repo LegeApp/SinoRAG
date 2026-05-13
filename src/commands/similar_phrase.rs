@@ -26,7 +26,8 @@ pub async fn run(
         let rows = exact_phrase_rows(
             &store,
             &SearchSpec::exact_phrase(anchor.clone(), per_anchor_limit),
-        ).await?;
+        )
+        .await?;
         for row in rows {
             let passage_id = field_str(&row, "passage_id");
             candidates.entry(passage_id).or_insert_with(|| {

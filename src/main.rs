@@ -1,15 +1,15 @@
+mod cef;
 mod cli;
 mod commands;
-mod cef;
 mod datafusion_store;
 mod document_table;
 mod ingest;
 mod jsonout;
 // mod mcp;  // Commented out - requires rmcp dependency
+mod catalog_index;
 mod memory;
 mod models;
 mod normalize;
-mod catalog_index;
 mod pack;
 mod parquet_metadata;
 mod phrase_index;
@@ -18,8 +18,8 @@ mod research;
 mod research_tools;
 mod search_packet;
 mod storage;
-mod tei;
 mod taxonomy_legend;
+mod tei;
 mod templates;
 mod text_analyzer;
 mod tfidf;
