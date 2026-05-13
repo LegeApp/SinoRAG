@@ -39,6 +39,9 @@ pub mod trace_term_usage;
 pub mod validate;
 
 use crate::cli::{Cli, Command, IndexCommand};
+use crate::document_table::{match_index_fingerprint, DocumentTable, IndexCoverage};
+use crate::phrase_index::PhraseIndex;
+use crate::tfidf::index::TfidfIndex;
 use anyhow::Result;
 use serde_json::json;
 
@@ -59,16 +62,21 @@ pub fn build_all_indexes(
 ) -> Result<()> {
     let phrase_temp = temp_dir.as_ref().map(|p| p.join("phrase_v3.work"));
     let tfidf_temp = temp_dir.as_ref().map(|p| p.join("tfidf_v3.work"));
+    let doc_table_loaded = DocumentTable::load(&doc_table)?;
 
     eprintln!("=== Unified index build (phrase_v3 + tfidf_v3) ===");
-    phrase_index::build(
-        parquet.clone(),
-        doc_table.clone(),
-        phrase_out,
-        phrase_gram_len,
-        buckets,
-        phrase_temp,
-    )?;
+    if phrase_index_is_current(&phrase_out, &doc_table, &doc_table_loaded, phrase_gram_len)? {
+        eprintln!("Phrase index is current; skipping.");
+    } else {
+        phrase_index::build(
+            parquet.clone(),
+            doc_table.clone(),
+            phrase_out,
+            phrase_gram_len,
+            buckets,
+            phrase_temp,
+        )?;
+    }
 
     let params = crate::tfidf::index::TfidfParams {
         min_ngram,
@@ -79,7 +87,106 @@ pub fn build_all_indexes(
         dtype: "float32".to_string(),
         analyzer: "char".to_string(),
     };
-    crate::tfidf::index::build(parquet, doc_table, tfidf_out, params, buckets, tfidf_temp)
+    if tfidf_index_is_current(&tfidf_out, &doc_table, &doc_table_loaded, &params)? {
+        eprintln!("TF-IDF index is current; skipping.");
+        Ok(())
+    } else {
+        crate::tfidf::index::build(parquet, doc_table, tfidf_out, params, buckets, tfidf_temp)
+    }
+}
+
+fn phrase_index_is_current(
+    index_path: &std::path::Path,
+    doc_table_path: &std::path::Path,
+    doc_table: &DocumentTable,
+    gram_len: usize,
+) -> Result<bool> {
+    if !index_path.exists() {
+        return Ok(false);
+    }
+    let info = match PhraseIndex::header_info(index_path) {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("Existing phrase index is unreadable ({err}); rebuilding.");
+            return Ok(false);
+        }
+    };
+    if info.get("gram_len").and_then(|v| v.as_u64()) != Some(gram_len as u64) {
+        eprintln!("Existing phrase index has different gram length; rebuilding.");
+        return Ok(false);
+    }
+    let Some(fp) = info.get("doc_table_fingerprint").and_then(|v| v.as_str()) else {
+        eprintln!("Existing phrase index has no doc-table fingerprint; rebuilding.");
+        return Ok(false);
+    };
+    match match_index_fingerprint(doc_table, doc_table_path, fp)? {
+        Some(IndexCoverage::Full) => Ok(true),
+        Some(IndexCoverage::Base { .. }) => {
+            eprintln!("Existing phrase index covers only the doc-table base; rebuilding.");
+            Ok(false)
+        }
+        None => {
+            eprintln!("Existing phrase index fingerprint differs from doc_table; rebuilding.");
+            Ok(false)
+        }
+    }
+}
+
+fn tfidf_index_is_current(
+    index_path: &std::path::Path,
+    doc_table_path: &std::path::Path,
+    doc_table: &DocumentTable,
+    params: &crate::tfidf::index::TfidfParams,
+) -> Result<bool> {
+    if !index_path.exists() {
+        return Ok(false);
+    }
+    let info = match TfidfIndex::header_info(index_path) {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("Existing TF-IDF index is unreadable ({err}); rebuilding.");
+            return Ok(false);
+        }
+    };
+    if !tfidf_params_match(&info, params) {
+        eprintln!("Existing TF-IDF index has different build parameters; rebuilding.");
+        return Ok(false);
+    }
+    let Some(fp) = info.get("doc_table_fingerprint").and_then(|v| v.as_str()) else {
+        eprintln!("Existing TF-IDF index has no doc-table fingerprint; rebuilding.");
+        return Ok(false);
+    };
+    match match_index_fingerprint(doc_table, doc_table_path, fp)? {
+        Some(IndexCoverage::Full) => Ok(true),
+        Some(IndexCoverage::Base { .. }) => {
+            eprintln!("Existing TF-IDF index covers only the doc-table base; rebuilding.");
+            Ok(false)
+        }
+        None => {
+            eprintln!("Existing TF-IDF index fingerprint differs from doc_table; rebuilding.");
+            Ok(false)
+        }
+    }
+}
+
+fn tfidf_params_match(info: &serde_json::Value, params: &crate::tfidf::index::TfidfParams) -> bool {
+    let Some(obj) = info.get("params") else {
+        return false;
+    };
+    let ngrams = obj.get("ngram_range").and_then(|v| v.as_array());
+    let min_n = ngrams.and_then(|v| v.first()).and_then(|v| v.as_u64());
+    let max_n = ngrams.and_then(|v| v.get(1)).and_then(|v| v.as_u64());
+    let min_df = obj.get("min_df").and_then(|v| v.as_u64());
+    let max_features = obj.get("max_features").and_then(|v| v.as_u64());
+    let max_df = obj.get("max_df").and_then(|v| v.as_f64());
+
+    min_n == Some(params.min_ngram as u64)
+        && max_n == Some(params.max_ngram as u64)
+        && min_df == Some(params.min_df as u64)
+        && max_features == Some(params.max_features as u64)
+        && max_df
+            .map(|v| (v - params.max_df_ratio as f64).abs() < f64::EPSILON)
+            .unwrap_or(false)
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
