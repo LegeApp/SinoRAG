@@ -611,26 +611,13 @@ impl BucketWriterCache {
         Ok(())
     }
 
-    fn write_df_record(&mut self, bucket: usize, term_hash: u64, doc_id: u32) -> Result<()> {
+    fn write_bytes(&mut self, bucket: usize, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
         self.ensure(bucket)?;
         let w = self.writers.get_mut(&bucket).unwrap();
-        w.write_all(&term_hash.to_le_bytes())?;
-        w.write_all(&doc_id.to_le_bytes())?;
-        Ok(())
-    }
-
-    fn write_posting_record(
-        &mut self,
-        bucket: usize,
-        term_id: TermId,
-        doc_id: DocId,
-        weight: f32,
-    ) -> Result<()> {
-        self.ensure(bucket)?;
-        let w = self.writers.get_mut(&bucket).unwrap();
-        w.write_all(&term_id.to_le_bytes())?;
-        w.write_all(&doc_id.to_le_bytes())?;
-        w.write_all(&weight.to_le_bytes())?;
+        w.write_all(bytes)?;
         Ok(())
     }
 
@@ -640,6 +627,29 @@ impl BucketWriterCache {
         }
         Ok(())
     }
+}
+
+fn append_df_record(buf: &mut Vec<u8>, term_hash: u64, doc_id: u32) {
+    buf.extend_from_slice(&term_hash.to_le_bytes());
+    buf.extend_from_slice(&doc_id.to_le_bytes());
+}
+
+fn append_posting_record(buf: &mut Vec<u8>, term_id: TermId, doc_id: DocId, weight: f32) {
+    buf.extend_from_slice(&term_id.to_le_bytes());
+    buf.extend_from_slice(&doc_id.to_le_bytes());
+    buf.extend_from_slice(&weight.to_le_bytes());
+}
+
+const BUCKET_BUFFER_FLUSH_BYTES: usize = 64 * 1024 * 1024;
+
+fn flush_bucket_buffers(writers: &mut BucketWriterCache, buffers: &mut [Vec<u8>]) -> Result<()> {
+    for (bucket, buf) in buffers.iter_mut().enumerate() {
+        if !buf.is_empty() {
+            writers.write_bytes(bucket, buf)?;
+            buf.clear();
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +778,9 @@ pub fn build(
         pending.par_iter().try_for_each(|fp| -> Result<()> {
             let t = rayon::current_thread_index().unwrap_or(0);
             let mut w = BucketWriterCache::new(df_dir.join(format!("t{}", t)), handles_per_thread);
+            let mut bucket_buffers: Vec<Vec<u8>> =
+                (0..bucket_count).map(|_| Vec::new()).collect();
+            let mut buffered_bytes = 0usize;
             let mut scratch = AnalyzeScratch::new();
 
             let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
@@ -779,11 +792,18 @@ pub fn build(
                     if let Some(doc_id) = doc_table.doc_id(pids.value(i)) {
                         analyze(texts.value(i), &analyze_opts, &mut scratch);
                         for &hash in &scratch.unique {
-                            w.write_df_record((hash as usize) % bucket_count, hash, doc_id)?;
+                            let bucket = (hash as usize) % bucket_count;
+                            append_df_record(&mut bucket_buffers[bucket], hash, doc_id);
+                            buffered_bytes += 12;
+                            if buffered_bytes >= BUCKET_BUFFER_FLUSH_BYTES {
+                                flush_bucket_buffers(&mut w, &mut bucket_buffers)?;
+                                buffered_bytes = 0;
+                            }
                         }
                     }
                 }
             }
+            flush_bucket_buffers(&mut w, &mut bucket_buffers)?;
             w.flush_all()?;
 
             let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -984,6 +1004,9 @@ pub fn build(
             let t = rayon::current_thread_index().unwrap_or(0);
             let mut post_w =
                 BucketWriterCache::new(post_dir.join(format!("t{}", t)), handles_per_thread);
+            let mut posting_buffers: Vec<Vec<u8>> =
+                (0..bucket_count).map(|_| Vec::new()).collect();
+            let mut buffered_bytes = 0usize;
             let mut scratch = AnalyzeScratch::new();
 
             let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
@@ -1032,15 +1055,17 @@ pub fn build(
                         .map_err(|e| anyhow::anyhow!("row channel closed: {}", e))?;
 
                     for (tid, w) in &row {
-                        post_w.write_posting_record(
-                            (*tid as usize) % bucket_count,
-                            *tid,
-                            doc_id,
-                            *w,
-                        )?;
+                        let bucket = (*tid as usize) % bucket_count;
+                        append_posting_record(&mut posting_buffers[bucket], *tid, doc_id, *w);
+                        buffered_bytes += POSTING_BUCKET_RECORD_SIZE;
+                        if buffered_bytes >= BUCKET_BUFFER_FLUSH_BYTES {
+                            flush_bucket_buffers(&mut post_w, &mut posting_buffers)?;
+                            buffered_bytes = 0;
+                        }
                     }
                 }
             }
+            flush_bucket_buffers(&mut post_w, &mut posting_buffers)?;
             post_w.flush_all()?;
 
             let n = counter3.fetch_add(1, Ordering::Relaxed) + 1;
