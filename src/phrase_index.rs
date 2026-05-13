@@ -604,7 +604,10 @@ impl BucketWriterCache {
         Ok(())
     }
 
-    fn write_record(&mut self, bucket: usize, gram_hash: u64, doc_id: u32) -> Result<()> {
+    fn write_bytes(&mut self, bucket: usize, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
         if !self.writers.contains_key(&bucket) {
             self.evict_if_needed()?;
             let path = self.bucket_path(bucket);
@@ -613,8 +616,7 @@ impl BucketWriterCache {
         }
         self.touch(bucket);
         let w = self.writers.get_mut(&bucket).unwrap();
-        w.write_all(&gram_hash.to_le_bytes())?;
-        w.write_all(&doc_id.to_le_bytes())?;
+        w.write_all(bytes)?;
         Ok(())
     }
 
@@ -624,6 +626,21 @@ impl BucketWriterCache {
         }
         Ok(())
     }
+}
+
+fn append_bucket_record(buf: &mut Vec<u8>, gram_hash: u64, doc_id: u32) {
+    buf.extend_from_slice(&gram_hash.to_le_bytes());
+    buf.extend_from_slice(&doc_id.to_le_bytes());
+}
+
+fn flush_bucket_buffers(writers: &mut BucketWriterCache, buffers: &mut [Vec<u8>]) -> Result<()> {
+    for (bucket, buf) in buffers.iter_mut().enumerate() {
+        if !buf.is_empty() {
+            writers.write_bytes(bucket, buf)?;
+            buf.clear();
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -737,6 +754,7 @@ pub fn build(
     {
         const MAX_OPEN: usize = 64;
         let mut writers = BucketWriterCache::new(temp_dir.clone(), MAX_OPEN);
+        let mut bucket_buffers: Vec<Vec<u8>> = (0..bucket_count).map(|_| Vec::new()).collect();
         let mut total_records: u64 = 0;
         let mut processed = 0usize;
         let phase1_start = Instant::now();
@@ -768,11 +786,12 @@ pub fn build(
                     crate::text_analyzer::analyze(text, &analyze_opts, &mut scratch);
                     for &hash in &scratch.unique {
                         let bucket = (hash as usize) % bucket_count;
-                        writers.write_record(bucket, hash, doc_id)?;
+                        append_bucket_record(&mut bucket_buffers[bucket], hash, doc_id);
                         total_records += 1;
                     }
                 }
             }
+            flush_bucket_buffers(&mut writers, &mut bucket_buffers)?;
             if last_report.elapsed() >= REPORT_INTERVAL {
                 let elapsed = phase1_start.elapsed().as_secs();
                 let eta = if processed > 0 {
