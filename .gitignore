@@ -1,4 +1,5 @@
 /target/
+/outputs/
 Cargo.lock.bak
 *.tmp
 *.index.tmp

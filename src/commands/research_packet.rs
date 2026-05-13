@@ -51,5 +51,12 @@ fn default_out(topic: &str) -> PathBuf {
         .map(|c| if c.is_ascii_alphanumeric() { c } else if c.is_alphanumeric() { c } else { '-' })
         .collect();
     let safe = safe.trim_matches('-').to_string();
-    PathBuf::from(format!("data/research_packets/{safe}-{stamp}.researchpacket.zip"))
+    let safe = if safe.is_empty() {
+        "research-packet".to_string()
+    } else {
+        safe
+    };
+    PathBuf::from("outputs")
+        .join(stamp)
+        .join(format!("{safe}.researchpacket.zip"))
 }
