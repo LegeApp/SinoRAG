@@ -119,6 +119,8 @@ impl CorpusCatalogIndex {
             "works": self.works.len(),
             "nodes": self.nodes.len(),
             "source_fingerprint": self.source_fingerprint,
+            "doc_table_fingerprint": self.doc_table_fingerprint,
+            "doc_parent_entries": self.doc_parent.len(),
         })
     }
 

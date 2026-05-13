@@ -299,6 +299,7 @@ pub struct CompareUsageScope {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CompareUsageTerm {
+    pub term: Option<String>,
     pub term_hash: u64,
     pub score: f32,
     pub a_count: u32,
@@ -328,6 +329,7 @@ pub struct CollocationSearchResponse {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CollocateTerm {
+    pub term: Option<String>,
     pub term_hash: u64,
     pub score: f32,
     pub near_count: u32,

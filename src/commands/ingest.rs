@@ -29,6 +29,17 @@ use std::path::{Path, PathBuf};
 const CHECKPOINT_SCHEMA: &str = "sinoragd-ingest-checkpoint-v1";
 const CHECKPOINT_FLUSH_INTERVAL: usize = 100;
 
+pub struct PostIngestOptions {
+    pub out_parquet: PathBuf,
+    pub build_phrase_index: bool,
+    pub phrase_index_out: PathBuf,
+    pub phrase_gram_len: usize,
+    pub build_tfidf: bool,
+    pub tfidf_out: Option<PathBuf>,
+    pub catalog_index_out: Option<PathBuf>,
+    pub phrase_max_memory: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Checkpoint {
     schema: String,
@@ -316,88 +327,139 @@ pub async fn run(
     println!("  cbeta {cbeta_count}");
     println!("  kanripo {kanripo_count}");
 
-    // -- Downstream builders --------------------------------------------
-    // doc_table.bin is always built — it's small, fast, and required by
-    // every later index build plus most MCP research tools.
-    let doc_table_path = out.join("derived").join("doc_table.bin");
-    if !doc_table_path.exists() {
-        println!("\n=== Building doc table ===");
-        if let Some(parent) = doc_table_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        crate::commands::document_table::build(out_parquet.clone(), doc_table_path.clone(), None)?;
-    }
+    post_ingest(PostIngestOptions {
+        out_parquet,
+        build_phrase_index,
+        phrase_index_out,
+        phrase_gram_len,
+        build_tfidf,
+        tfidf_out,
+        catalog_index_out,
+        phrase_max_memory,
+    })
+}
 
-    let parquet_file_count = crate::phrase_index::parquet_files(&out_parquet)
+pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
+    let out = opts
+        .out_parquet
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("data"));
+    let tfidf_out_path = opts
+        .tfidf_out
+        .clone()
+        .unwrap_or_else(|| out.join("derived").join("tfidf_v3.index"));
+
+    // -- Downstream builders --------------------------------------------
+    // doc_table.bin is always built or updated — it's small, fast, and
+    // required by every later index build plus most research tools.
+    let doc_table_path = out.join("derived").join("doc_table.bin");
+    println!("\n=== Updating doc table ===");
+    if let Some(parent) = doc_table_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let append_to = doc_table_path.exists().then(|| doc_table_path.clone());
+    crate::commands::document_table::build(opts.out_parquet.clone(), doc_table_path.clone(), append_to)?;
+
+    let parquet_file_count = crate::phrase_index::parquet_files(&opts.out_parquet)
         .map(|v| v.len()).unwrap_or(0);
 
-    if build_phrase_index {
+    if opts.build_phrase_index {
         println!("\n=== Building phrase index ===");
-        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, phrase_max_memory);
+        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
         println!("  buckets: {} (parquet files: {}, memory budget: {})",
             buckets, parquet_file_count,
-            phrase_max_memory.map(|b| format!("{} MB", b / 1024 / 1024))
+            opts.phrase_max_memory.map(|b| format!("{} MB", b / 1024 / 1024))
                 .unwrap_or_else(|| "default".into()));
         crate::phrase_index::build(
-            out_parquet.clone(), doc_table_path.clone(),
-            phrase_index_out.clone(), phrase_gram_len, buckets, None,
+            opts.out_parquet.clone(), doc_table_path.clone(),
+            opts.phrase_index_out.clone(), opts.phrase_gram_len, buckets, None,
         )?;
-        println!("wrote {}", phrase_index_out.display());
+        println!("wrote {}", opts.phrase_index_out.display());
     }
 
-    if build_tfidf {
+    if opts.build_tfidf {
         println!("\n=== Building TF-IDF index ===");
-        let tfidf_out_path = tfidf_out.unwrap_or_else(|| out.join("tfidf_v3.index"));
         let params = crate::tfidf::index::TfidfParams::default_v2();
-        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, phrase_max_memory);
+        let buckets = crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
         crate::tfidf::index::build(
-            out_parquet.clone(), doc_table_path.clone(),
+            opts.out_parquet.clone(), doc_table_path.clone(),
             tfidf_out_path.clone(), params, buckets, None,
         )?;
         println!("wrote {}", tfidf_out_path.display());
     }
 
-    if let Some(catalog_index_out) = catalog_index_out {
+    if let Some(catalog_index_out) = opts.catalog_index_out {
         println!("\n=== Building catalog index ===");
         crate::commands::catalog_index::build(
-            out_parquet.clone(), catalog_index_out.clone(),
+            opts.out_parquet.clone(), catalog_index_out.clone(),
             None, Some(doc_table_path.clone()),
         )?;
     }
 
-    let parquet_bytes = crate::commands::estimate::dir_size(&out_parquet);
-    print_next_steps(build_phrase_index, build_tfidf, parquet_bytes);
+    let parquet_bytes = crate::commands::estimate::dir_size(&opts.out_parquet);
+    print_next_steps(
+        opts.build_phrase_index,
+        opts.build_tfidf,
+        parquet_bytes,
+        &opts.out_parquet,
+        &doc_table_path,
+        &opts.phrase_index_out,
+        &tfidf_out_path,
+    );
     Ok(())
 }
 
 /// Non-prominent footer after a successful ingest. Surfaces the optional
 /// heavy indexes (phrase, tfidf) without making them look mandatory, and
-/// points at `mcp` as the normal way to actually use the corpus.
-fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
+/// shows basic tool-call / batch invocation examples.
+fn print_next_steps(
+    built_phrase: bool,
+    built_tfidf: bool,
+    parquet_bytes: u64,
+    out_parquet: &Path,
+    doc_table: &Path,
+    phrase_out: &Path,
+    tfidf_out: &Path,
+) {
     use crate::commands::estimate::{phrase_index_estimate, tfidf_estimate};
 
     let need_phrase = !built_phrase;
     let need_tfidf  = !built_tfidf;
 
     println!();
-    println!("Ingest complete. The corpus is usable as-is via the MCP server.");
+    println!("Ingest complete. The corpus is ready.");
     println!();
     if need_phrase || need_tfidf {
         println!("Optional heavy indexes (build later if/when you need them):");
+        if need_phrase && need_tfidf {
+            println!("  • unified indexes — exact phrase lookup + similarity/frontier discovery");
+            println!("                      sinoragd optional-indexes --parquet {} --doc-table {} --phrase-out {} --tfidf-out {}",
+                out_parquet.display(), doc_table.display(), phrase_out.display(), tfidf_out.display());
+            println!("                      phrase estimate: {}", phrase_index_estimate(parquet_bytes));
+            println!("                      tf-idf estimate: {}", tfidf_estimate(parquet_bytes));
+        }
         if need_phrase {
             println!("  • phrase index  — exact CJK n-gram lookup (canonical-anchor search)");
-            println!("                    sinoragd index phrase");
+            println!("                    sinoragd index phrase --parquet {} --doc-table {} --out {}",
+                out_parquet.display(), doc_table.display(), phrase_out.display());
             println!("                    estimate: {}", phrase_index_estimate(parquet_bytes));
         }
         if need_tfidf {
             println!("  • tf-idf index  — similarity / frontier discovery");
-            println!("                    sinoragd index tfidf");
+            println!("                    sinoragd index tfidf --parquet {} --doc-table {} --out {}",
+                out_parquet.display(), doc_table.display(), tfidf_out.display());
             println!("                    estimate: {}", tfidf_estimate(parquet_bytes));
         }
         println!();
     }
-    println!("Start the MCP server:");
-    println!("  sinoragd mcp");
+    println!("Use the research tools:");
+    println!("  sinoragd tool-call search --passages-parquet {} --json '{{\"phrase\":\"...\",\"limit\":10}}'",
+        out_parquet.display());
+    println!("  sinoragd tool-call passage --passages-parquet {} --json '{{\"id\":\"...\"}}'",
+        out_parquet.display());
+    println!("  sinoragd run-tools --passages-parquet {} --input jobs.jsonl --output results.jsonl  # batch mode",
+        out_parquet.display());
     println!();
     println!("Check what's built:");
     println!("  sinoragd status");

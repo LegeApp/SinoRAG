@@ -43,6 +43,7 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_64;
@@ -731,12 +732,16 @@ pub fn build(
     // -----------------------------------------------------------------------
     // Phase 1 — bucket writes.
     // -----------------------------------------------------------------------
+    const REPORT_INTERVAL: Duration = Duration::from_secs(20);
     eprintln!("\n[Phase 1] Bucket writes...");
     {
         const MAX_OPEN: usize = 64;
         let mut writers = BucketWriterCache::new(temp_dir.clone(), MAX_OPEN);
         let mut total_records: u64 = 0;
         let mut processed = 0usize;
+        let phase1_start = Instant::now();
+        let mut last_report = Instant::now();
+        let total_files = files.len();
 
         let analyze_opts = crate::text_analyzer::AnalyzeOptions {
             min_n: gram_len,
@@ -750,9 +755,6 @@ pub fn build(
 
         for file_path in &files {
             processed += 1;
-            if processed % 100 == 0 {
-                eprintln!("  {}/{}  ({} records)", processed, files.len(), total_records);
-            }
             let builder = global_cache().get_or_load(file_path)?;
             let reader = builder.build()?;
             for batch in reader {
@@ -771,9 +773,19 @@ pub fn build(
                     }
                 }
             }
+            if last_report.elapsed() >= REPORT_INTERVAL {
+                let elapsed = phase1_start.elapsed().as_secs();
+                let eta = if processed > 0 {
+                    elapsed * (total_files - processed) as u64 / processed as u64
+                } else { 0 };
+                eprintln!("  [Phase 1] {}/{} files  |  {} records  |  {}s elapsed  |  ~{}s remaining",
+                    processed, total_files, total_records, elapsed, eta);
+                last_report = Instant::now();
+            }
         }
         writers.flush_all()?;
-        eprintln!("  Total records: {}", total_records);
+        eprintln!("  [Phase 1] done — {} files, {} records, {}s",
+            total_files, total_records, phase1_start.elapsed().as_secs());
     }
 
     // -----------------------------------------------------------------------
@@ -781,14 +793,23 @@ pub fn build(
     // -----------------------------------------------------------------------
     eprintln!("\n[Phase 2] Sorting chunks per bucket...");
     let mut all_sorted_chunks: Vec<Vec<PathBuf>> = Vec::with_capacity(bucket_count);
-    for bucket_idx in 0..bucket_count {
+    {
+        let phase2_start = Instant::now();
+        let mut last_report = Instant::now();
+        for bucket_idx in 0..bucket_count {
         let bucket_path = temp_dir.join(format!("bucket-{:04}.bin", bucket_idx));
         if !bucket_path.exists() {
             all_sorted_chunks.push(Vec::new());
             continue;
         }
-        if bucket_idx % 256 == 0 {
-            eprintln!("  bucket {}/{}", bucket_idx, bucket_count);
+        if last_report.elapsed() >= REPORT_INTERVAL {
+            let elapsed = phase2_start.elapsed().as_secs();
+            let eta = if bucket_idx > 0 {
+                elapsed * (bucket_count - bucket_idx) as u64 / bucket_idx as u64
+            } else { 0 };
+            eprintln!("  [Phase 2] {}/{} buckets  |  {}s elapsed  |  ~{}s remaining",
+                bucket_idx, bucket_count, elapsed, eta);
+            last_report = Instant::now();
         }
 
         let file_size = fs::metadata(&bucket_path)?.len() as usize;
@@ -828,7 +849,9 @@ pub fn build(
         drop(bucket_file);
         fs::remove_file(&bucket_path)?;
         all_sorted_chunks.push(sorted_chunks);
-    }
+        } // end bucket loop
+        eprintln!("  [Phase 2] done — {}s", phase2_start.elapsed().as_secs());
+    } // end Phase 2 block
 
     // -----------------------------------------------------------------------
     // Phase 3 — k-way merge each bucket; pick encoding per gram.
@@ -843,12 +866,20 @@ pub fn build(
     let mut dense_gram_count: u64 = 0;
     let mut varint_gram_count: u64 = 0;
 
+    let phase3_start = Instant::now();
+    let mut last_report = Instant::now();
     for (bucket_idx, sorted_chunks) in all_sorted_chunks.iter().enumerate() {
         if sorted_chunks.is_empty() {
             continue;
         }
-        if bucket_idx % 256 == 0 {
-            eprintln!("  bucket {}/{}", bucket_idx, bucket_count);
+        if last_report.elapsed() >= REPORT_INTERVAL {
+            let elapsed = phase3_start.elapsed().as_secs();
+            let eta = if bucket_idx > 0 {
+                elapsed * (bucket_count - bucket_idx) as u64 / bucket_idx as u64
+            } else { 0 };
+            eprintln!("  [Phase 3] {}/{} buckets  |  {} grams  |  {}s elapsed  |  ~{}s remaining",
+                bucket_idx, bucket_count, gram_count, elapsed, eta);
+            last_report = Instant::now();
         }
 
         let mut readers: Vec<SortedChunkReader> = sorted_chunks
@@ -917,8 +948,8 @@ pub fn build(
     drop(entries_writer);
     drop(postings_writer);
     eprintln!(
-        "  Total grams: {} (roaring: {}, varint: {})",
-        gram_count, dense_gram_count, varint_gram_count
+        "  [Phase 3] done — {} grams (roaring: {}, varint: {}), {}s",
+        gram_count, dense_gram_count, varint_gram_count, phase3_start.elapsed().as_secs()
     );
 
     // -----------------------------------------------------------------------

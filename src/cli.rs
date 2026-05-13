@@ -21,12 +21,11 @@ pub enum IngestSource {
 User flow:\n  \
   1. sinoragd ingest <source> <path>   # build the corpus (one-time, slow)\n  \
   2. sinoragd status                   # see what's built / what's next\n  \
-  3. sinoragd index phrase | tfidf     # optional heavy indexes\n  \
-  4. sinoragd mcp                      # start MCP server for agent access\n\n\
-Research/analysis tools (search, passage, similar, frontier, …) are exposed\n\
-as MCP tools and not listed at the top level. Agents call them via the MCP\n\
-server. Run `sinoragd help <COMMAND>` to see hidden commands.")]
-#[command(after_help = "Run `sinoragd mcp --help` for MCP server options.\nRun `sinoragd help <COMMAND>` for hidden command details.")]
+  3. sinoragd optional-indexes         # optional heavy indexes\n  \
+  4. sinoragd tools-manifest           # discover JSON tool schemas\n\n\
+Agents should use `tool-call` for one call or `run-tools` for JSONL batches.\n\
+Run `sinoragd tools-manifest --include-examples` for available tools.")]
+#[command(after_help = "Run `sinoragd help <COMMAND>` for command details.")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -37,8 +36,8 @@ pub enum IndexCommand {
     /// Build the phrase (n-gram) index for exact CJK phrase lookup.
     ///
     /// Required for canonical-anchor / first-attestation / phrase-history
-    /// MCP tools. Slow on large corpora — expect 1–3 hours on CBETA and
-    /// multiple GB on disk. Not required to start the MCP server.
+    /// tools. Slow on large corpora — expect 1–3 hours on CBETA and
+    /// multiple GB on disk. Not required for basic search/passage tools.
     Phrase {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -56,9 +55,9 @@ pub enum IndexCommand {
 
     /// Build the TF-IDF index for similarity / frontier discovery.
     ///
-    /// Required for `similar`, `frontier`, and related MCP tools. Slow on
+    /// Required for `similar`, `frontier`, and related tools. Slow on
     /// large corpora — expect 1–2 hours on CBETA and multiple GB on disk.
-    /// Not required to start the MCP server.
+    /// Not required for basic search/passage tools.
     Tfidf {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -107,13 +106,42 @@ pub enum Command {
         data: PathBuf,
     },
 
-    /// Build optional heavy indexes (phrase, tf-idf).
+    /// Build one optional heavy index family.
     ///
-    /// These are not required to start the MCP server. Build them when the
-    /// research tools that depend on them are actually needed.
+    /// Prefer `optional-indexes` when both phrase and TF-IDF indexes are missing.
     Index {
         #[command(subcommand)]
         command: IndexCommand,
+    },
+
+    /// Build the optional phrase and TF-IDF indexes together.
+    ///
+    /// Run after ingest when you need exact phrase tools and similarity/frontier tools.
+    OptionalIndexes {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        phrase_out: PathBuf,
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        tfidf_out: PathBuf,
+        #[arg(long, default_value_t = 4)]
+        phrase_gram_len: usize,
+        #[arg(long, default_value_t = 5)]
+        min_ngram: usize,
+        #[arg(long, default_value_t = 8)]
+        max_ngram: usize,
+        #[arg(long, default_value_t = 5)]
+        min_df: u32,
+        #[arg(long, alias = "max-df", default_value_t = 0.05)]
+        max_df_ratio: f32,
+        #[arg(long, default_value_t = 200_000)]
+        max_features: usize,
+        #[arg(long, default_value_t = 2048)]
+        buckets: usize,
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
     },
 
     /// Ingest a corpus into the passage store (passages.parquet).
@@ -151,7 +179,7 @@ pub enum Command {
         #[arg(long, default_value = "4")]
         phrase_gram_len: usize,
         /// TF-IDF output path.
-        #[arg(long, default_value = "data/derived/tfidf")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
         tfidf_out: Option<PathBuf>,
         #[arg(long, default_value = "data/derived/catalog.index")]
         catalog_index_out: Option<PathBuf>,
@@ -164,10 +192,9 @@ pub enum Command {
         out_parquet: PathBuf,
     },
 
-    /// Start the MCP server (stdio or SSE transport) for agent access.
+    /// Start the legacy MCP server (currently disabled).
     ///
-    /// All research tools are exposed via MCP for Claude/Cline/Roo-style clients.
-    /// MCP is one of three frontends to the same ToolEngine core.
+    /// Use `tools-manifest`, `tool-call`, and `run-tools` for agent workflows.
     #[command(hide = true)]  // Hidden until rmcp dependency is properly configured
     Mcp {
         /// Transport protocol: stdio (default) or sse.
@@ -261,9 +288,9 @@ pub enum Command {
         index: PathBuf,
     },
 
-    /// Search phrase index directly (bypass MCP).
+    /// Search phrase index directly.
     ///
-    /// Debug entrypoint. Normally agents invoke this via the MCP server.
+    /// Debug entrypoint. Agents usually invoke the JSON tool instead.
     /// Requires `sinoragd index phrase` to have been run.
     #[command(hide = true)]
     PhraseIndexSearch {
@@ -379,14 +406,14 @@ pub enum Command {
     },
 
     // -----------------------------------------------------------------------
-    // Research / analysis commands — exposed via MCP, hidden from top-level
-    // help. Agents call these through the MCP server; users generally should
+    // Research / analysis commands — exposed through JSON tool-call/batch.
+    // Some low-level debug forms stay hidden; users generally should
     // not call them directly.
     // -----------------------------------------------------------------------
 
     /// Retrieve a single passage by ID.
     ///
-    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`;
+    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`;
     /// the direct CLI form is here for debugging.
     #[command(hide = true)]
     Passage {
@@ -400,7 +427,7 @@ pub enum Command {
 
     /// Full-text / metadata search across the passage store.
     ///
-    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`;
+    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`;
     /// the direct CLI form is here for debugging.
     #[command(hide = true)]
     Search {
@@ -468,7 +495,7 @@ pub enum Command {
 
     /// Find TF-IDF similar passages to a seed.
     ///
-    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`.
+    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`.
     /// Requires `sinoragd index tfidf` to have been run.
     #[command(hide = true)]
     Similar {
@@ -528,7 +555,7 @@ pub enum Command {
 
     /// Generate a discovery frontier packet for an agent session.
     ///
-    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`.
+    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`.
     /// Requires `sinoragd index tfidf` to have been run.
     #[command(hide = true)]
     Frontier {
@@ -548,6 +575,16 @@ pub enum Command {
         out: Option<PathBuf>,
         #[arg(long, default_value = "data/derived/registry.sqlite")]
         registry: PathBuf,
+    },
+
+    /// Show all unique canon codes, periods, traditions, and origins with passage counts.
+    ///
+    /// Use the output values as filter arguments to `search` and `works`.
+    /// Example: sinoragd taxonomy
+    ///   → then: sinoragd tool-call search --json '{"phrase":"","canon":"X","limit":5}'
+    Taxonomy {
+        #[arg(long, default_value = "data/passages.parquet")]
+        parquet: PathBuf,
     },
 
     /// List works in the catalog, optionally filtered by tradition/period/canon/author.
@@ -708,7 +745,7 @@ pub enum Command {
 
     /// Pick high-value seed passages for an agent to start from.
     ///
-    /// MCP-exposed tool. Normally invoked by agents via `sinoragd mcp`.
+    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`.
     #[command(hide = true)]
     SeedPick {
         #[arg(long, default_value = "data/passages.parquet")]
@@ -1052,7 +1089,6 @@ pub enum Command {
     ///
     /// Used by agents to discover available tools, their input/output schemas,
     /// required resources, and safety levels.
-    #[command(hide = true)]
     ToolsManifest {
         #[arg(long)]
         pack: Option<PathBuf>,
@@ -1065,7 +1101,6 @@ pub enum Command {
     /// Call a single tool with JSON arguments.
     ///
     /// Example: sinoragd tool-call search --json '{"phrase":"金剛經云","limit":5}'
-    #[command(hide = true)]
     ToolCall {
         /// Tool name to call.
         tool: String,
@@ -1079,12 +1114,25 @@ pub enum Command {
         readonly: bool,
         #[arg(long, default_value_t = false)]
         allow_admin_tools: bool,
+        #[arg(long)]
+        passages_parquet: Option<PathBuf>,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long)]
+        tfidf_index: Option<PathBuf>,
+        #[arg(long)]
+        catalog_index: Option<PathBuf>,
+        #[arg(long)]
+        doc_table: Option<PathBuf>,
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        #[arg(long)]
+        output_root: Option<PathBuf>,
     },
 
     /// Run a batch of tools from a JSONL file.
     ///
     /// Example: sinoragd run-tools --input jobs.jsonl --output results.jsonl
-    #[command(hide = true)]
     RunTools {
         #[arg(long)]
         input: PathBuf,
@@ -1102,5 +1150,17 @@ pub enum Command {
         jobs: usize,
         #[arg(long)]
         output_root: Option<PathBuf>,
+        #[arg(long)]
+        passages_parquet: Option<PathBuf>,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long)]
+        tfidf_index: Option<PathBuf>,
+        #[arg(long)]
+        catalog_index: Option<PathBuf>,
+        #[arg(long)]
+        doc_table: Option<PathBuf>,
+        #[arg(long)]
+        registry: Option<PathBuf>,
     },
 }

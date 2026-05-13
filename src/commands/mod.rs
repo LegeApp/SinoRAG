@@ -36,35 +36,56 @@ pub mod validate;
 pub mod tools_manifest;
 pub mod tool_call;
 pub mod run_tools;
+pub mod taxonomy;
 
 use crate::cli::{Cli, Command, IndexCommand};
 use anyhow::Result;
 use serde_json::json;
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_all_indexes(
+    parquet: std::path::PathBuf,
+    doc_table: std::path::PathBuf,
+    phrase_out: std::path::PathBuf,
+    tfidf_out: std::path::PathBuf,
+    phrase_gram_len: usize,
+    min_ngram: usize,
+    max_ngram: usize,
+    min_df: u32,
+    max_df_ratio: f32,
+    max_features: usize,
+    buckets: usize,
+    temp_dir: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let phrase_temp = temp_dir.as_ref().map(|p| p.join("phrase_v3.work"));
+    let tfidf_temp = temp_dir.as_ref().map(|p| p.join("tfidf_v3.work"));
+
+    eprintln!("=== Unified index build (phrase_v3 + tfidf_v3) ===");
+    phrase_index::build(
+        parquet.clone(),
+        doc_table.clone(),
+        phrase_out,
+        phrase_gram_len,
+        buckets,
+        phrase_temp,
+    )?;
+
+    let params = crate::tfidf::index::TfidfParams {
+        min_ngram,
+        max_ngram,
+        min_df,
+        max_df_ratio,
+        max_features,
+        dtype: "float32".to_string(),
+        analyzer: "char".to_string(),
+    };
+    crate::tfidf::index::build(parquet, doc_table, tfidf_out, params, buckets, tfidf_temp)
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Status { data } => {
-            use crate::tools::{ToolEngine, EngineConfig};
-            
-            let config = EngineConfig {
-                pack: Some(data),
-                readonly: true,
-                allow_admin_tools: false,
-                max_heavy_concurrency: 1,
-                passages_parquet: None,
-                phrase_index: None,
-                tfidf_index: None,
-                catalog_index: None,
-                doc_table: None,
-                registry: None,
-                output_root: None,
-            };
-            
-            let engine = ToolEngine::open(config).await?;
-            
-            let res = engine.status_impl().await?;
-            println!("{}", serde_json::to_string_pretty(&res)?);
-            Ok(())
+            status::run(data)
         },
         Command::Index { command } => match command {
             IndexCommand::Phrase { parquet, doc_table, out, gram_len, buckets, temp_dir } =>
@@ -84,6 +105,24 @@ pub async fn run(cli: Cli) -> Result<()> {
             IndexCommand::PhraseInfo { index } => phrase_index::info(index),
             IndexCommand::TfidfInfo  { index } => tfidf::info(index),
         },
+        Command::OptionalIndexes {
+            parquet, doc_table, phrase_out, tfidf_out, phrase_gram_len,
+            min_ngram, max_ngram, min_df, max_df_ratio, max_features,
+            buckets, temp_dir,
+        } => build_all_indexes(
+            parquet,
+            doc_table,
+            phrase_out,
+            tfidf_out,
+            phrase_gram_len,
+            min_ngram,
+            max_ngram,
+            min_df,
+            max_df_ratio,
+            max_features,
+            buckets,
+            temp_dir,
+        ),
         Command::Ingest {
             source,
             path,
@@ -104,11 +143,31 @@ pub async fn run(cli: Cli) -> Result<()> {
                 IngestSource::Cbeta => (Some(path), None),
                 IngestSource::Kanripo => (None, Some(path)),
                 IngestSource::Cef => {
-                    return cef::ingest(path, out_parquet).await;
+                    cef::ingest(path, out_parquet.clone()).await?;
+                    return ingest::post_ingest(ingest::PostIngestOptions {
+                        out_parquet,
+                        build_phrase_index,
+                        phrase_index_out,
+                        phrase_gram_len,
+                        build_tfidf,
+                        tfidf_out,
+                        catalog_index_out,
+                        phrase_max_memory,
+                    });
                 }
                 IngestSource::Terebess => {
                     let images_dir = std::path::PathBuf::from("data/derived/terebess_images");
-                    return ingest_terebess::run(path, out_parquet, images_dir, 500);
+                    ingest_terebess::run(path, out_parquet.clone(), images_dir, 500)?;
+                    return ingest::post_ingest(ingest::PostIngestOptions {
+                        out_parquet,
+                        build_phrase_index,
+                        phrase_index_out,
+                        phrase_gram_len,
+                        build_tfidf,
+                        tfidf_out,
+                        catalog_index_out,
+                        phrase_max_memory,
+                    });
                 }
             };
             ingest::run(
@@ -141,7 +200,19 @@ pub async fn run(cli: Cli) -> Result<()> {
         }),
         Command::CefInit { out } => cef::init(out),
         Command::CefStats { input } => cef::stats(input),
-        Command::IngestCef { input, out_parquet } => cef::ingest(input, out_parquet).await,
+        Command::IngestCef { input, out_parquet } => {
+            cef::ingest(input, out_parquet.clone()).await?;
+            ingest::post_ingest(ingest::PostIngestOptions {
+                out_parquet,
+                build_phrase_index: false,
+                phrase_index_out: std::path::PathBuf::from("data/derived/phrase_v3.index"),
+                phrase_gram_len: 4,
+                build_tfidf: false,
+                tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf_v3.index")),
+                catalog_index_out: Some(std::path::PathBuf::from("data/derived/catalog.index")),
+                phrase_max_memory: None,
+            })
+        }
         Command::KanripoToTei {
             input,
             out_corpus,
@@ -164,7 +235,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             registry: _,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -178,14 +249,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let canon_opt = if canon.is_empty() { None } else { Some(canon.join(",")) };
             let tradition_opt = if tradition.is_empty() { None } else { Some(tradition.join(",")) };
             let period_opt = if period.is_empty() { None } else { Some(period.join(",")) };
             let origin_opt = if origin.is_empty() { None } else { Some(origin.join(",")) };
-            
+
             let req = crate::tools::requests::SearchRequest {
                 phrase: phrase.unwrap_or_default(),
                 limit,
@@ -196,10 +267,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 origin: origin_opt,
                 author,
                 title,
+                heading_path_prefix,
             };
-            
+
             let res = engine.search_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -209,7 +281,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
         Command::Passage { id, parquet, out } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -223,12 +295,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::PassageRequest { id };
             let res = engine.passage_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -264,6 +336,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&payload)?);
             Ok(())
         }
+        Command::Taxonomy { parquet } => taxonomy::run(parquet).await,
         Command::WorkSummary { registry, limit } => {
             let payload = json!({
                 "registry": registry.display().to_string(),
@@ -318,7 +391,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             out,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -332,16 +405,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::PhraseIndexSearchRequest {
                 phrase,
                 limit,
             };
-            
+
             let res = engine.phrase_index_search_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -357,7 +430,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => catalog_index::build(parquet, out, debug_json, doc_table),
         Command::CatalogIndexInfo { index } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -371,17 +444,28 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::CatalogIndexInfoRequest {};
             let res = engine.catalog_index_info_impl(req).await?;
             println!("{}", serde_json::to_string_pretty(&res)?);
             Ok(())
         },
         Command::DocTableBuild { parquet, out, append_to } => document_table::build(parquet, out, append_to),
-        Command::IngestTerebess { input, out_parquet, images_dir, min_body_chars } =>
-            ingest_terebess::run(input, out_parquet, images_dir, min_body_chars),
+        Command::IngestTerebess { input, out_parquet, images_dir, min_body_chars } => {
+            ingest_terebess::run(input, out_parquet.clone(), images_dir, min_body_chars)?;
+            ingest::post_ingest(ingest::PostIngestOptions {
+                out_parquet,
+                build_phrase_index: false,
+                phrase_index_out: std::path::PathBuf::from("data/derived/phrase_v3.index"),
+                phrase_gram_len: 4,
+                build_tfidf: false,
+                tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf_v3.index")),
+                catalog_index_out: Some(std::path::PathBuf::from("data/derived/catalog.index")),
+                phrase_max_memory: None,
+            })
+        }
         Command::BuildPack { pack, pack_id } => build_pack::run(pack, pack_id),
         Command::ExpandContextAdaptive { parquet, catalog, passage_id, max_chars, out } =>
             expand_context_adaptive::run(parquet, catalog, passage_id, max_chars, out).await,
@@ -419,7 +503,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -433,9 +517,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::WorksRequest {
                 tradition,
                 period,
@@ -443,7 +527,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 author,
                 limit,
             };
-            
+
             let res = engine.works_impl(req).await?;
             println!("{}", serde_json::to_string_pretty(&res)?);
             Ok(())
@@ -503,7 +587,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             out,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -517,9 +601,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::SimilarRequest {
                 seed,
                 limit,
@@ -527,9 +611,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 shared_phrase_limit,
                 min_shared_phrase_len,
             };
-            
+
             let res = engine.similar_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -567,7 +651,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             registry: _,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -581,17 +665,17 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::FrontierRequest {
                 seed,
                 limit,
                 phrase_limit,
             };
-            
+
             let res = engine.frontier_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -608,7 +692,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -622,15 +706,15 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: Some(registry),
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::SeedPickRequest {
                 tradition,
                 period,
                 limit,
             };
-            
+
             let res = engine.seed_pick_impl(req).await?;
             println!("{}", serde_json::to_string_pretty(&res)?);
             Ok(())
@@ -644,7 +728,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             out,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -658,17 +742,17 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::PhraseHistoryRequest {
                 phrase,
                 include_variants,
                 timeline,
             };
-            
+
             let res = engine.phrase_history_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -684,7 +768,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             out,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -698,9 +782,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let req = crate::tools::requests::FirstAttestationRequest {
                 phrase,
                 scope_canon: vec![],
@@ -708,9 +792,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 scope_source_work_id: None,
                 limit,
             };
-            
+
             let res = engine.first_attestation_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -740,7 +824,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             out,
         } => {
             use crate::tools::{ToolEngine, EngineConfig};
-            
+
             let config = EngineConfig {
                 pack: None,
                 readonly: true,
@@ -754,19 +838,19 @@ pub async fn run(cli: Cli) -> Result<()> {
                 registry: None,
                 output_root: None,
             };
-            
+
             let engine = ToolEngine::open(config).await?;
-            
+
             let canon_opt = if canon.is_empty() { None } else { Some(canon.join(",")) };
-            
+
             let req = crate::tools::requests::CanonicalSourceRequest {
                 phrase,
                 limit,
                 canon: canon_opt,
             };
-            
+
             let res = engine.canonical_source_impl(req).await?;
-            
+
             if let Some(out_path) = out {
                 std::fs::write(out_path, serde_json::to_string_pretty(&res)?)?;
             } else {
@@ -853,7 +937,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 include_examples,
             }).await
         }
-        Command::ToolCall { tool, json, json_file, pack, readonly, allow_admin_tools } => {
+        Command::ToolCall {
+            tool, json, json_file, pack, readonly, allow_admin_tools,
+            passages_parquet, phrase_index, tfidf_index, catalog_index,
+            doc_table, registry, output_root,
+        } => {
             tool_call::run(tool_call::ToolCallArgs {
                 tool,
                 json,
@@ -861,9 +949,20 @@ pub async fn run(cli: Cli) -> Result<()> {
                 pack,
                 readonly,
                 allow_admin_tools,
+                passages_parquet,
+                phrase_index,
+                tfidf_index,
+                catalog_index,
+                doc_table,
+                registry,
+                output_root,
             }).await
         }
-        Command::RunTools { input, output, pack, readonly, allow_admin_tools, continue_on_error, jobs, output_root } => {
+        Command::RunTools {
+            input, output, pack, readonly, allow_admin_tools, continue_on_error,
+            jobs, output_root, passages_parquet, phrase_index, tfidf_index,
+            catalog_index, doc_table, registry,
+        } => {
             run_tools::run(run_tools::RunToolsArgs {
                 input,
                 output,
@@ -873,6 +972,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 continue_on_error,
                 jobs,
                 output_root,
+                passages_parquet,
+                phrase_index,
+                tfidf_index,
+                catalog_index,
+                doc_table,
+                registry,
             }).await
         }
     }

@@ -84,6 +84,7 @@ pub fn report_build(
 
     let report = json!({
         "schema": "readzen-research-report-v1",
+        "report_kind": "evidence_scaffold_not_final_prose",
         "title": inferred_title.clone(),
         "created_by": "graphdiscovery-rust",
         "created_utc": Utc::now().to_rfc3339(),
@@ -120,7 +121,7 @@ pub fn report_build(
 
     let ext = out.extension().and_then(|s| s.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") {
-        let md = markdown_report::render(&report, Some(&inferred_title));
+        let md = markdown_report::render_with_options(&report, Some(&inferred_title), essay_max_pages);
         templates::write_text(&out, &md)?;
     } else {
         templates::write_json(&out, &report)?;

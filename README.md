@@ -2,7 +2,7 @@
 
 **SinoRAG** is a local-first research backend for Chinese Buddhist and classical Chinese corpora.
 
-It ingests TEI/XML, Kanripo, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, catalog browsing, and LLM-agent research workflows via MCP.
+It ingests TEI/XML, Kanripo, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, catalog browsing, and JSONL-based LLM-agent research workflows.
 
 > Let an LLM agent research Chinese source texts with tools instead of guessing from memory.
 
@@ -18,14 +18,14 @@ sinoragd ingest cbeta /path/to/cbeta/xml-p5
 sinoragd status
 
 # 3. Build optional heavy indexes when needed
-sinoragd index phrase   # exact CJK phrase search (hours, several GB)
-sinoragd index tfidf    # similarity / frontier discovery (hours, ~1–2 GB)
+sinoragd optional-indexes  # phrase + TF-IDF indexes in one v3 indexing run
 
-# 4. Start the MCP server for agent access
-sinoragd mcp
+# 4. Discover and call tools from an agent
+sinoragd tools-manifest --include-examples
+sinoragd tool-call search --json '{"phrase":"金剛經","limit":5}'
 ```
 
-`sinoragd --help` shows the full 4-step flow. All research and analysis tools are exposed as MCP tools — agents call them through the MCP server rather than directly.
+`sinoragd --help` shows the full flow. Agents use `tools-manifest` to discover schemas, `tool-call` for one request, and `run-tools` for reproducible JSONL batches.
 
 ---
 
@@ -33,11 +33,11 @@ sinoragd mcp
 
 - Ingests CBETA TEI/XML, Kanripo plain-text, CEF JSON-lines, and Terebess HTML corpora
 - Builds a Parquet passage store partitioned by `source_corpus`
-- Provides exact phrase search over normalized Chinese text (`phrase_v2.index`)
+- Provides exact phrase search over normalized Chinese text (`phrase_v3.index`)
 - Builds a document table for stable `doc_id ↔ passage_id` mapping
 - Builds catalog indexes for corpus/work/section navigation
 - Builds TF-IDF indexes for similarity and textual reuse discovery
-- Exposes all research tools through MCP for LLM agents
+- Exposes research tools through JSON schemas for LLM agents
 - Produces structured JSON output for reports, graph generation, and downstream apps
 
 ---
@@ -64,9 +64,7 @@ sinoragd ingest cbeta /path/to/cbeta/xml-p5
 sinoragd ingest kanripo /path/to/kanripo        # optional, append
 ```
 
-Use `--out <DIR>` to set a custom data root (default: `data/`).
 Use `--resume auto` to continue an interrupted run.
-Use `--sorting-data-dir` for CBETA period-rank ordering.
 
 ### Step 2 — Check status
 
@@ -78,25 +76,28 @@ Reports what's ingested, which indexes are present, estimated cost for the missi
 
 ### Step 3 — Build optional indexes
 
-These are not required to start the MCP server. Build them when the tools that depend on them are needed.
+These are not required for basic `search` and `passage` tools. Build them when the tools that depend on them are needed.
 
 ```bash
-# Exact phrase search (canonical-source, first-attestation, phrase-history, …)
-sinoragd index phrase
+# Exact phrase search + similarity / frontier discovery
+sinoragd optional-indexes
 
-# Similarity / frontier discovery (similar, frontier, …)
+# Incremental rebuilds remain available
+sinoragd index phrase
 sinoragd index tfidf
 ```
 
 Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
 
-### Step 4 — Start the MCP server
+### Step 4 — Use JSON tools
 
 ```bash
-sinoragd mcp
+sinoragd tools-manifest --include-examples
+sinoragd tool-call search --json '{"phrase":"金剛經","limit":5}'
+sinoragd run-tools --input jobs.jsonl --output results.jsonl
 ```
 
-All research and analysis tools are exposed via MCP. Agents connect here rather than calling commands directly.
+Agents should inspect the manifest, then submit schema-valid JSON tool calls. Batch mode writes one response envelope per input line for auditability and retry.
 
 ---
 
@@ -110,8 +111,8 @@ data/
   derived/
     doc_table.bin             stable doc_id / passage_id mapping
     catalog.index             corpus / work / outline navigation
-    phrase_v2.index           exact phrase candidate index  (optional)
-    tfidf.index               similarity index              (optional)
+    phrase_v3.index           exact phrase candidate index  (optional)
+    tfidf_v3.index            similarity index              (optional)
     registry.sqlite           mutable research state        (auto-created)
 ```
 
@@ -140,28 +141,26 @@ Which artifacts each tool needs:
 | `frontier` / `research-packet` | ✓ | ✓ | optional | optional | optional | |
 | `query-expand-terms` | — | — | — | — | — | zero corpus deps |
 
-**Minimum viable MCP server** (just `passage`, `search`, `expand-context`): ingest only, no heavy indexes required.
+**Minimum viable agent workflow** (just `passage`, `search`, `expand-context`): ingest only, no heavy indexes required.
 
 ---
 
-## MCP server
+## Agent tool workflow
 
 ```bash
-sinoragd mcp
-# or with explicit paths:
-sinoragd mcp \
-  --parquet data/passages.parquet \
-  --tfidf-index data/derived/tfidf.index \
-  --catalog-index data/derived/catalog.index
+sinoragd tools-manifest --include-examples
+sinoragd tool-call passage --json '{"id":"B/B13/B13n0079.xml#pB13p0047a0417"}'
+sinoragd run-tools --input jobs.jsonl --output results.jsonl --jobs 4
 ```
 
 Agent pattern:
 
 ```text
 agent receives user question
-  → agent calls SinoRAG MCP tools
-  → SinoRAG returns exact passages + metadata
-  → agent writes answer/report with citations
+  -> agent reads tool schemas from tools-manifest
+  -> agent calls SinoRAG tools with JSON
+  -> SinoRAG returns exact passages + metadata
+  -> agent writes answer/report with citations
 ```
 
 Research tools that require indexes not yet built will return a clear error rather than silently failing. The `status` command tells you what's missing before you start.
@@ -229,7 +228,9 @@ cargo install --path .
 
 ## Status
 
-Experimental but usable. Expect index schemas and hidden command names to change while the project stabilizes. The four user-facing commands (`ingest`, `status`, `index`, `mcp`) are stable.
+Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`ingest`, `status`, `optional-indexes`, `tools-manifest`, `tool-call`, and `run-tools`) are stable.
+
+**Note**: MCP server support has been deprecated. Use JSON Batching (`run-tools` command) for all research workflows. JSON Batching provides better reproducibility, debugging capabilities, and is better suited for academic research use cases requiring batch processing and audit trails.
 
 ---
 

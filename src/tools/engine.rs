@@ -49,7 +49,7 @@ impl Default for EngineConfig {
 /// The ToolEngine owns shared state and manages lazy-loaded resources
 pub struct ToolEngine {
     pub config: EngineConfig,
-    
+
     // Lazy-loaded heavy resources
     passages: OnceCell<Arc<DataFusionStore>>,
     phrase: OnceCell<Arc<PhraseIndex>>,
@@ -57,14 +57,92 @@ pub struct ToolEngine {
     catalog: OnceCell<Arc<CorpusCatalogIndex>>,
     doc_table: OnceCell<Arc<DocumentTable>>,
     registry: OnceCell<Arc<()>>,  // Placeholder - Registry may not exist yet
-    
+
     heavy_slots: Semaphore,
+}
+
+fn expand_optional_filter(value: Option<&str>) -> Vec<String> {
+    value
+        .map(|v| crate::commands::search::expand_values(&[v.to_string()]))
+        .unwrap_or_default()
+}
+
+fn exact_any_sql(where_parts: &mut Vec<String>, column: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    let quoted = values
+        .iter()
+        .map(|v| crate::datafusion_store::sql_literal(v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    where_parts.push(format!("{column} IN ({quoted})"));
+}
+
+fn tradition_contains_sql(column: &str, value: &str) -> String {
+    let token = serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""));
+    crate::datafusion_store::string_contains_sql(column, &token)
+}
+
+fn count_unique_ngrams_with_terms(
+    text: &str,
+    gram_len: usize,
+    counts: &mut FxHashMap<u64, u32>,
+    terms: &mut FxHashMap<u64, String>,
+) -> u32 {
+    if gram_len == 0 {
+        return 0;
+    }
+    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if chars.len() < gram_len {
+        return 0;
+    }
+
+    let mut seen = rustc_hash::FxHashSet::default();
+    for window in chars.windows(gram_len) {
+        let term: String = window.iter().collect();
+        let hash = xxhash_rust::xxh3::xxh3_64(term.as_bytes());
+        if seen.insert(hash) {
+            *counts.entry(hash).or_insert(0) += 1;
+            terms.entry(hash).or_insert(term);
+        }
+    }
+    seen.len() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_filter_expands_csv_values() {
+        assert_eq!(expand_optional_filter(None), Vec::<String>::new());
+        assert_eq!(
+            expand_optional_filter(Some("T, X, T")),
+            vec!["T".to_string(), "X".to_string()]
+        );
+    }
+
+    #[test]
+    fn exact_any_uses_in_clause_for_multi_value_filters() {
+        let mut where_parts = Vec::new();
+        exact_any_sql(&mut where_parts, "period", &["Tang".to_string(), "Song".to_string()]);
+        assert_eq!(where_parts, vec!["period IN ('Tang', 'Song')".to_string()]);
+    }
+
+    #[test]
+    fn tradition_match_targets_json_array_token() {
+        assert_eq!(
+            tradition_contains_sql("traditions", "canon"),
+            "strpos(traditions, '\"canon\"') > 0"
+        );
+    }
 }
 
 impl ToolEngine {
     pub async fn open(config: EngineConfig) -> Result<Self> {
         let max_heavy = config.max_heavy_concurrency.max(1);
-        
+
         Ok(Self {
             config,
             passages: OnceCell::new(),
@@ -76,134 +154,199 @@ impl ToolEngine {
             heavy_slots: Semaphore::new(max_heavy),
         })
     }
-    
+
     /// Resolve the passages parquet path
     pub fn resolve_passages_path(&self) -> Result<PathBuf> {
         if let Some(ref path) = self.config.passages_parquet {
             return Ok(path.clone());
         }
-        
+
         if let Some(ref pack) = self.config.pack.as_ref() {
-            let pack_path = pack.join("passages.parquet");
+            let pack_path = pack.join(crate::pack::DEFAULT_PASSAGES);
             if pack_path.exists() {
                 return Ok(pack_path);
             }
         }
-        
+
         // Default path
         let default = PathBuf::from("data/passages.parquet");
         if default.exists() {
             return Ok(default);
         }
-        
+
         Err(anyhow::anyhow!("Cannot resolve passages.parquet path"))
     }
-    
+
     /// Resolve the phrase index path
     pub fn resolve_phrase_path(&self) -> Result<PathBuf> {
         if let Some(ref path) = self.config.phrase_index {
             return Ok(path.clone());
         }
-        
+
         if let Some(pack) = self.config.pack.as_ref() {
-            let pack_path = pack.join("phrase_v3.index");
+            let pack_path = pack.join(crate::pack::DEFAULT_PHRASE);
             if pack_path.exists() {
                 return Ok(pack_path);
             }
         }
-        
+
         let default = PathBuf::from("data/derived/phrase_v3.index");
         if default.exists() {
             return Ok(default);
         }
-        
+
         Err(anyhow::anyhow!("Cannot resolve phrase_v3.index path"))
     }
-    
+
     /// Resolve the tfidf index path
     pub fn resolve_tfidf_path(&self) -> Result<PathBuf> {
         if let Some(ref path) = self.config.tfidf_index {
             return Ok(path.clone());
         }
-        
+
         if let Some(pack) = self.config.pack.as_ref() {
-            let pack_path = pack.join("tfidf_v3.index");
+            let pack_path = pack.join(crate::pack::DEFAULT_TFIDF);
             if pack_path.exists() {
                 return Ok(pack_path);
             }
         }
-        
+
         let default = PathBuf::from("data/derived/tfidf_v3.index");
         if default.exists() {
             return Ok(default);
         }
-        
+
         Err(anyhow::anyhow!("Cannot resolve tfidf_v3.index path"))
     }
-    
+
+    /// Resolve a phrase index path if present, and validate it against the
+    /// active doc table before any doc_id-bearing lookup uses it.
+    pub async fn optional_phrase_path(&self) -> Result<Option<PathBuf>> {
+        let Ok(path) = self.resolve_phrase_path() else {
+            return Ok(None);
+        };
+        self.ensure_phrase_index_matches_doc_table(&path).await?;
+        Ok(Some(path))
+    }
+
+    /// Resolve a TF-IDF path if present, and validate it against the active
+    /// doc table before any doc_id-bearing lookup uses it.
+    pub async fn optional_tfidf_path(&self) -> Result<Option<PathBuf>> {
+        let Ok(path) = self.resolve_tfidf_path() else {
+            return Ok(None);
+        };
+        self.ensure_tfidf_index_matches_doc_table(&path).await?;
+        Ok(Some(path))
+    }
+
+    async fn ensure_phrase_index_matches_doc_table(&self, path: &Path) -> Result<()> {
+        let info = PhraseIndex::header_info(path)?;
+        let fingerprint = info
+            .get("doc_table_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        self.ensure_index_matches_doc_table("phrase index", path, fingerprint).await
+    }
+
+    async fn ensure_tfidf_index_matches_doc_table(&self, path: &Path) -> Result<()> {
+        let info = TfidfIndex::header_info(path)?;
+        let fingerprint = info
+            .get("doc_table_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        self.ensure_index_matches_doc_table("TF-IDF index", path, fingerprint).await
+    }
+
+    async fn ensure_index_matches_doc_table(
+        &self,
+        index_name: &str,
+        index_path: &Path,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let doc_table_path = self.resolve_doc_table_path()?;
+        let doc_table = self.doc_table().await?;
+        let coverage = crate::document_table::match_index_fingerprint(
+            &doc_table,
+            &doc_table_path,
+            fingerprint,
+        )?;
+        if coverage.is_none() {
+            anyhow::bail!(
+                "{} fingerprint does not match active doc_table; rebuild {} for {}",
+                index_name,
+                index_name,
+                doc_table_path.display()
+            );
+        }
+        if !index_path.exists() {
+            anyhow::bail!("{} not found at {}", index_name, index_path.display());
+        }
+        Ok(())
+    }
+
     /// Resolve the catalog index path
     pub fn resolve_catalog_path(&self) -> Result<PathBuf> {
         if let Some(ref path) = self.config.catalog_index {
             return Ok(path.clone());
         }
-        
+
         if let Some(pack) = self.config.pack.as_ref() {
-            let pack_path = pack.join("catalog.index");
+            let pack_path = pack.join(crate::pack::DEFAULT_CATALOG);
             if pack_path.exists() {
                 return Ok(pack_path);
             }
         }
-        
+
         let default = PathBuf::from("data/derived/catalog.index");
         if default.exists() {
             return Ok(default);
         }
-        
+
         Err(anyhow::anyhow!("Cannot resolve catalog.index path"))
     }
-    
+
     /// Resolve the doc table path
     pub fn resolve_doc_table_path(&self) -> Result<PathBuf> {
         if let Some(ref path) = self.config.doc_table {
             return Ok(path.clone());
         }
-        
+
         if let Some(pack) = self.config.pack.as_ref() {
-            let pack_path = pack.join("doc_table.bin");
+            let pack_path = pack.join(crate::pack::DEFAULT_DOC_TABLE);
             if pack_path.exists() {
                 return Ok(pack_path);
             }
         }
-        
+
         let default = PathBuf::from("data/derived/doc_table.bin");
         if default.exists() {
             return Ok(default);
         }
-        
+
         Err(anyhow::anyhow!("Cannot resolve doc_table.bin path"))
     }
-    
+
     /// Resolve the registry path
     pub fn resolve_registry_path(&self) -> Result<PathBuf> {
         if let Some(ref path) = self.config.registry {
             return Ok(path.clone());
         }
-        
+
         if let Some(pack) = self.config.pack.as_ref() {
-            let pack_path = pack.join("registry.db");
+            let pack_path = pack.join(crate::pack::DEFAULT_REGISTRY);
             if pack_path.exists() {
                 return Ok(pack_path);
             }
         }
-        
-        let default = PathBuf::from("data/registry.db");
+
+        let default = PathBuf::from("data/derived/registry.sqlite");
         if default.exists() {
             return Ok(default);
         }
-        
-        Err(anyhow::anyhow!("Cannot resolve registry.db path"))
+
+        Err(anyhow::anyhow!("Cannot resolve registry.sqlite path"))
     }
-    
+
     /// Get or load the passages store
     pub async fn passages(&self) -> Result<Arc<DataFusionStore>> {
         self.passages
@@ -214,29 +357,31 @@ impl ToolEngine {
             .await
             .map(Clone::clone)
     }
-    
+
     /// Get or load the phrase index
     pub async fn phrase(&self) -> Result<Arc<PhraseIndex>> {
         self.phrase
             .get_or_try_init(|| async {
                 let path = self.resolve_phrase_path()?;
+                self.ensure_phrase_index_matches_doc_table(&path).await?;
                 Ok(Arc::new(PhraseIndex::open(&path)?))
             })
             .await
             .map(Clone::clone)
     }
-    
+
     /// Get or load the tfidf index
     pub async fn tfidf(&self) -> Result<Arc<TfidfIndex>> {
         self.tfidf
             .get_or_try_init(|| async {
                 let path = self.resolve_tfidf_path()?;
+                self.ensure_tfidf_index_matches_doc_table(&path).await?;
                 Ok(Arc::new(TfidfIndex::open(&path)?))
             })
             .await
             .map(Clone::clone)
     }
-    
+
     /// Get or load the catalog index
     pub async fn catalog(&self) -> Result<Arc<CorpusCatalogIndex>> {
         self.catalog
@@ -247,18 +392,18 @@ impl ToolEngine {
             .await
             .map(Clone::clone)
     }
-    
+
     /// Get or load the doc table
     pub async fn doc_table(&self) -> Result<Arc<DocumentTable>> {
         self.doc_table
             .get_or_try_init(|| async {
-                // DocumentTable uses new() constructor, not open()
-                Ok(Arc::new(DocumentTable::new()))
+                let path = self.resolve_doc_table_path()?;
+                Ok(Arc::new(DocumentTable::load(&path)?))
             })
             .await
             .map(Clone::clone)
     }
-    
+
     /// Get or load the registry
     pub async fn registry(&self) -> Result<Arc<()>> {
         self.registry
@@ -269,7 +414,7 @@ impl ToolEngine {
             .await
             .map(Clone::clone)
     }
-    
+
     /// Ensure write operations are allowed
     pub fn ensure_write_allowed(&self, tool: &str, output_path: &Path) -> Result<()> {
         if self.config.readonly {
@@ -277,40 +422,40 @@ impl ToolEngine {
                 tool: tool.to_string(),
             }.into_anyhow());
         }
-        
+
         // If output_root is set, ensure output path is under it
         if let Some(ref root) = self.config.output_root {
             Self::ensure_under_root(root, output_path)?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Ensure a path is under a root directory
     fn ensure_under_root(root: &Path, path: &Path) -> Result<()> {
         let root = root.canonicalize()
             .map_err(|e| anyhow::anyhow!("Cannot canonicalize root {}: {}", root.display(), e))?;
-        
+
         let parent = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Output path has no parent: {}", path.display()))?;
-        
+
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("Cannot create parent directory {}: {}", parent.display(), e))?;
-        
+
         let parent = parent.canonicalize()
             .map_err(|e| anyhow::anyhow!("Cannot canonicalize parent {}: {}", parent.display(), e))?;
-        
+
         if !parent.starts_with(&root) {
             return Err(crate::tools::errors::ToolError::OutputPathViolation {
                 path: path.to_path_buf(),
                 root,
             }.into_anyhow());
         }
-        
+
         Ok(())
     }
-    
+
     /// Run a future with a heavy slot (for concurrency control)
     pub async fn with_heavy_slot<T, F>(&self, fut: F) -> Result<T>
     where
@@ -319,25 +464,25 @@ impl ToolEngine {
         let _permit = self.heavy_slots.acquire().await?;
         fut.await
     }
-    
+
     /// Implement the status tool
     pub async fn status_impl(&self) -> Result<crate::tools::responses::StatusResponse> {
         use crate::tools::spec::{ToolSpec, ToolSafety};
         use crate::tools::errors::ToolError;
         use crate::tools::responses::StatusResponse;
-        
+
         let data_root = self.config.pack
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "data".to_string());
-        
+
         let passages_parquet_exists = self.resolve_passages_path().is_ok();
         let phrase_index_exists = self.resolve_phrase_path().is_ok();
         let tfidf_index_exists = self.resolve_tfidf_path().is_ok();
         let catalog_index_exists = self.resolve_catalog_path().is_ok();
         let doc_table_exists = self.resolve_doc_table_path().is_ok();
         let registry_exists = self.resolve_registry_path().is_ok();
-        
+
         Ok(StatusResponse {
             schema: "sinoragd-status-v1",
             data_root,
@@ -349,108 +494,170 @@ impl ToolEngine {
             registry_exists,
         })
     }
-    
+
     /// Implement the passage tool
     pub async fn passage_impl(&self, req: crate::tools::requests::PassageRequest) -> Result<crate::tools::responses::PassageResponse> {
         use crate::tools::responses::PassageResponse;
-        use crate::research;
-        
+        use crate::datafusion_store::sql_literal;
+
         let passages = self.passages().await?;
-        
-        // Query all passages with empty phrase to get data
-        let rows = research::exact_phrase_rows(&passages, &research::SearchSpec::exact_phrase(String::new(), 1000)).await?;
-        
-        let row = rows.iter()
-            .find(|r| r.get("passage_id").and_then(|v| v.as_str()) == Some(&req.id))
+        let sql = format!(
+            "SELECT passage_id, zh_text_raw, source_work_id, main_title, heading, \
+                    canon, period, traditions, origin, author, source_rel_path, xml_id \
+             FROM passages WHERE passage_id = {} LIMIT 1",
+            sql_literal(&req.id)
+        );
+        let mut rows = passages.query_json(&sql).await?;
+        let row = rows.drain(..).next()
             .ok_or_else(|| anyhow::anyhow!("Passage not found: {}", req.id))?;
-        
+
         Ok(PassageResponse {
             schema: "sinoragd-passage-v1",
             passage_id: req.id.clone(),
-            zh_quote: row.get("zh_quote").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            zh_quote: row.get("zh_text_raw").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             source_work_id: row.get("source_work_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
             main_title: row.get("main_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
             heading: row.get("heading").and_then(|v| v.as_str()).map(|s| s.to_string()),
         })
     }
-    
+
     /// Implement the search tool
     pub async fn search_impl(&self, req: crate::tools::requests::SearchRequest) -> Result<crate::tools::responses::SearchResponse> {
         use crate::tools::responses::{SearchResponse, SearchHit, SearchStrategy};
-        use crate::research::{SearchSpec, exact_phrase_rows};
-        
+        use crate::datafusion_store::{sql_literal, string_contains_sql};
+        use crate::normalize::normalize_zh;
+
         let passages = self.passages().await?;
-        
-        let spec = SearchSpec::exact_phrase(req.phrase.clone(), req.limit);
-        
-        let rows = exact_phrase_rows(&passages, &spec).await?;
-        
-        // Filter rows based on additional criteria if provided
-        let filtered_rows: Vec<_> = rows.iter()
-            .filter(|row| {
-                if let Some(ref work_id) = req.source_work_id {
-                    if row.get("source_work_id").and_then(|v| v.as_str()) != Some(work_id) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .take(req.limit)
-            .collect();
-        
-        let hits: Vec<SearchHit> = filtered_rows.iter().map(|row| SearchHit {
+
+        let mut where_parts = Vec::new();
+        let normalized = normalize_zh(&req.phrase);
+        if !normalized.is_empty() {
+            where_parts.push(string_contains_sql("zh_text_normalized", &normalized));
+        }
+
+        let canon = expand_optional_filter(req.canon.as_deref());
+        let tradition = expand_optional_filter(req.tradition.as_deref());
+        let period = expand_optional_filter(req.period.as_deref());
+        let origin = expand_optional_filter(req.origin.as_deref());
+
+        exact_any_sql(&mut where_parts, "canon", &canon);
+        if !tradition.is_empty() {
+            let disjuncts = tradition
+                .iter()
+                .map(|t| tradition_contains_sql("traditions", t))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            where_parts.push(format!("({disjuncts})"));
+        }
+        exact_any_sql(&mut where_parts, "period", &period);
+        exact_any_sql(&mut where_parts, "origin", &origin);
+        if let Some(ref author) = req.author {
+            where_parts.push(format!("strpos(lower(author), lower({})) > 0", sql_literal(author)));
+        }
+        if let Some(ref title) = req.title {
+            where_parts.push(format!("strpos(lower(main_title), lower({})) > 0", sql_literal(title)));
+        }
+        if let Some(ref work_id) = req.source_work_id {
+            where_parts.push(format!("source_work_id = {}", sql_literal(work_id)));
+        }
+        if let Some(ref prefix) = req.heading_path_prefix {
+            where_parts.push(format!("heading_path LIKE {}", sql_literal(&format!("{prefix}%"))));
+        }
+
+        let where_sql = if where_parts.is_empty() { "true".to_string() } else { where_parts.join(" AND ") };
+        let limit = req.limit.max(1);
+        let sql = format!(
+            "SELECT passage_id, source_rel_path, xml_id, heading, from_lb, to_lb, \
+                    zh_text_raw, canon, canon_name, traditions, period, origin, \
+                    author, main_title, period_rank, source_work_id \
+             FROM passages \
+             WHERE {where_sql} \
+             ORDER BY period_rank ASC, source_rel_path ASC, from_lb ASC, xml_id ASC \
+             LIMIT {limit}"
+        );
+
+        let rows = passages.query_json(&sql).await?;
+        let hit_count = rows.len();
+        let hits: Vec<SearchHit> = rows.into_iter().map(|row| SearchHit {
             passage_id: row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             source_work_id: row.get("source_work_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
             main_title: row.get("main_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
             heading: row.get("heading").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            zh_quote: row.get("zh_quote").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            zh_quote: row.get("zh_text_raw").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             score: None,
         }).collect();
-        
-        let hit_count = hits.len();
-        
+
         Ok(SearchResponse {
             schema: "sinoragd-search-v1",
             phrase: req.phrase,
             hits,
             search_strategy: SearchStrategy {
-                method: "full_text_normalized_substring".to_string(),
+                method: "direct_sql_filtered".to_string(),
                 filters: serde_json::json!({
-                    "canon": req.canon,
+                    "canon": canon,
+                    "tradition": tradition,
+                    "period": period,
+                    "origin": origin,
+                    "author": req.author,
+                    "title": req.title,
                     "source_work_id": req.source_work_id,
+                    "heading_path_prefix": req.heading_path_prefix,
+                    "normalized_phrase": normalized,
+                    "limit": limit,
                 }),
-                candidate_count: Some(rows.len()),
+                candidate_count: None,
                 verified_count: Some(hit_count),
             },
         })
     }
-    
+
     /// Implement the canonical-source tool
     pub async fn canonical_source_impl(&self, req: crate::tools::requests::CanonicalSourceRequest) -> Result<crate::tools::responses::CanonicalSourceResponse> {
         use crate::tools::responses::{CanonicalSourceResponse, CanonicalSourceHit, SearchStrategy};
-        use crate::research::{SearchSpec, exact_phrase_rows};
-        
+        use crate::datafusion_store::{sql_literal, string_contains_sql};
+        use crate::normalize::normalize_zh;
+
         let passages = self.passages().await?;
-        
-        let spec = SearchSpec::exact_phrase(req.phrase.clone(), req.limit);
-        
-        let rows = exact_phrase_rows(&passages, &spec).await?;
-        
-        // Filter for canon-side passages
+
+        let normalized = normalize_zh(&req.phrase);
+        let mut where_parts = Vec::new();
+        if !normalized.is_empty() {
+            where_parts.push(string_contains_sql("zh_text_normalized", &normalized));
+        }
+
+        let canon = expand_optional_filter(req.canon.as_deref());
+        if canon.is_empty() {
+            where_parts.push("canon IS NOT NULL AND canon != ''".to_string());
+        } else {
+            exact_any_sql(&mut where_parts, "canon", &canon);
+        }
+
+        let where_sql = if where_parts.is_empty() { "true".to_string() } else { where_parts.join(" AND ") };
+        let limit = req.limit.max(1);
+        let sql = format!(
+            "SELECT passage_id, source_work_id, main_title, heading, zh_text_raw, \
+                    canon, traditions, period, origin, period_rank, source_rel_path, from_lb, xml_id \
+             FROM passages \
+             WHERE {where_sql} \
+             ORDER BY period_rank ASC, source_rel_path ASC, from_lb ASC, xml_id ASC \
+             LIMIT {limit}"
+        );
+
+        let rows = passages.query_json(&sql).await?;
+
         let hits: Vec<CanonicalSourceHit> = rows.iter()
-            .filter(|row| row.get("tradition").and_then(|v| v.as_str()) == Some("canon"))
             .take(req.limit)
             .map(|row| CanonicalSourceHit {
                 passage_id: row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 source_work_id: row.get("source_work_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 main_title: row.get("main_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 heading: row.get("heading").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                zh_quote: row.get("zh_quote").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                zh_quote: row.get("zh_text_raw").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 is_canon_side: true,
             }).collect();
-        
+
         let hit_count = hits.len();
-        
+
         Ok(CanonicalSourceResponse {
             schema: "sinoragd-canonical-source-v1",
             phrase: req.phrase,
@@ -459,23 +666,24 @@ impl ToolEngine {
                 method: "full_text_with_tradition_filter".to_string(),
                 filters: serde_json::json!({
                     "canon": req.canon,
-                    "tradition": "canon"
+                    "normalized_phrase": normalized,
+                    "canonical_filter": if canon.is_empty() { "canon != ''" } else { "canon IN (...)" }
                 }),
                 candidate_count: Some(rows.len()),
                 verified_count: Some(hit_count),
             },
         })
     }
-    
+
     /// Implement the validate-adjudication tool
     pub async fn validate_adjudication_impl(&self, req: crate::tools::requests::ValidateAdjudicationRequest) -> Result<crate::tools::responses::ValidateAdjudicationResponse> {
         use crate::tools::responses::ValidateAdjudicationResponse;
         use crate::commands::validate;
-        
+
         // validate::run returns Result<()> and prints to stdout
         // For now, we'll just call it and assume success if it doesn't error
         validate::run(req.path.clone())?;
-        
+
         Ok(ValidateAdjudicationResponse {
             schema: "sinoragd-validate-adjudication-v1",
             path: req.path,
@@ -484,14 +692,14 @@ impl ToolEngine {
             warnings: vec![],
         })
     }
-    
+
     /// Implement the graph-build tool
     pub async fn graph_build_impl(&self, req: crate::tools::requests::GraphBuildRequest) -> Result<crate::tools::responses::GraphBuildResponse> {
         use crate::tools::responses::GraphBuildResponse;
         use crate::commands::export;
-        
+
         self.ensure_write_allowed("graph-build", &req.out)?;
-        
+
         let graph_kind = match req.kind.as_str() {
             "evidence" => export::GraphKind::Evidence,
             "timeline" => export::GraphKind::Timeline,
@@ -501,16 +709,16 @@ impl ToolEngine {
                 other
             ),
         };
-        
+
         export::graph(req.input.clone(), Some(req.out.clone()), graph_kind, Some(req.name.clone()))?;
-        
+
         // Read back the graph to get counts
         let graph_content = std::fs::read_to_string(&req.out)?;
         let graph: serde_json::Value = serde_json::from_str(&graph_content)?;
-        
+
         let node_count = graph["nodes"].as_array().map(|v| v.len()).unwrap_or(0);
         let edge_count = graph["edges"].as_array().map(|v| v.len()).unwrap_or(0);
-        
+
         Ok(GraphBuildResponse {
             schema: "sinoragd-graph-build-v1",
             out: req.out,
@@ -518,42 +726,42 @@ impl ToolEngine {
             edge_count,
         })
     }
-    
+
     /// Implement the report-build tool
     pub async fn report_build_impl(&self, req: crate::tools::requests::ReportBuildRequest) -> Result<crate::tools::responses::ReportBuildResponse> {
         use crate::tools::responses::ReportBuildResponse;
         use crate::commands::export;
-        
+
         self.ensure_write_allowed("report-build", &req.out)?;
-        
+
         export::report_build(
             req.inputs.clone(),
             req.out.clone(),
             req.title.clone(),
             req.essay_max_pages,
         )?;
-        
+
         // Count sections in the generated markdown
         let content = std::fs::read_to_string(&req.out)?;
         let section_count = content.matches("##").count();
-        
+
         Ok(ReportBuildResponse {
             schema: "sinoragd-report-build-v1",
             out: req.out,
             section_count,
         })
     }
-    
+
     /// Implement the works tool
     pub async fn works_impl(&self, req: crate::tools::requests::WorksRequest) -> Result<crate::tools::responses::WorksResponse> {
         use crate::tools::responses::{WorksResponse, WorkInfo};
         use crate::catalog_index::CorpusCatalogIndex;
-        
+
         let catalog_path = self.resolve_catalog_path()?;
         let catalog = CorpusCatalogIndex::load(&catalog_path)?;
-        
+
         let mut filtered: Vec<_> = catalog.works.iter().collect();
-        
+
         if let Some(ref tradition) = req.tradition {
             filtered.retain(|w| w.traditions.iter().any(|tr| tr == tradition));
         }
@@ -566,9 +774,9 @@ impl ToolEngine {
         if let Some(ref author) = req.author {
             filtered.retain(|w| &w.author == author);
         }
-        
+
         filtered.truncate(req.limit);
-        
+
         let works: Vec<WorkInfo> = filtered.iter().map(|w| WorkInfo {
             work_id: w.work_id.clone(),
             main_title: w.main_title.clone(),
@@ -578,38 +786,38 @@ impl ToolEngine {
             traditions: w.traditions.clone(),
             passage_count: w.passage_count as usize,
         }).collect();
-        
+
         Ok(WorksResponse {
             schema: "sinoragd-works-v1",
             works,
         })
     }
-    
+
     /// Implement the catalog-index-info tool
     pub async fn catalog_index_info_impl(&self, _req: crate::tools::requests::CatalogIndexInfoRequest) -> Result<crate::tools::responses::CatalogIndexInfoResponse> {
         use crate::tools::responses::CatalogIndexInfoResponse;
         use crate::catalog_index::CorpusCatalogIndex;
-        
+
         let catalog_path = self.resolve_catalog_path()?;
         let catalog = CorpusCatalogIndex::load(&catalog_path)?;
         let info = catalog.info_payload();
-        
+
         Ok(CatalogIndexInfoResponse {
             schema: "sinoragd-catalog-index-info-v1",
             info,
         })
     }
-    
+
     /// Implement the similar tool
     pub async fn similar_impl(&self, req: crate::tools::requests::SimilarRequest) -> Result<crate::tools::responses::SimilarResponse> {
         use crate::tools::responses::SimilarResponse;
         use crate::commands::tfidf::similar_passages_with_index;
         use crate::document_table::DocumentTable;
-        
+
         let passages = self.passages().await?;
         let tfidf = self.tfidf().await?;
         let doc_table = self.doc_table().await?;
-        
+
         let similar_passages = similar_passages_with_index(
             &passages,
             &tfidf,
@@ -620,14 +828,14 @@ impl ToolEngine {
             req.min_shared_phrase_len,
             &doc_table,
         ).await?;
-        
+
         Ok(SimilarResponse {
             schema: "sinoragd-similar-v1",
             seed: req.seed,
             similar_passages,
         })
     }
-    
+
     /// Implement the frontier tool
     pub async fn frontier_impl(&self, req: crate::tools::requests::FrontierRequest) -> Result<crate::tools::responses::FrontierResponse> {
         use crate::tools::responses::FrontierResponse;
@@ -635,15 +843,15 @@ impl ToolEngine {
         use crate::commands::tfidf::similar_passages_with_index;
         use crate::document_table::DocumentTable;
         use crate::registry;
-        
+
         let passages = self.passages().await?;
         let tfidf = self.tfidf().await?;
         let doc_table = self.doc_table().await?;
         let registry_path = self.resolve_registry_path()?;
-        
+
         // Get seed passage
         let seed_row = passages.get_passage(&req.seed).await?;
-        
+
         // Get similar passages
         let similar = similar_passages_with_index(
             &passages,
@@ -655,17 +863,17 @@ impl ToolEngine {
             4,  // min_shared_phrase_len
             &doc_table,
         ).await?;
-        
+
         // Get phrase frontiers
         let phrase_frontiers = frontier::phrase_frontiers(&passages, &seed_row, req.phrase_limit).await?;
-        
+
         // Get prior work
         let prior_work = if registry_path.exists() {
             registry::prior_work(&registry_path, &req.seed, 10)?
         } else {
             Vec::new()
         };
-        
+
         let payload = serde_json::json!({
             "schema": "readzen-graphdiscovery-frontier-v1",
             "seed_passage_id": req.seed,
@@ -676,32 +884,41 @@ impl ToolEngine {
             "next_seed_candidates": frontier::next_seed_candidates(&similar),
             "prior_work": prior_work,
         });
-        
+
         Ok(FrontierResponse {
             schema: "sinoragd-frontier-v1",
             seed_passage_id: req.seed,
             payload,
         })
     }
-    
+
     /// Implement the first-attestation tool
     pub async fn first_attestation_impl(&self, req: crate::tools::requests::FirstAttestationRequest) -> Result<crate::tools::responses::FirstAttestationResponse> {
         use crate::tools::responses::{FirstAttestationResponse, ScopeInfo, SearchStrategyInfo};
-        use crate::research::{exact_phrase_rows_with_index, SearchSpec};
-        use crate::document_table::DocumentTable;
-        
+        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+
         let passages = self.passages().await?;
         let doc_table = self.doc_table().await?;
-        let phrase_index_path = self.config.phrase_index.clone();
-        
-        let mut spec = SearchSpec::exact_phrase(req.phrase.clone(), req.limit.max(200));
-        spec.canon = req.scope_canon.clone();
-        
-        let candidate_estimate = phrase_index_path.is_some();
-        let raw_hits = exact_phrase_rows_with_index(&passages, &spec, phrase_index_path.as_deref()).await?;
-        
+        let phrase_index_path = self.optional_phrase_path().await?;
+
+        let internal_limit = req.limit.max(10_000);
+        let (raw_hits, _) = phrase_rows_with_explicit_doc_table(
+            &passages,
+            &doc_table,
+            phrase_index_path.as_deref(),
+            &req.phrase,
+            internal_limit,
+            None,
+            None,
+            None,
+        ).await?;
+
         // Apply scope_period and scope_source_work_id post-hoc
         let hits: Vec<serde_json::Value> = raw_hits.into_iter().filter(|row| {
+            if !req.scope_canon.is_empty() {
+                let c = row.get("canon").and_then(|v| v.as_str()).unwrap_or("");
+                if !req.scope_canon.iter().any(|s| s == c) { return false; }
+            }
             if !req.scope_period.is_empty() {
                 let p = row.get("period").and_then(|v| v.as_str()).unwrap_or("");
                 if !req.scope_period.iter().any(|s| s == p) { return false; }
@@ -713,7 +930,7 @@ impl ToolEngine {
             true
         }).collect();
         let verified = hits.len();
-        
+
         // Sort by (period_rank, doc_id)
         let mut scored: Vec<(i32, u32, serde_json::Value)> = Vec::with_capacity(hits.len());
         for row in hits {
@@ -724,7 +941,7 @@ impl ToolEngine {
             }
         }
         scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        
+
         let total = scored.len();
         let take = req.limit.min(total);
         let mut iter = scored.into_iter().take(take);
@@ -742,7 +959,7 @@ impl ToolEngine {
             }
             row
         }).collect();
-        
+
         Ok(FirstAttestationResponse {
             schema: "sinoragd-first-attestation-v1",
             phrase: req.phrase,
@@ -754,22 +971,22 @@ impl ToolEngine {
                 source_work_id: req.scope_source_work_id,
             },
             search_strategy: SearchStrategyInfo {
-                used_phrase_index: candidate_estimate,
+                used_phrase_index: phrase_index_path.is_some(),
                 candidates_verified: verified,
                 after_scope_and_sort: total,
                 limit: req.limit,
             },
         })
     }
-    
+
     /// Implement the phrase-history tool
     pub async fn phrase_history_impl(&self, req: crate::tools::requests::PhraseHistoryRequest) -> Result<crate::tools::responses::PhraseHistoryResponse> {
         use crate::tools::responses::PhraseHistoryResponse;
         use crate::commands::phrase_history;
-        
+
         let passages = self.passages().await?;
-        let phrase_index_path = self.config.phrase_index.clone();
-        
+        let phrase_index_path = self.optional_phrase_path().await?;
+
         let payload = phrase_history::phrase_history(
             req.phrase,
             &passages,
@@ -777,33 +994,39 @@ impl ToolEngine {
             req.timeline,
             phrase_index_path,
         ).await?;
-        
+
         Ok(PhraseHistoryResponse {
             schema: "sinoragd-phrase-history-v1",
             payload,
         })
     }
-    
+
     /// Implement the phrase-index-search tool
     pub async fn phrase_index_search_impl(&self, req: crate::tools::requests::PhraseIndexSearchRequest) -> Result<crate::tools::responses::PhraseIndexSearchResponse> {
         use crate::tools::responses::PhraseIndexSearchResponse;
-        use crate::research::{exact_phrase_rows_with_index, SearchSpec};
-        
+        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+
         let passages = self.passages().await?;
-        let phrase_index_path = self.resolve_phrase_path().ok();
-        
+        let doc_table = self.doc_table().await?;
+        let phrase_index_path = self.optional_phrase_path().await?;
+
         if phrase_index_path.is_none() {
             return Err(ToolError::MissingPhraseIndex {
                 path: self.config.phrase_index.clone().unwrap_or_else(|| PathBuf::from("data/derived/phrase_v3.index")),
             }.into_anyhow());
         }
-        
-        let rows = exact_phrase_rows_with_index(
+
+        let (rows, _) = phrase_rows_with_explicit_doc_table(
             &passages,
-            &SearchSpec::exact_phrase(req.phrase.clone(), req.limit),
+            &doc_table,
             phrase_index_path.as_deref(),
+            &req.phrase,
+            req.limit,
+            None,
+            None,
+            None,
         ).await?;
-        
+
         Ok(PhraseIndexSearchResponse {
             schema: "sinoragd-phrase-index-search-v1",
             phrase: req.phrase,
@@ -812,16 +1035,16 @@ impl ToolEngine {
             results: rows,
         })
     }
-    
+
     /// Implement the seed-pick tool
     pub async fn seed_pick_impl(&self, req: crate::tools::requests::SeedPickRequest) -> Result<crate::tools::responses::SeedPickResponse> {
         use crate::tools::responses::{SeedPickResponse, FilterInfo};
         use crate::commands::seed_pick;
         use crate::datafusion_store::{sql_literal, string_contains_sql};
-        
+
         let passages = self.passages().await?;
         let registry_path = self.resolve_registry_path().ok();
-        
+
         // Get already worked passage IDs from registry
         let mut already_worked: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(ref path) = registry_path {
@@ -839,7 +1062,7 @@ impl ToolEngine {
                 }
             }
         }
-        
+
         // Build WHERE clauses
         let mut where_clauses = vec!["true".to_string()];
         for t in &req.tradition {
@@ -856,7 +1079,7 @@ impl ToolEngine {
                 .join(", ");
             where_clauses.push(format!("passage_id NOT IN ({})", id_list));
         }
-        
+
         let sql = format!(
             r#"
             SELECT passage_id, source_rel_path, xml_id, heading, from_lb, to_lb,
@@ -870,9 +1093,9 @@ impl ToolEngine {
             where_clauses.join(" AND "),
             req.limit.max(1)
         );
-        
+
         let results = passages.query_json(&sql).await?;
-        
+
         Ok(SeedPickResponse {
             schema: "sinoragd-seed-pick-v1",
             limit: req.limit,
@@ -884,31 +1107,27 @@ impl ToolEngine {
             candidates: results,
         })
     }
-    
+
     /// Implement the expand-context-adaptive tool
     pub async fn expand_context_adaptive_impl(&self, req: crate::tools::requests::ExpandContextAdaptiveRequest) -> Result<crate::tools::responses::ExpandContextAdaptiveResponse> {
         use crate::tools::responses::{ExpandContextAdaptiveResponse, SearchStrategyInfoAdaptive};
         use crate::catalog_index::OutlineNodeKind;
-        
+
         let catalog = self.catalog().await?;
         let doc_table = self.doc_table().await?;
         let passages = self.passages().await?;
-        let catalog_path = self.resolve_catalog_path()?;
-        
+
         // doc_id lookup
-        let doc_table_path = catalog_path
-            .parent().unwrap_or_else(|| std::path::Path::new("."))
-            .join("doc_table.bin");
-        let doc_table_loaded = crate::document_table::DocumentTable::load(&doc_table_path)?;
-        let doc_id = doc_table_loaded.doc_id(&req.passage_id)
+        let doc_id = doc_table.doc_id(&req.passage_id)
             .ok_or_else(|| anyhow::anyhow!("passage not found in doc_table: {}", req.passage_id))?;
         let mut node_id = *catalog.doc_parent.get(&doc_id)
             .ok_or_else(|| anyhow::anyhow!("doc_id {} has no catalog node (rebuild catalog?)", doc_id))?;
-        
+
         let leaf_kind = catalog.get_node(node_id).map(|n| format!("{:?}", n.node_kind)).unwrap_or_default();
         let mut climbed = 0u32;
-        
+
         // Climb until the node's cjk_char_count fits the budget or we reach Work
+        let mut prev_node_id = node_id;
         loop {
             let node = catalog.get_node(node_id).ok_or_else(|| anyhow::anyhow!("bad node_id"))?;
             let fits = (node.cjk_char_count as usize) <= req.max_chars;
@@ -916,42 +1135,42 @@ impl ToolEngine {
             if fits || at_work { break; }
             match node.parent_id {
                 Some(parent) => {
-                    node_id = parent;
-                    climbed += 1;
-                    let parent_node = catalog.get_node(node_id).ok_or_else(|| anyhow::anyhow!("bad parent_id"))?;
+                    let parent_node = catalog.get_node(parent).ok_or_else(|| anyhow::anyhow!("bad parent_id"))?;
                     if matches!(parent_node.node_kind, OutlineNodeKind::Canon | OutlineNodeKind::Corpus) {
-                        // Don't go above Work; revert to the prior node
-                        node_id = parent_node.children.first().copied().unwrap_or(node_id);
+                        node_id = prev_node_id;
                         break;
                     }
+                    prev_node_id = node_id;
+                    node_id = parent;
+                    climbed += 1;
                 }
                 None => break,
             }
         }
-        
+
         let selected = catalog.get_node(node_id).ok_or_else(|| anyhow::anyhow!("no selected node"))?;
         let first = selected.first_doc_id.ok_or_else(|| anyhow::anyhow!("node has no doc range"))?;
         let last = selected.last_doc_id.ok_or_else(|| anyhow::anyhow!("node has no doc range"))?;
-        
+
         // Fetch every passage with doc_id in [first, last] for the selected work
         let mut passage_ids: Vec<String> = Vec::with_capacity((last - first + 1) as usize);
         for did in first..=last {
-            if let Some(pid) = doc_table_loaded.passage_id(did) {
+            if let Some(pid) = doc_table.passage_id(did) {
                 passage_ids.push(pid.to_string());
             }
         }
-        
+
         let rows = passages.passages_by_ids(
             &passage_ids,
             "passage_id, main_title, source_work_id, source_rel_path, \
              from_lb, to_lb, period, zh_text_normalized as zh_text",
         ).await?;
-        
+
         let char_count: usize = rows.iter()
             .filter_map(|r| r.get("zh_text").and_then(|v| v.as_str()))
             .map(|t| t.chars().count())
             .sum();
-        
+
         Ok(ExpandContextAdaptiveResponse {
             schema: "sinoragd-expand-context-adaptive-v1",
             seed_passage_id: req.passage_id,
@@ -971,16 +1190,16 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Implement the trace-term-usage tool
     pub async fn trace_term_usage_impl(&self, req: crate::tools::requests::TraceTermUsageRequest) -> Result<crate::tools::responses::TraceTermUsageResponse> {
         use crate::tools::responses::{TraceTermUsageResponse, TermUsageGroup, TermUsageSearchStrategy};
-        use crate::research::{exact_phrase_rows_with_index, SearchSpec};
-        
+        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+
         let passages = self.passages().await?;
         let doc_table = self.doc_table().await?;
-        let phrase_index_path = self.config.phrase_index.clone();
-        
+        let phrase_index_path = self.optional_phrase_path().await?;
+
         let key_field = match req.group_by.as_str() {
             "period" => "period",
             "canon" => "canon",
@@ -988,11 +1207,19 @@ impl ToolEngine {
             "work" => "source_work_id",
             _ => "period",
         };
-        
-        let spec = SearchSpec::exact_phrase(req.phrase.clone(), req.limit_total);
-        let hits = exact_phrase_rows_with_index(&passages, &spec, phrase_index_path.as_deref()).await?;
+
+        let (hits, _) = phrase_rows_with_explicit_doc_table(
+            &passages,
+            &doc_table,
+            phrase_index_path.as_deref(),
+            &req.phrase,
+            req.limit_total,
+            None,
+            None,
+            None,
+        ).await?;
         let total_hits = hits.len();
-        
+
         // Group by the chosen field
         use std::collections::BTreeMap;
         struct GroupAcc {
@@ -1009,7 +1236,7 @@ impl ToolEngine {
                 }
             }
         }
-        
+
         let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
         for row in hits {
             let key = row.get(key_field).and_then(|v| v.as_str()).unwrap_or("(unknown)").to_string();
@@ -1025,7 +1252,7 @@ impl ToolEngine {
             } else { 0 };
             acc.reps.push((pr, did, row));
         }
-        
+
         let mut out_groups: Vec<TermUsageGroup> = Vec::with_capacity(groups.len());
         for (key, mut acc) in groups {
             acc.reps.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -1041,7 +1268,7 @@ impl ToolEngine {
                 representative_passages: reps,
             });
         }
-        
+
         Ok(TraceTermUsageResponse {
             schema: "sinoragd-term-usage-trace-v1",
             phrase: req.phrase,
@@ -1055,22 +1282,22 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Implement the query-expand-terms tool
     pub async fn query_expand_terms_impl(&self, req: crate::tools::requests::QueryExpandTermsRequest) -> Result<crate::tools::responses::QueryExpandTermsResponse> {
         use crate::tools::responses::{QueryExpandTermsResponse, ExpandTermsBySource, ExpandTermsSearchStrategy};
         use crate::templates::variants::VariantTables;
-        
+
         let tables = VariantTables::load();
-        
+
         let mut variants_bucket = std::collections::BTreeSet::<String>::new();
         let mut orthographic_bucket = std::collections::BTreeSet::<String>::new();
         let mut persons_bucket = std::collections::BTreeSet::<String>::new();
-        
+
         let expand_variants = matches!(req.mode.as_str(), "variants" | "all");
         let expand_orthographic = matches!(req.mode.as_str(), "orthographic" | "all");
         let expand_persons = matches!(req.mode.as_str(), "persons" | "all");
-        
+
         if expand_variants {
             for v in tables.term_variants(&req.phrase) {
                 if v != req.phrase { variants_bucket.insert(v); }
@@ -1097,7 +1324,7 @@ impl ToolEngine {
                 }
             }
         }
-        
+
         // Combined view (deduped, capped)
         let mut combined: Vec<String> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1108,7 +1335,7 @@ impl ToolEngine {
                 if combined.len() >= req.max { break; }
             }
         }
-        
+
         // Detect language
         let mut has_han = false;
         let mut has_latin = false;
@@ -1125,7 +1352,7 @@ impl ToolEngine {
             (true, true) => "mixed",
             _ => "unknown",
         };
-        
+
         Ok(QueryExpandTermsResponse {
             schema: "sinoragd-query-expand-terms-v1",
             input: req.phrase,
@@ -1142,67 +1369,62 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Implement the compare-usage tool
     pub async fn compare_usage_impl(&self, req: crate::tools::requests::CompareUsageRequest) -> Result<crate::tools::responses::CompareUsageResponse> {
         use crate::tools::responses::{CompareUsageResponse, CompareUsageScope, CompareUsageTerm, CompareUsageSearchStrategy};
         use crate::research_tools::stats::log_odds_distinctive_terms;
-        
+
         let catalog = self.catalog().await?;
         let doc_table = self.doc_table().await?;
         let passages = self.passages().await?;
-        
+
         // Resolve doc ranges for scopes
         let range_a = self.resolve_doc_range(&catalog, req.scope_a_node_id, req.scope_a_work_id.as_deref())?;
         let range_b = self.resolve_doc_range(&catalog, req.scope_b_node_id, req.scope_b_work_id.as_deref())?;
-        
-        let analyze_opts = AnalyzeOptions {
-            min_n: req.gram_len, max_n: req.gram_len,
-            filter: FilterMode::WhitespaceOnly,
-            apply_low_value_filter: false,
-            dedup: true,
-            count_tf: false,
-        };
-        let mut scratch = AnalyzeScratch::new();
-        
-        let (a_terms, a_passage_count) = self.collect_scope_terms(
+
+        let (a_terms, a_term_display, a_passage_count) = self.collect_scope_terms(
             &passages,
             &doc_table,
             range_a,
             req.scope_a_canon.as_deref(),
             req.scope_a_period.as_deref(),
             req.limit_passages,
-            &analyze_opts,
-            &mut scratch,
+            req.gram_len,
         ).await?;
-        
-        let (b_terms, b_passage_count) = self.collect_scope_terms(
+
+        let (b_terms, b_term_display, b_passage_count) = self.collect_scope_terms(
             &passages,
             &doc_table,
             range_b,
             req.scope_b_canon.as_deref(),
             req.scope_b_period.as_deref(),
             req.limit_passages,
-            &analyze_opts,
-            &mut scratch,
+            req.gram_len,
         ).await?;
-        
+
         let (a_top, b_top) = log_odds_distinctive_terms(&a_terms, &b_terms, req.limit_terms);
-        
+
         let distinctive_to_a: Vec<CompareUsageTerm> = a_top.iter().map(|t| CompareUsageTerm {
+            term: a_term_display.get(&t.term_hash)
+                .or_else(|| b_term_display.get(&t.term_hash))
+                .cloned(),
             term_hash: t.term_hash,
             score: t.score,
             a_count: t.a_count,
             b_count: t.b_count,
         }).collect();
-        
+
         let distinctive_to_b: Vec<CompareUsageTerm> = b_top.iter().map(|t| CompareUsageTerm {
+            term: b_term_display.get(&t.term_hash)
+                .or_else(|| a_term_display.get(&t.term_hash))
+                .cloned(),
             term_hash: t.term_hash,
             score: t.score,
             a_count: t.a_count,
             b_count: t.b_count,
         }).collect();
-        
+
         Ok(CompareUsageResponse {
             schema: "sinoragd-compare-usage-v1",
             scope_a: CompareUsageScope {
@@ -1228,18 +1450,18 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Implement the collocation-search tool
     pub async fn collocation_search_impl(&self, req: crate::tools::requests::CollocationSearchRequest) -> Result<crate::tools::responses::CollocationSearchResponse> {
         use crate::tools::responses::{CollocationSearchResponse, CollocateTerm, CollocationSearchStrategy};
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
         use crate::research_tools::stats::score_collocates;
         use crate::normalize::normalize_zh;
-        
+
         let doc_table = self.doc_table().await?;
         let passages = self.passages().await?;
-        let phrase_index_path = self.config.phrase_index.clone();
-        
+        let phrase_index_path = self.optional_phrase_path().await?;
+
         let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
@@ -1250,59 +1472,60 @@ impl ToolEngine {
             None,
             None,
         ).await?;
-        
+
         let normalized_phrase = normalize_zh(&req.phrase);
-        
-        let analyze_opts = AnalyzeOptions {
-            min_n: req.gram_len, max_n: req.gram_len,
-            filter: FilterMode::WhitespaceOnly,
-            apply_low_value_filter: false,
-            dedup: true,
-            count_tf: false,
-        };
-        let mut scratch = AnalyzeScratch::new();
-        
+
         // Collect n-gram hashes from the window around each phrase occurrence
         let mut near_counts: FxHashMap<u64, u32> = FxHashMap::default();
         let mut background_counts: FxHashMap<u64, u32> = FxHashMap::default();
+        let mut term_display: FxHashMap<u64, String> = FxHashMap::default();
         let mut near_total = 0u32;
         let mut bg_total = 0u32;
-        
+
         for row in &hits {
             let norm = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
-            
+
             // Background: all n-grams in the passage
-            analyze(norm, &analyze_opts, &mut scratch);
-            for &h in &scratch.unique {
-                *background_counts.entry(h).or_insert(0) += 1;
-                bg_total += 1;
-            }
-            
+            bg_total += count_unique_ngrams_with_terms(
+                norm,
+                req.gram_len,
+                &mut background_counts,
+                &mut term_display,
+            );
+
             // Near: n-grams within the window around each occurrence
-            if let Some(byte_pos) = norm.find(&normalized_phrase) {
+            if normalized_phrase.is_empty() {
+                continue;
+            }
+            let mut search_start = 0usize;
+            while let Some(rel_pos) = norm[search_start..].find(&normalized_phrase) {
+                let byte_pos = search_start + rel_pos;
                 let char_pos = norm[..byte_pos].chars().count();
                 let phrase_chars = normalized_phrase.chars().count();
                 let window_start = char_pos.saturating_sub(req.window_chars);
                 let window_end = (char_pos + phrase_chars + req.window_chars).min(norm.chars().count());
-                
+
                 let window_text: String = norm.chars().skip(window_start).take(window_end - window_start).collect();
-                analyze(&window_text, &analyze_opts, &mut scratch);
-                for &h in &scratch.unique {
-                    *near_counts.entry(h).or_insert(0) += 1;
-                    near_total += 1;
-                }
+                near_total += count_unique_ngrams_with_terms(
+                    &window_text,
+                    req.gram_len,
+                    &mut near_counts,
+                    &mut term_display,
+                );
+                search_start = byte_pos + normalized_phrase.len();
             }
         }
-        
+
         let collocates = score_collocates(&near_counts, &background_counts, req.limit_collocates);
-        
+
         let collocates_vec: Vec<CollocateTerm> = collocates.iter().map(|c| CollocateTerm {
+            term: term_display.get(&c.term_hash).cloned(),
             term_hash: c.term_hash,
             score: c.score,
             near_count: c.near_count,
             background_count: c.background_count,
         }).collect();
-        
+
         Ok(CollocationSearchResponse {
             schema: "sinoragd-collocation-search-v1",
             phrase: req.phrase,
@@ -1319,18 +1542,18 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Implement the outline-search tool
     pub async fn outline_search_impl(&self, req: crate::tools::requests::OutlineSearchRequest) -> Result<crate::tools::responses::OutlineSearchResponse> {
         use crate::tools::responses::{OutlineSearchResponse, OutlineSearchGroup, OutlineSearchStrategy};
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
         use crate::research_tools::scopes::{group_hits_by_outline_node, OutlineSearchLevel};
-        
+
         let doc_table = self.doc_table().await?;
         let catalog = self.catalog().await?;
         let passages = self.passages().await?;
-        let phrase_index_path = self.config.phrase_index.clone();
-        
+        let phrase_index_path = self.optional_phrase_path().await?;
+
         // Resolve starting node: explicit node_id or work_id → root_node
         let start_node = if let Some(nid) = req.node_id {
             nid
@@ -1341,21 +1564,21 @@ impl ToolEngine {
         } else {
             return Err(anyhow::anyhow!("either node_id or work_id is required"));
         };
-        
+
         let target = match req.group_by.as_str() {
             "division" => OutlineSearchLevel::Division,
             "work" => OutlineSearchLevel::Work,
             "passage" => OutlineSearchLevel::PassageRange,
             other => return Err(anyhow::anyhow!("unknown group_by `{other}`; expected division|work|passage")),
         };
-        
+
         let start_node_obj = catalog.get_node(start_node)
             .ok_or_else(|| anyhow::anyhow!("unknown node_id: {start_node}"))?;
         let (lo, hi) = match (start_node_obj.first_doc_id, start_node_obj.last_doc_id) {
             (Some(l), Some(h)) => (l, h),
             _ => return Err(anyhow::anyhow!("node {start_node} has no doc range")),
         };
-        
+
         let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
@@ -1366,22 +1589,22 @@ impl ToolEngine {
             None,
             None,
         ).await?;
-        
+
         let filtered_doc_ids: Vec<u32> = hits.iter()
             .filter_map(|row| {
                 let pid = row.get("passage_id").and_then(|v| v.as_str())?;
                 doc_table.doc_id(pid)
             })
             .collect();
-        
+
         let total_hits = filtered_doc_ids.len();
-        
+
         // Group by the target outline level
         let group_counts = group_hits_by_outline_node(&catalog, &filtered_doc_ids, target);
-        
+
         let mut sorted_groups: Vec<(u32, u32)> = group_counts.into_iter().collect();
         sorted_groups.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        
+
         let groups: Vec<OutlineSearchGroup> = sorted_groups.iter().take(req.limit_per_group).map(|(node_id, count)| {
             let node = catalog.get_node(*node_id);
             OutlineSearchGroup {
@@ -1392,7 +1615,7 @@ impl ToolEngine {
                 hit_count: *count,
             }
         }).collect();
-        
+
         Ok(OutlineSearchResponse {
             schema: "sinoragd-outline-search-v1",
             phrase: req.phrase,
@@ -1409,24 +1632,24 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Implement the cluster-hits tool
     pub async fn cluster_hits_impl(&self, req: crate::tools::requests::ClusterHitsRequest) -> Result<crate::tools::responses::ClusterHitsResponse> {
         use crate::tools::responses::{ClusterHitsResponse, ClusterHitsCluster, ClusterHitsSearchStrategy};
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
         use crate::research_tools::scopes::{group_hits_by_outline_node, OutlineSearchLevel};
-        
+
         let doc_table = self.doc_table().await?;
         let catalog = self.catalog().await?;
         let passages = self.passages().await?;
-        let phrase_index_path = self.config.phrase_index.clone();
-        
+        let phrase_index_path = self.optional_phrase_path().await?;
+
         let target = match req.cluster_by.as_str() {
             "work" => OutlineSearchLevel::Work,
             "division" => OutlineSearchLevel::Division,
             other => return Err(anyhow::anyhow!("unknown cluster_by `{other}`; expected work|division")),
         };
-        
+
         let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
@@ -1437,7 +1660,7 @@ impl ToolEngine {
             None,
             None,
         ).await?;
-        
+
         // Collect (doc_id, row) pairs
         let mut doc_rows: Vec<(u32, serde_json::Value)> = Vec::with_capacity(hits.len());
         for row in hits {
@@ -1446,18 +1669,18 @@ impl ToolEngine {
                 doc_rows.push((did, row));
             }
         }
-        
+
         let doc_ids: Vec<u32> = doc_rows.iter().map(|(d, _)| *d).collect();
         let group_counts = group_hits_by_outline_node(&catalog, &doc_ids, target);
-        
+
         // Sort groups by hit_count descending
         let mut sorted_groups: Vec<(u32, u32)> = group_counts.into_iter().collect();
         sorted_groups.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        
+
         let clusters: Vec<ClusterHitsCluster> = sorted_groups.iter().take(req.limit_per_cluster).map(|(node_id, count)| {
             let node = catalog.get_node(*node_id);
             let node_doc_range = node.and_then(|n| n.first_doc_id.zip(n.last_doc_id));
-            
+
             // Pick top representative passages within this cluster
             let mut reps: Vec<serde_json::Value> = doc_rows.iter()
                 .filter(|(did, _)| {
@@ -1477,7 +1700,7 @@ impl ToolEngine {
                 })
                 .collect();
             reps.truncate(3);
-            
+
             ClusterHitsCluster {
                 node_id: *node_id,
                 label: node.map(|n| n.label.clone()).unwrap_or_default(),
@@ -1487,7 +1710,7 @@ impl ToolEngine {
                 representative_passages: reps,
             }
         }).collect();
-        
+
         Ok(ClusterHitsResponse {
             schema: "sinoragd-cluster-hits-v1",
             phrase: req.phrase,
@@ -1502,17 +1725,17 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Implement the absence-check tool
     pub async fn absence_check_impl(&self, req: crate::tools::requests::AbsenceCheckRequest) -> Result<crate::tools::responses::AbsenceCheckResponse> {
         use crate::tools::responses::{AbsenceCheckResponse, AbsenceCheckScope, AbsenceCheckSearchStrategy};
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
-        
+
         let doc_table = self.doc_table().await?;
         let catalog = self.catalog().await?;
         let passages = self.passages().await?;
-        let phrase_index_path = self.config.phrase_index.clone();
-        
+        let phrase_index_path = self.optional_phrase_path().await?;
+
         // Determine the doc range for the scope
         let doc_range: Option<(u32, u32)> = if let Some(nid) = req.scope_node_id {
             let node = catalog.get_node(nid)
@@ -1527,7 +1750,7 @@ impl ToolEngine {
         } else {
             None
         };
-        
+
         let (scoped_hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
@@ -1538,10 +1761,10 @@ impl ToolEngine {
             req.scope_canon.as_deref(),
             req.scope_period.as_deref(),
         ).await?;
-        
+
         let found = !scoped_hits.is_empty();
         let hit_count = scoped_hits.len();
-        
+
         Ok(AbsenceCheckResponse {
             schema: "sinoragd-absence-check-v1",
             phrase: req.phrase,
@@ -1561,7 +1784,7 @@ impl ToolEngine {
             },
         })
     }
-    
+
     /// Helper: resolve doc range from catalog
     fn resolve_doc_range(&self, catalog: &CorpusCatalogIndex, node_id: Option<u32>, work_id: Option<&str>) -> Result<Option<(u32, u32)>> {
         if let Some(nid) = node_id {
@@ -1578,7 +1801,7 @@ impl ToolEngine {
         }
         Ok(None)
     }
-    
+
     /// Helper: collect scope terms
     async fn collect_scope_terms(
         &self,
@@ -1588,9 +1811,8 @@ impl ToolEngine {
         canon: Option<&str>,
         period: Option<&str>,
         limit_passages: usize,
-        analyze_opts: &AnalyzeOptions,
-        scratch: &mut AnalyzeScratch,
-    ) -> Result<(FxHashMap<u64, u32>, usize)> {
+        gram_len: usize,
+    ) -> Result<(FxHashMap<u64, u32>, FxHashMap<u64, String>, usize)> {
         let rows = if let Some((lo, hi)) = range {
             let passage_ids: Vec<String> = (lo..=hi)
                 .filter_map(|did| doc_table.passage_id(did).map(String::from))
@@ -1616,6 +1838,7 @@ impl ToolEngine {
         };
 
         let mut terms: FxHashMap<u64, u32> = FxHashMap::default();
+        let mut term_display: FxHashMap<u64, String> = FxHashMap::default();
         let mut passage_count = 0usize;
         for row in &rows {
             if let Some(canon_filter) = canon {
@@ -1631,11 +1854,8 @@ impl ToolEngine {
                 continue;
             }
             passage_count += 1;
-            analyze(text, analyze_opts, scratch);
-            for &h in &scratch.unique {
-                *terms.entry(h).or_insert(0) += 1;
-            }
+            count_unique_ngrams_with_terms(text, gram_len, &mut terms, &mut term_display);
         }
-        Ok((terms, passage_count))
+        Ok((terms, term_display, passage_count))
     }
 }

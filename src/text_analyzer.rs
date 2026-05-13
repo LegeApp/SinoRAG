@@ -1,8 +1,8 @@
 //! Shared text normalizer + n-gram analyzer. Builds the same byte-identical
 //! n-gram hash stream that the phrase and tfidf builders consumed before
 //! Phase C, but does it once per document and without per-gram String
-//! allocation. Hashes are computed by slicing into the normalized UTF-8
-//! buffer at recorded char-byte offsets.
+//! allocation. Hashes are computed by slicing into the normalized and filtered
+//! UTF-8 buffer at recorded char-byte offsets.
 //!
 //! All work goes into `AnalyzeScratch` which the caller owns and reuses
 //! across documents — steady-state is allocation-free.
@@ -37,6 +37,7 @@ pub struct AnalyzeOptions {
 #[derive(Debug, Default)]
 pub struct AnalyzeScratch {
     pub normalized: String,
+    pub filtered: String,
     /// Byte offsets into `normalized` for each retained char. Length is
     /// `num_retained_chars + 1` so `[offsets[i]..offsets[i+n]]` is the
     /// byte range of an n-gram starting at retained-char position `i`.
@@ -53,6 +54,7 @@ impl AnalyzeScratch {
     /// Clear all data; preserve capacity.
     pub fn reset(&mut self) {
         self.normalized.clear();
+        self.filtered.clear();
         self.char_byte_offsets.clear();
         self.all_hashes.clear();
         self.unique.clear();
@@ -66,14 +68,19 @@ impl AnalyzeScratch {
 pub fn analyze(text: &str, opts: &AnalyzeOptions, scratch: &mut AnalyzeScratch) {
     scratch.reset();
     normalize_zh_into(text, &mut scratch.normalized);
-    build_offsets(&scratch.normalized, opts.filter, &mut scratch.char_byte_offsets);
+    build_filtered_normalized(
+        &scratch.normalized,
+        opts.filter,
+        &mut scratch.filtered,
+        &mut scratch.char_byte_offsets,
+    );
 
     let num_chars = scratch.char_byte_offsets.len().saturating_sub(1);
     if num_chars < opts.min_n {
         return;
     }
 
-    let bytes = scratch.normalized.as_bytes();
+    let bytes = scratch.filtered.as_bytes();
     for n in opts.min_n..=opts.max_n {
         if num_chars < n { continue; }
         for i in 0..=(num_chars - n) {
@@ -102,8 +109,16 @@ pub fn analyze(text: &str, opts: &AnalyzeOptions, scratch: &mut AnalyzeScratch) 
     }
 }
 
-fn build_offsets(normalized: &str, filter: FilterMode, out: &mut Vec<u32>) {
-    out.clear();
+fn build_filtered_normalized(
+    normalized: &str,
+    filter: FilterMode,
+    filtered: &mut String,
+    offsets: &mut Vec<u32>,
+) {
+    filtered.clear();
+    offsets.clear();
+    offsets.push(0);
+
     let bytes = normalized.as_bytes();
     let mut idx = 0usize;
     while idx < bytes.len() {
@@ -119,10 +134,8 @@ fn build_offsets(normalized: &str, filter: FilterMode, out: &mut Vec<u32>) {
             FilterMode::CjkOnly => is_cjk_utf8(&bytes[idx..end]),
         };
         if keep {
-            if out.is_empty() {
-                out.push(idx as u32);
-            }
-            out.push(end as u32);
+            filtered.push_str(&normalized[idx..end]);
+            offsets.push(filtered.len() as u32);
         }
         idx = end;
     }
@@ -256,5 +269,42 @@ mod tests {
         let mut total: u32 = 0;
         for (_, c) in &s.counts { total += c; }
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn cjk_only_hashes_skip_latin_without_including_it_in_slice() {
+        let mut old = crate::tfidf::ngram::char_ngram_hashes("中A國", 2, 2);
+        old.sort_unstable();
+
+        let mut s = AnalyzeScratch::new();
+        analyze("中A國", &AnalyzeOptions {
+            min_n: 2,
+            max_n: 2,
+            filter: FilterMode::CjkOnly,
+            apply_low_value_filter: false,
+            dedup: true,
+            count_tf: false,
+        }, &mut s);
+
+        assert_eq!(s.filtered, "中國");
+        assert_eq!(s.unique, old);
+    }
+
+    #[test]
+    fn cjk_only_tf_hashes_match_old_all_hashes_for_polluted_text() {
+        let mut old = crate::tfidf::ngram::char_ngram_hashes_all("中A國。中 國", 2, 2);
+        old.sort_unstable();
+
+        let mut s = AnalyzeScratch::new();
+        analyze("中A國。中 國", &AnalyzeOptions {
+            min_n: 2,
+            max_n: 2,
+            filter: FilterMode::CjkOnly,
+            apply_low_value_filter: false,
+            dedup: false,
+            count_tf: true,
+        }, &mut s);
+
+        assert_eq!(s.all_hashes, old);
     }
 }

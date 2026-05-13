@@ -29,7 +29,7 @@ pub fn validate(input: PathBuf) -> Result<ValidationReport> {
     } else {
         let corpus_toml_content = fs::read_to_string(&corpus_toml_path)
             .with_context(|| format!("read corpus.toml from {}", corpus_toml_path.display()))?;
-        
+
         let corpus: CorpusToml = toml::from_str(&corpus_toml_content)
             .with_context(|| format!("parse corpus.toml from {}", corpus_toml_path.display()))?;
 
@@ -103,7 +103,7 @@ pub fn validate(input: PathBuf) -> Result<ValidationReport> {
     } else {
         let works_content = fs::read_to_string(&works_path)
             .with_context(|| format!("read works.jsonl from {}", works_path.display()))?;
-        
+
         for (line_num, line) in works_content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -181,7 +181,7 @@ pub fn validate(input: PathBuf) -> Result<ValidationReport> {
     } else {
         let passages_content = fs::read_to_string(&passages_path)
             .with_context(|| format!("read passages.jsonl from {}", passages_path.display()))?;
-        
+
         for (line_num, line) in passages_content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -234,7 +234,7 @@ pub fn validate(input: PathBuf) -> Result<ValidationReport> {
                     } else {
                         // Count CJK characters
                         cjk_char_count += passage.text.chars().filter(|c| is_cjk(*c)).count();
-                        
+
                         // Warn if text is too short or too long
                         let cjk_count = passage.text.chars().filter(|c| is_cjk(*c)).count();
                         if cjk_count < 8 {
@@ -420,13 +420,13 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
     let works_path = corpus_dir.join("works.jsonl");
     let works_content = fs::read_to_string(&works_path)?;
     let mut work_map: std::collections::HashMap<String, WorkRecord> = std::collections::HashMap::new();
-    for line in works_content.lines() {
+    for (line_no, line) in works_content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(work) = serde_json::from_str::<WorkRecord>(line) {
-            work_map.insert(work.work_id.clone(), work);
-        }
+        let work = serde_json::from_str::<WorkRecord>(line)
+            .with_context(|| format!("parse {} line {}", works_path.display(), line_no + 1))?;
+        work_map.insert(work.work_id.clone(), work);
     }
 
     // Read passages.jsonl and convert to PassageRecord
@@ -435,15 +435,16 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
     let mut passages: Vec<ModelPassageRecord> = Vec::new();
     let mut passage_ord: u32 = 0;
 
-    for line in passages_content.lines() {
+    for (line_no, line) in passages_content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(passage) = serde_json::from_str::<PassageRecord>(line) {
+        let passage = serde_json::from_str::<PassageRecord>(line)
+            .with_context(|| format!("parse {} line {}", passages_path.display(), line_no + 1))?;
             let work = work_map.get(&passage.work_id);
-            
+
             let text_normalized = passage.text_normalized.unwrap_or_else(|| normalize_zh(&passage.text));
-            
+
             passages.push(ModelPassageRecord {
                 source_corpus: corpus.corpus_id.clone(),
                 source_work_id: passage.work_id.clone(),
@@ -483,19 +484,18 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
                 zh: String::new(),
                 normalized_zh: String::new(),
             }.finalize_aliases());
-            
-            passage_ord += 1;
-        }
+
+        passage_ord += 1;
     }
 
     // Write to Parquet
     eprintln!("Writing {} passages to {}", passages.len(), out_parquet.display());
-    
+
     let mut batch = storage::PassageBatch::default();
     for passage in &passages {
         batch.push(passage)?;
     }
-    storage::write_parquet_part_partitioned(&batch, &out_parquet, "gd-cef", 0)?;
+    storage::write_parquet_part_partitioned(&batch, &out_parquet, &corpus.corpus_id, 0)?;
 
     eprintln!("Ingest complete. Wrote {} passages to {}", passages.len(), out_parquet.display());
     Ok(())

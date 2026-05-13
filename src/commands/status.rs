@@ -59,21 +59,28 @@ pub fn run(data: PathBuf) -> Result<()> {
     }
     let parquet_bytes = super::estimate::dir_size(&parquet_root);
     let mut shown_any = false;
-    if !phrase_index.exists() {
+    if !phrase_index.exists() && !tfidf_index.exists() {
+        println!(
+            "  • Build phrase + tf-idf indexes (optional): `sinoragd optional-indexes`\n    phrase estimate: {}\n    tf-idf estimate: {}",
+            super::estimate::phrase_index_estimate(parquet_bytes),
+            super::estimate::tfidf_estimate(parquet_bytes)
+        );
+        shown_any = true;
+    } else if !phrase_index.exists() {
         println!(
             "  • Build phrase index (optional): `sinoragd index phrase`\n    estimate: {}",
             super::estimate::phrase_index_estimate(parquet_bytes)
         );
         shown_any = true;
-    }
-    if !tfidf_index.exists() {
+    } else if !tfidf_index.exists() {
         println!(
             "  • Build tf-idf index (optional):  `sinoragd index tfidf`\n    estimate: {}",
             super::estimate::tfidf_estimate(parquet_bytes)
         );
         shown_any = true;
     }
-    println!("  • Start MCP server: `sinoragd mcp`");
+    println!("  • Single tool call:  `sinoragd tool-call search --json '{{\"phrase\":\"...\"}}'`");
+    println!("  • Batch tool calls:  `sinoragd run-tools --input jobs.jsonl --output results.jsonl`");
     if !shown_any {
         println!("  (all heavy indexes already built — you're ready.)");
     }

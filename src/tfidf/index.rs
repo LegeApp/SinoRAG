@@ -27,9 +27,10 @@
 
 use crate::document_table::DocumentTable;
 use crate::tfidf::ngram::{
-    char_ngram_hashes, char_ngram_hashes_all_into, char_ngram_hashes_into, char_ngrams,
+    char_ngram_hashes, char_ngrams,
 };
 use crate::tfidf::quantize::{dequantize_log_u8, quantize_log_u8};
+use crate::text_analyzer::{analyze, AnalyzeOptions, AnalyzeScratch, FilterMode};
 use anyhow::Result;
 use memmap2::Mmap;
 use ordered_float::OrderedFloat;
@@ -728,21 +729,29 @@ pub fn build(
         let prog_f   = Mutex::new(OpenOptions::new().create(true).append(true).open(&phase1_prog)?);
         let min_n    = params.min_ngram;
         let max_n    = params.max_ngram;
+        let analyze_opts = AnalyzeOptions {
+            min_n,
+            max_n,
+            filter: FilterMode::CjkOnly,
+            apply_low_value_filter: true,
+            dedup: true,
+            count_tf: false,
+        };
 
         pending.par_iter().try_for_each(|fp| -> Result<()> {
             let t = rayon::current_thread_index().unwrap_or(0);
             let mut w = BucketWriterCache::new(df_dir.join(format!("t{}", t)), handles_per_thread);
+            let mut scratch = AnalyzeScratch::new();
 
             let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
             let reader  = builder.build()?;
             for batch in reader {
                 let batch = batch?;
                 let (pids, texts) = extract_columns(&batch)?;
-                let mut hash_buf: Vec<u64> = Vec::new();
                 for i in 0..batch.num_rows() {
                     if let Some(doc_id) = doc_table.doc_id(pids.value(i)) {
-                        char_ngram_hashes_into(texts.value(i), min_n, max_n, &mut hash_buf);
-                        for &hash in &hash_buf {
+                        analyze(texts.value(i), &analyze_opts, &mut scratch);
+                        for &hash in &scratch.unique {
                             w.write_df_record((hash as usize) % bucket_count, hash, doc_id)?;
                         }
                     }
@@ -930,27 +939,35 @@ pub fn build(
     let total3   = files.len();
     let min_n    = params.min_ngram;
     let max_n    = params.max_ngram;
+    let analyze_opts = AnalyzeOptions {
+        min_n,
+        max_n,
+        filter: FilterMode::CjkOnly,
+        apply_low_value_filter: true,
+        dedup: false,
+        count_tf: true,
+    };
 
     files.par_iter().try_for_each_with(row_tx, |tx, fp| -> Result<()> {
         let t = rayon::current_thread_index().unwrap_or(0);
         let mut post_w = BucketWriterCache::new(post_dir.join(format!("t{}", t)), handles_per_thread);
+        let mut scratch = AnalyzeScratch::new();
 
         let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
         let reader  = builder.build()?;
         for batch in reader {
             let batch = batch?;
             let (pids, texts) = extract_columns(&batch)?;
-            let mut hash_buf: Vec<u64> = Vec::new();
             for i in 0..batch.num_rows() {
                 let pid  = pids.value(i);
                 let text = texts.value(i);
                 let Some(doc_id) = doc_table.doc_id(pid) else { continue };
 
                 let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
-                char_ngram_hashes_all_into(text, min_n, max_n, &mut hash_buf);
-                for &h in &hash_buf {
+                analyze(text, &analyze_opts, &mut scratch);
+                for &(h, count) in &scratch.counts {
                     if let Some(&tid) = term_to_id.get(&h) {
-                        *term_counts.entry(tid).or_insert(0) += 1;
+                        *term_counts.entry(tid).or_insert(0) += count;
                     }
                 }
                 if term_counts.is_empty() {
