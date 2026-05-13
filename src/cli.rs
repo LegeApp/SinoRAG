@@ -39,11 +39,11 @@ pub enum IndexCommand {
     /// tools. Slow on large corpora — expect 1–3 hours on CBETA and
     /// multiple GB on disk. Not required for basic search/passage tools.
     Phrase {
-        #[arg(long, default_value = "data/passages.parquet")]
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index", hide = true)]
         out: PathBuf,
         #[arg(long, default_value_t = 4)]
         gram_len: usize,
@@ -59,11 +59,11 @@ pub enum IndexCommand {
     /// large corpora — expect 1–2 hours on CBETA and multiple GB on disk.
     /// Not required for basic search/passage tools.
     Tfidf {
-        #[arg(long, default_value = "data/passages.parquet")]
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index", hide = true)]
         out: PathBuf,
         #[arg(long, default_value_t = 5)]
         min_ngram: usize,
@@ -118,13 +118,13 @@ pub enum Command {
     ///
     /// Run after ingest when you need exact phrase tools and similarity/frontier tools.
     OptionalIndexes {
-        #[arg(long, default_value = "data/passages.parquet")]
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/doc_table.bin")]
+        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index", hide = true)]
         phrase_out: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index", hide = true)]
         tfidf_out: PathBuf,
         #[arg(long, default_value_t = 4)]
         phrase_gram_len: usize,
@@ -173,15 +173,15 @@ pub enum Command {
         #[arg(long, default_value = "false")]
         build_tfidf: bool,
         /// Phrase index output path.
-        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        #[arg(long, default_value = "data/derived/phrase_v3.index", hide = true)]
         phrase_index_out: PathBuf,
         /// Phrase index gram length.
         #[arg(long, default_value = "4")]
         phrase_gram_len: usize,
         /// TF-IDF output path.
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf_v3.index", hide = true)]
         tfidf_out: Option<PathBuf>,
-        #[arg(long, default_value = "data/derived/catalog.index")]
+        #[arg(long, default_value = "data/derived/catalog.index", hide = true)]
         catalog_index_out: Option<PathBuf>,
         #[arg(long, value_parser = crate::memory::parse_memory_size, help = "Maximum memory for phrase index build (e.g. 4G, 800M; default: auto-detect)")]
         phrase_max_memory: Option<u64>,

@@ -398,71 +398,47 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
     }
 
     let parquet_bytes = crate::commands::estimate::dir_size(&opts.out_parquet);
-    print_next_steps(
-        opts.build_phrase_index,
-        opts.build_tfidf,
-        parquet_bytes,
-        &opts.out_parquet,
-        &doc_table_path,
-        &opts.phrase_index_out,
-        &tfidf_out_path,
-    );
+    print_next_steps(opts.build_phrase_index, opts.build_tfidf, parquet_bytes);
     Ok(())
 }
 
 /// Non-prominent footer after a successful ingest. Surfaces the optional
 /// heavy indexes (phrase, tfidf) without making them look mandatory, and
-/// shows basic tool-call / batch invocation examples.
-fn print_next_steps(
-    built_phrase: bool,
-    built_tfidf: bool,
-    parquet_bytes: u64,
-    out_parquet: &Path,
-    doc_table: &Path,
-    phrase_out: &Path,
-    tfidf_out: &Path,
-) {
+/// points users back to `status` for state inspection.
+fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
     use crate::commands::estimate::{phrase_index_estimate, tfidf_estimate};
 
     let need_phrase = !built_phrase;
-    let need_tfidf  = !built_tfidf;
+    let need_tfidf = !built_tfidf;
 
     println!();
     println!("Ingest complete. The corpus is ready.");
     println!();
     if need_phrase || need_tfidf {
-        println!("Optional heavy indexes (build later if/when you need them):");
+        println!("Optional indexes:");
+        println!("  Build them when you need faster exact phrase lookup, source tracing,");
+        println!("  similarity search, or frontier discovery.");
+        println!();
         if need_phrase && need_tfidf {
-            println!("  • unified indexes — exact phrase lookup + similarity/frontier discovery");
-            println!("                      sinoragd optional-indexes --parquet {} --doc-table {} --phrase-out {} --tfidf-out {}",
-                out_parquet.display(), doc_table.display(), phrase_out.display(), tfidf_out.display());
-            println!("                      phrase estimate: {}", phrase_index_estimate(parquet_bytes));
-            println!("                      tf-idf estimate: {}", tfidf_estimate(parquet_bytes));
+            println!("  ./sinoragd optional-indexes");
+        } else if need_phrase {
+            println!("  ./sinoragd index phrase");
+        } else if need_tfidf {
+            println!("  ./sinoragd index tfidf");
+        }
+        println!();
+        if need_tfidf {
+            println!("  tf-idf index: similarity search and frontier discovery");
+            println!("    estimate: {}", tfidf_estimate(parquet_bytes));
         }
         if need_phrase {
-            println!("  • phrase index  — exact CJK n-gram lookup (canonical-anchor search)");
-            println!("                    sinoragd index phrase --parquet {} --doc-table {} --out {}",
-                out_parquet.display(), doc_table.display(), phrase_out.display());
-            println!("                    estimate: {}", phrase_index_estimate(parquet_bytes));
-        }
-        if need_tfidf {
-            println!("  • tf-idf index  — similarity / frontier discovery");
-            println!("                    sinoragd index tfidf --parquet {} --doc-table {} --out {}",
-                out_parquet.display(), doc_table.display(), tfidf_out.display());
-            println!("                    estimate: {}", tfidf_estimate(parquet_bytes));
+            println!("  phrase index: exact CJK phrase lookup and source tracing");
+            println!("    estimate: {}", phrase_index_estimate(parquet_bytes));
         }
         println!();
     }
-    println!("Use the research tools:");
-    println!("  sinoragd tool-call search --passages-parquet {} --json '{{\"phrase\":\"...\",\"limit\":10}}'",
-        out_parquet.display());
-    println!("  sinoragd tool-call passage --passages-parquet {} --json '{{\"id\":\"...\"}}'",
-        out_parquet.display());
-    println!("  sinoragd run-tools --passages-parquet {} --input jobs.jsonl --output results.jsonl  # batch mode",
-        out_parquet.display());
-    println!();
     println!("Check what's built:");
-    println!("  sinoragd status");
+    println!("  ./sinoragd status");
 }
 
 /// Move staging partitions into their final home. Refuses to overwrite an
