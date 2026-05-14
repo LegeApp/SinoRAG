@@ -1282,7 +1282,7 @@ fn write_index_file(
     hdr[HDR_MAX_DF_RATIO].copy_from_slice(&params.max_df_ratio.to_le_bytes());
 
     let fp = doc_table_fingerprint.as_bytes();
-    let n = fp.len().min(HDR_FP.len() - 1);
+    let n = fp.len().min(HDR_FP.len());
     hdr[HDR_FP.start..HDR_FP.start + n].copy_from_slice(&fp[..n]);
 
     hdr[HDR_VOCAB_OFF].copy_from_slice(&vocab_off.to_le_bytes());

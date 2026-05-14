@@ -311,17 +311,30 @@ pub fn match_index_fingerprint(
     doc_table_path: &Path,
     index_fingerprint: &str,
 ) -> Result<Option<IndexCoverage>> {
-    if index_fingerprint == doc_table.source_fingerprint {
+    if fingerprints_match(index_fingerprint, &doc_table.source_fingerprint) {
         return Ok(Some(IndexCoverage::Full));
     }
     if let Some(lineage) = DocTableLineage::load_if_present(doc_table_path)? {
-        if index_fingerprint == lineage.base_fingerprint {
+        if fingerprints_match(index_fingerprint, &lineage.base_fingerprint) {
             return Ok(Some(IndexCoverage::Base {
                 base_doc_count: lineage.base_doc_count,
             }));
         }
     }
     Ok(None)
+}
+
+fn fingerprints_match(index_fingerprint: &str, expected: &str) -> bool {
+    if index_fingerprint == expected {
+        return true;
+    }
+
+    // Legacy phrase/tfidf index writers reserved one byte for a null terminator
+    // in a 64-byte SHA-256 hex field, so they stored the first 63 hex chars.
+    // Accept only that exact legacy shape; new writers store the full value.
+    index_fingerprint.len() == 63
+        && expected.len() == 64
+        && expected.starts_with(index_fingerprint)
 }
 
 // ---------------------------------------------------------------------------
@@ -457,4 +470,31 @@ fn fingerprint_passage_ids(passage_ids: &[String], base: Option<&str>) -> String
         hasher.update(b"\0");
     }
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_match_accepts_full_sha256_hex() {
+        let fp = "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b6";
+        assert!(fingerprints_match(fp, fp));
+    }
+
+    #[test]
+    fn fingerprint_match_accepts_legacy_truncated_index_header() {
+        let expected =
+            "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b6";
+        let legacy = "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b";
+        assert!(fingerprints_match(legacy, expected));
+    }
+
+    #[test]
+    fn fingerprint_match_rejects_other_prefix_lengths() {
+        let expected =
+            "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b6";
+        let too_short = "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052";
+        assert!(!fingerprints_match(too_short, expected));
+    }
 }

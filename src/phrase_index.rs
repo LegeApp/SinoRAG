@@ -2,7 +2,7 @@
 //
 // Pipeline (single canonical version):
 //   Phase 1 — scan parquet, normalise text, write (gram_hash, doc_id) records
-//             into bucket files (bucketed by hash % bucket_count).
+//             into bucket files (bucketed by ordered hash range).
 //   Phase 2 — sort each bucket in fixed-size in-memory chunks, write sorted runs.
 //   Phase 3 — k-way merge each bucket's sorted runs, dedup (gram, doc_id),
 //             choose encoding per gram (delta-varint for sparse, Roaring for
@@ -53,7 +53,7 @@ pub type DocId = u32;
 const MAGIC: &[u8; 8] = b"SRPH3VAA";
 const HEADER_SIZE: usize = 256;
 const GRAM_ENTRY_SIZE: usize = 24;
-const SCHEMA_LABEL: &[u8] = b"sinorag-phrase-index-v3";
+const SCHEMA_LABEL: &[u8] = b"sinorag-phrase-index-v3-range-buckets";
 
 const ENC_VARINT: u8 = 0;
 const ENC_ROARING: u8 = 1;
@@ -109,6 +109,7 @@ impl PhraseIndex {
         let num_grams = u32::from_le_bytes(mmap[HDR_NUM_GRAMS].try_into()?) as usize;
         let doc_table_fingerprint = read_padded_string(&mmap[HDR_FP]);
         let schema = read_padded_string(&mmap[HDR_SCHEMA]);
+        ensure_supported_schema(&schema)?;
         let gram_table_offset = u64::from_le_bytes(mmap[HDR_GRAM_TABLE_OFF].try_into()?) as usize;
         let postings_len = u64::from_le_bytes(mmap[HDR_POSTINGS_SIZE].try_into()?) as usize;
         let dense_gram_count = u32::from_le_bytes(mmap[HDR_DENSE_GRAMS].try_into()?) as usize;
@@ -366,6 +367,7 @@ impl PhraseIndex {
         let num_grams = u32::from_le_bytes(hdr[HDR_NUM_GRAMS].try_into()?) as usize;
         let doc_table_fingerprint = read_padded_string(&hdr[HDR_FP]);
         let schema = read_padded_string(&hdr[HDR_SCHEMA]);
+        ensure_supported_schema(&schema)?;
         let postings_bytes = u64::from_le_bytes(hdr[HDR_POSTINGS_SIZE].try_into()?);
         let dense_gram_count = u32::from_le_bytes(hdr[HDR_DENSE_GRAMS].try_into()?);
         let varint_gram_count = u32::from_le_bytes(hdr[HDR_VARINT_GRAMS].try_into()?);
@@ -663,6 +665,10 @@ fn append_bucket_record(buf: &mut Vec<u8>, gram_hash: u64, doc_id: u32) {
     buf.extend_from_slice(&doc_id.to_le_bytes());
 }
 
+fn hash_bucket(hash: u64, bucket_count: usize) -> usize {
+    ((hash as u128 * bucket_count as u128) >> 64) as usize
+}
+
 fn flush_bucket_buffers(writers: &mut BucketWriterCache, buffers: &mut [Vec<u8>]) -> Result<()> {
     for (bucket, buf) in buffers.iter_mut().enumerate() {
         if !buf.is_empty() {
@@ -745,6 +751,9 @@ pub fn build(
     bucket_count: usize,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
+    if bucket_count == 0 {
+        anyhow::bail!("bucket_count must be greater than zero");
+    }
     let temp_dir = temp_dir.unwrap_or_else(|| {
         let mut p = out_path.as_os_str().to_os_string();
         p.push(".work");
@@ -820,7 +829,7 @@ pub fn build(
 
                     crate::text_analyzer::analyze(text, &analyze_opts, &mut scratch);
                     for &hash in &scratch.unique {
-                        let bucket = (hash as usize) % bucket_count;
+                        let bucket = hash_bucket(hash, bucket_count);
                         append_bucket_record(&mut bucket_buffers[bucket], hash, doc_id);
                         total_records += 1;
                     }
@@ -1131,7 +1140,7 @@ fn write_final_index(
     write_padded_string(&mut hdr[HDR_FP], doc_table_fingerprint);
     write_padded_string(
         &mut hdr[HDR_SCHEMA],
-        std::str::from_utf8(SCHEMA_LABEL).unwrap_or("sinorag-phrase-index-v3"),
+        schema_label(),
     );
     hdr[HDR_GRAM_TABLE_OFF].copy_from_slice(&(HEADER_SIZE as u64).to_le_bytes());
     hdr[HDR_POSTINGS_SIZE].copy_from_slice(&postings_size.to_le_bytes());
@@ -1218,7 +1227,7 @@ fn extract_columns(
 
 fn write_padded_string(field: &mut [u8], value: &str) {
     let bytes = value.as_bytes();
-    let n = bytes.len().min(field.len() - 1);
+    let n = bytes.len().min(field.len());
     field[..n].copy_from_slice(&bytes[..n]);
     for b in &mut field[n..] {
         *b = 0;
@@ -1228,6 +1237,21 @@ fn write_padded_string(field: &mut [u8], value: &str) {
 fn read_padded_string(field: &[u8]) -> String {
     let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     String::from_utf8_lossy(&field[..end]).to_string()
+}
+
+fn schema_label() -> &'static str {
+    std::str::from_utf8(SCHEMA_LABEL).unwrap_or("sinorag-phrase-index-v3-range-buckets")
+}
+
+fn ensure_supported_schema(schema: &str) -> Result<()> {
+    if schema != schema_label() {
+        anyhow::bail!(
+            "unsupported PhraseIndex schema `{}`; rebuild required (expected `{}`)",
+            schema,
+            schema_label()
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,5 +1349,33 @@ mod tests {
         assert_eq!(grams.len(), 3);
         let h0 = xxh3_64(grams[0].as_bytes());
         assert!(grams.iter().all(|g| xxh3_64(g.as_bytes()) == h0));
+    }
+
+    #[test]
+    fn range_buckets_concatenate_in_global_hash_order() {
+        let bucket_count = 8;
+        let mut buckets: Vec<Vec<u64>> = (0..bucket_count).map(|_| Vec::new()).collect();
+        let hashes = [
+            0,
+            1,
+            u64::MAX,
+            u64::MAX - 1,
+            1_u64 << 63,
+            (1_u64 << 63) - 1,
+            0x1111_2222_3333_4444,
+            0x9999_aaaa_bbbb_cccc,
+            0x7777_8888_9999_aaaa,
+            0x2222_3333_4444_5555,
+        ];
+        for hash in hashes {
+            buckets[hash_bucket(hash, bucket_count)].push(hash);
+        }
+        for bucket in &mut buckets {
+            bucket.sort_unstable();
+        }
+        let concatenated: Vec<u64> = buckets.into_iter().flatten().collect();
+        let mut expected = hashes.to_vec();
+        expected.sort_unstable();
+        assert_eq!(concatenated, expected);
     }
 }
