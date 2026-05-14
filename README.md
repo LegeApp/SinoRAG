@@ -12,20 +12,20 @@ It ingests TEI/XML, Kanripo, CEF, and HTML corpora into a searchable passage dat
 
 ```bash
 # 1. Ingest a corpus (one-time, slow)
-sinoragd ingest cbeta /path/to/cbeta/xml-p5
+sinorag ingest cbeta /path/to/cbeta/xml-p5
 
 # 2. Check what's built and what's next
-sinoragd status
+sinorag status
 
 # 3. Build optional heavy indexes when needed
-sinoragd optional-indexes  # phrase + TF-IDF indexes in one v3 indexing run
+sinorag optional-indexes  # phrase + TF-IDF indexes in one indexing run
 
 # 4. Discover and call tools from an agent
-sinoragd tools-manifest --include-examples
-sinoragd tool-call search --json '{"phrase":"金剛經","limit":5}'
+sinorag tools-manifest --include-examples
+sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
 ```
 
-`sinoragd --help` shows the full flow. Agents use `tools-manifest` to discover schemas, `tool-call` for one request, and `run-tools` for reproducible JSONL batches.
+`sinorag --help` shows the full flow. Agents use `tools-manifest` to discover schemas, `tool-call` for one request, and `run-tools` for reproducible JSONL batches.
 
 ---
 
@@ -33,7 +33,7 @@ sinoragd tool-call search --json '{"phrase":"金剛經","limit":5}'
 
 - Ingests CBETA TEI/XML, Kanripo plain-text, CEF JSON-lines, and Terebess HTML corpora
 - Builds a Parquet passage store partitioned by `source_corpus`
-- Provides exact phrase search over normalized Chinese text (`phrase_v3.index`)
+- Provides exact phrase search over normalized Chinese text (`phrase.index`)
 - Builds a document table for stable `doc_id ↔ passage_id` mapping
 - Builds catalog indexes for corpus/work/section navigation
 - Builds TF-IDF indexes for similarity and textual reuse discovery
@@ -60,8 +60,8 @@ Multiple corpora can be ingested into the same store — each lands in a separat
 ### Step 1 — Ingest
 
 ```bash
-sinoragd ingest cbeta /path/to/cbeta/xml-p5
-sinoragd ingest kanripo /path/to/kanripo        # optional, append
+sinorag ingest cbeta /path/to/cbeta/xml-p5
+sinorag ingest kanripo /path/to/kanripo        # optional, append
 ```
 
 Use `--resume auto` to continue an interrupted run.
@@ -69,7 +69,7 @@ Use `--resume auto` to continue an interrupted run.
 ### Step 2 — Check status
 
 ```bash
-sinoragd status
+sinorag status
 ```
 
 Reports what's ingested, which indexes are present, estimated cost for the missing optional ones, and suggested next steps.
@@ -80,11 +80,11 @@ These are not required for basic `search` and `passage` tools. Build them when t
 
 ```bash
 # Exact phrase search + similarity / frontier discovery
-sinoragd optional-indexes
+sinorag optional-indexes
 
 # Incremental rebuilds remain available
-sinoragd index phrase
-sinoragd index tfidf
+sinorag index phrase
+sinorag index tfidf
 ```
 
 Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
@@ -92,9 +92,9 @@ Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp
 ### Step 4 — Use JSON tools
 
 ```bash
-sinoragd tools-manifest --include-examples
-sinoragd tool-call search --json '{"phrase":"金剛經","limit":5}'
-sinoragd run-tools --input jobs.jsonl --output results.jsonl
+sinorag tools-manifest --include-examples
+sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
+sinorag run-tools --input jobs.jsonl --output results.jsonl
 ```
 
 Agents should inspect the manifest, then submit schema-valid JSON tool calls. Batch mode writes one response envelope per input line for auditability and retry.
@@ -111,8 +111,8 @@ data/
   derived/
     doc_table.bin             stable doc_id / passage_id mapping
     catalog.index             corpus / work / outline navigation
-    phrase_v3.index           exact phrase candidate index  (optional)
-    tfidf_v3.index            similarity index              (optional)
+    phrase.index           exact phrase candidate index  (optional)
+    tfidf.index            similarity index              (optional)
     registry.sqlite           mutable research state        (auto-created)
 ```
 
@@ -148,9 +148,9 @@ Which artifacts each tool needs:
 ## Agent tool workflow
 
 ```bash
-sinoragd tools-manifest --include-examples
-sinoragd tool-call passage --json '{"id":"B/B13/B13n0079.xml#pB13p0047a0417"}'
-sinoragd run-tools --input jobs.jsonl --output results.jsonl --jobs 4
+sinorag tools-manifest --include-examples
+sinorag tool-call passage --json '{"id":"B/B13/B13n0079.xml#pB13p0047a0417"}'
+sinorag run-tools --input jobs.jsonl --output results.jsonl --jobs 4
 ```
 
 Agent pattern:
@@ -171,14 +171,14 @@ Research tools that require indexes not yet built will return a clear error rath
 
 ```bash
 # Create a skeleton CEF directory
-sinoragd cef-init --out my-corpus
+sinorag cef-init --out my-corpus
 # Edit: corpus.toml, works.jsonl, passages.jsonl
 
 # Validate before ingesting
-sinoragd cef-validate --input my-corpus
+sinorag cef-validate --input my-corpus
 
 # Ingest
-sinoragd ingest cef my-corpus/passages.jsonl
+sinorag ingest cef my-corpus/passages.jsonl
 ```
 
 ---
@@ -219,8 +219,8 @@ SinoRAG can export research bundles (`export-readzen`, `graph-build`, `report-bu
 ## Install
 
 ```bash
-git clone https://github.com/yourname/sinoragd
-cd sinoragd
+git clone https://github.com/yourname/sinorag
+cd sinorag
 cargo install --path .
 ```
 

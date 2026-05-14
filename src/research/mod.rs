@@ -41,25 +41,27 @@ pub async fn exact_phrase_rows_with_index(
     if let Some(index_path) = phrase_index_path {
         if index_path.is_file() && !spec.normalized.is_empty() {
             let index = PhraseIndex::load(index_path)?;
-            let doc_ids = index.candidate_ids_for_normalized(&spec.normalized, usize::MAX);
+            if spec.normalized.chars().count() >= index.gram_len() {
+                let doc_ids = index.candidate_ids_for_normalized(&spec.normalized, usize::MAX);
 
-            let doc_table_path = index_path
-                .parent()
-                .map(|p| p.join("doc_table.bin"))
-                .unwrap_or_else(|| PathBuf::from("doc_table.bin"));
+                let doc_table_path = index_path
+                    .parent()
+                    .map(|p| p.join("doc_table.bin"))
+                    .unwrap_or_else(|| PathBuf::from("doc_table.bin"));
 
-            if doc_table_path.exists() {
-                let doc_table = DocumentTable::load(&doc_table_path)?;
-                let passage_ids: Vec<String> = doc_ids
-                    .iter()
-                    .filter_map(|&doc_id| doc_table.passage_ids.get(doc_id as usize).cloned())
-                    .collect();
-                return exact_phrase_rows_for_ids(store, spec, &passage_ids).await;
-            } else {
-                anyhow::bail!(
-                    "doc_table.bin not found next to phrase index at {} \u{2014} run doc-table-build first",
-                    doc_table_path.display()
-                );
+                if doc_table_path.exists() {
+                    let doc_table = DocumentTable::load(&doc_table_path)?;
+                    let passage_ids: Vec<String> = doc_ids
+                        .iter()
+                        .filter_map(|&doc_id| doc_table.passage_ids.get(doc_id as usize).cloned())
+                        .collect();
+                    return exact_phrase_rows_for_ids(store, spec, &passage_ids).await;
+                } else {
+                    anyhow::bail!(
+                        "doc_table.bin not found next to phrase index at {} \u{2014} run doc-table-build first",
+                        doc_table_path.display()
+                    );
+                }
             }
         }
     }

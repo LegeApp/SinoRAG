@@ -1,10 +1,10 @@
 [package]
-name = "sinoragd"
+name = "sinorag"
 version = "0.2.0"
 edition = "2021"
 
 [[bin]]
-name = "sinoragd"
+name = "sinorag"
 path = "src/main.rs"
 
 [dependencies]

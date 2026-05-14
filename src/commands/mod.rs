@@ -64,7 +64,7 @@ pub fn build_all_indexes(
     let tfidf_temp = temp_dir.as_ref().map(|p| p.join("tfidf.work"));
     let doc_table_loaded = DocumentTable::load(&doc_table)?;
 
-    eprintln!("=== Unified index build (phrase + tfidf) ===");
+    eprintln!("=== Combined index build (phrase + tfidf) ===");
     if phrase_index_is_current(&phrase_out, &doc_table, &doc_table_loaded, phrase_gram_len)? {
         eprintln!("Phrase index is current; skipping.");
     } else {

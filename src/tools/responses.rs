@@ -221,6 +221,7 @@ pub struct PhraseIndexSearchResponse {
     pub phrase: String,
     pub returned_count: usize,
     pub limit: usize,
+    pub search_strategy: serde_json::Value,
     pub results: Vec<serde_json::Value>,
 }
 

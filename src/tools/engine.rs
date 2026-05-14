@@ -1716,7 +1716,10 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::PhraseIndexSearchRequest,
     ) -> Result<crate::tools::responses::PhraseIndexSearchResponse> {
+        use crate::normalize::normalize_zh;
+        use crate::phrase_index::PhraseIndex;
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+        use crate::tools::errors::ToolError;
         use crate::tools::responses::PhraseIndexSearchResponse;
 
         let passages = self.passages().await?;
@@ -1733,11 +1736,22 @@ impl ToolEngine {
             }
             .into_anyhow());
         }
+        let phrase_index_path_ref = phrase_index_path.as_deref().expect("checked above");
+        let phrase_index = PhraseIndex::load(phrase_index_path_ref)?;
+        let gram_len = phrase_index.gram_len();
+        let normalized = normalize_zh(&req.phrase);
+        let phrase_len = normalized.chars().count();
+        if phrase_len < gram_len {
+            return Err(ToolError::InvalidArgs(format!(
+                "phrase-index-search requires at least {gram_len} normalized characters for this phrase index; got {phrase_len}. Use search for short phrases so it can fall back to Parquet."
+            ))
+            .into_anyhow());
+        }
 
-        let (rows, _) = phrase_rows_with_explicit_doc_table(
+        let (rows, search_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
-            phrase_index_path.as_deref(),
+            Some(phrase_index_path_ref),
             &req.phrase,
             req.limit,
             None,
@@ -1751,6 +1765,7 @@ impl ToolEngine {
             phrase: req.phrase,
             returned_count: rows.len(),
             limit: req.limit.max(1),
+            search_strategy,
             results: rows,
         })
     }

@@ -23,61 +23,116 @@ pub async fn phrase_rows_with_explicit_doc_table(
     if let Some(index_path) = phrase_index_path {
         if index_path.is_file() && !normalized.is_empty() {
             let index = PhraseIndex::load(index_path)?;
-            let result = index.candidate_ids_for_normalized_streaming(&normalized);
-            let (candidate_doc_ids, candidate_stats) = match result {
-                Some(r) => (r.doc_ids, Some(json!(r.stats))),
-                None => (Vec::new(), None),
-            };
-
-            let scoped_doc_ids: Vec<u32> = candidate_doc_ids
-                .into_iter()
-                .filter(|did| {
-                    if let Some((lo, hi)) = doc_range {
-                        *did >= lo && *did <= hi
-                    } else {
-                        true
+            let gram_len = index.gram_len();
+            if normalized.chars().count() >= gram_len {
+                let result = index.candidate_ids_for_normalized_streaming(&normalized);
+                let (candidate_doc_ids, candidate_stats) = match result {
+                    Some(r) => (r.doc_ids, Some(json!(r.stats))),
+                    None => {
+                        if let Some((lo, hi)) = doc_range {
+                            let (rows, mut strategy) = doc_range_rows(
+                                store, doc_table, phrase, limit, lo, hi, canon, period,
+                            )
+                            .await?;
+                            strategy["phrase_index_path"] = json!(index_path.display().to_string());
+                            strategy["fallback"] = json!(true);
+                            strategy["fallback_reason"] = json!("phrase_index_lookup_failed");
+                            strategy["gram_size"] = json!(gram_len);
+                            return Ok((rows, strategy));
+                        }
+                        let rows = parquet_global_rows(store, phrase, limit, canon, period).await?;
+                        return Ok((
+                            rows,
+                            json!({
+                                "used_phrase_index": false,
+                                "phrase_index_path": index_path.display().to_string(),
+                                "fallback": true,
+                                "fallback_reason": "phrase_index_lookup_failed",
+                                "scope_scan": "parquet_global",
+                                "gram_size": gram_len,
+                                "limit": limit,
+                            }),
+                        ));
                     }
-                })
-                .collect();
+                };
 
-            let passage_ids: Vec<String> = scoped_doc_ids
-                .iter()
-                .filter_map(|&did| doc_table.passage_id(did).map(String::from))
-                .collect();
+                let scoped_doc_ids: Vec<u32> = candidate_doc_ids
+                    .into_iter()
+                    .filter(|did| {
+                        if let Some((lo, hi)) = doc_range {
+                            *did >= lo && *did <= hi
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
 
-            let mut rows = store.passages_by_ids(&passage_ids, PASSAGE_SELECT).await?;
-            rows.retain(|row| {
-                let text = row
-                    .get("zh_text_normalized")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if !text.contains(&normalized) {
-                    return false;
-                }
-                if let Some(canon) = canon {
-                    if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
+                let passage_ids: Vec<String> = scoped_doc_ids
+                    .iter()
+                    .filter_map(|&did| doc_table.passage_id(did).map(String::from))
+                    .collect();
+
+                let mut rows = store.passages_by_ids(&passage_ids, PASSAGE_SELECT).await?;
+                rows.retain(|row| {
+                    let text = row
+                        .get("zh_text_normalized")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !text.contains(&normalized) {
                         return false;
                     }
-                }
-                if let Some(period) = period {
-                    if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period {
-                        return false;
+                    if let Some(canon) = canon {
+                        if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
+                            return false;
+                        }
                     }
-                }
-                true
-            });
-            rows.sort_by_key(|row| {
-                let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("");
-                doc_table.doc_id(pid).unwrap_or(u32::MAX)
-            });
-            rows.truncate(limit);
+                    if let Some(period) = period {
+                        if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period {
+                            return false;
+                        }
+                    }
+                    true
+                });
+                rows.sort_by_key(|row| {
+                    let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("");
+                    doc_table.doc_id(pid).unwrap_or(u32::MAX)
+                });
+                rows.truncate(limit);
 
+                return Ok((
+                    rows,
+                    json!({
+                        "used_phrase_index": true,
+                        "phrase_index_path": index_path.display().to_string(),
+                        "fallback": false,
+                        "gram_size": gram_len,
+                        "candidate_stats": candidate_stats,
+                        "after_doc_scope": scoped_doc_ids.len(),
+                        "limit": limit,
+                    }),
+                ));
+            }
+
+            let fallback_reason = format!("phrase_shorter_than_index_gram_size_{gram_len}");
+            if let Some((lo, hi)) = doc_range {
+                let (rows, mut strategy) =
+                    doc_range_rows(store, doc_table, phrase, limit, lo, hi, canon, period).await?;
+                strategy["phrase_index_path"] = json!(index_path.display().to_string());
+                strategy["fallback"] = json!(true);
+                strategy["fallback_reason"] = json!(fallback_reason);
+                strategy["gram_size"] = json!(gram_len);
+                return Ok((rows, strategy));
+            }
+            let rows = parquet_global_rows(store, phrase, limit, canon, period).await?;
             return Ok((
                 rows,
                 json!({
-                    "used_phrase_index": true,
-                    "candidate_stats": candidate_stats,
-                    "after_doc_scope": scoped_doc_ids.len(),
+                    "used_phrase_index": false,
+                    "phrase_index_path": index_path.display().to_string(),
+                    "fallback": true,
+                    "fallback_reason": fallback_reason,
+                    "scope_scan": "parquet_global",
+                    "gram_size": gram_len,
                     "limit": limit,
                 }),
             ));
@@ -85,45 +140,27 @@ pub async fn phrase_rows_with_explicit_doc_table(
     }
 
     if let Some((lo, hi)) = doc_range {
-        let passage_ids: Vec<String> = (lo..=hi)
-            .filter_map(|did| doc_table.passage_id(did).map(String::from))
-            .collect();
-        let mut rows = store.passages_by_ids(&passage_ids, PASSAGE_SELECT).await?;
-        rows.retain(|row| {
-            let text = row
-                .get("zh_text_normalized")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !text.contains(&normalized) {
-                return false;
-            }
-            if let Some(canon) = canon {
-                if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
-                    return false;
-                }
-            }
-            if let Some(period) = period {
-                if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period {
-                    return false;
-                }
-            }
-            true
-        });
-        rows.sort_by_key(|row| {
-            let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("");
-            doc_table.doc_id(pid).unwrap_or(u32::MAX)
-        });
-        rows.truncate(limit);
-        return Ok((
-            rows,
-            json!({
-                "used_phrase_index": false,
-                "scope_scan": "doc_range",
-                "limit": limit,
-            }),
-        ));
+        return doc_range_rows(store, doc_table, phrase, limit, lo, hi, canon, period).await;
     }
 
+    let rows = parquet_global_rows(store, phrase, limit, canon, period).await?;
+    Ok((
+        rows,
+        json!({
+            "used_phrase_index": false,
+            "scope_scan": "parquet_global",
+            "limit": limit,
+        }),
+    ))
+}
+
+async fn parquet_global_rows(
+    store: &DataFusionStore,
+    phrase: &str,
+    limit: usize,
+    canon: Option<&str>,
+    period: Option<&str>,
+) -> Result<Vec<Value>> {
     let mut spec = SearchSpec::exact_phrase(phrase.to_string(), limit);
     if let Some(canon) = canon {
         spec.canon = vec![canon.to_string()];
@@ -133,12 +170,55 @@ pub async fn phrase_rows_with_explicit_doc_table(
         rows.retain(|row| row.get("period").and_then(|v| v.as_str()).unwrap_or("") == period);
         rows.truncate(limit);
     }
+    Ok(rows)
+}
+
+async fn doc_range_rows(
+    store: &DataFusionStore,
+    doc_table: &DocumentTable,
+    phrase: &str,
+    limit: usize,
+    lo: u32,
+    hi: u32,
+    canon: Option<&str>,
+    period: Option<&str>,
+) -> Result<(Vec<Value>, Value)> {
+    let normalized = normalize_zh(phrase);
+    let passage_ids: Vec<String> = (lo..=hi)
+        .filter_map(|did| doc_table.passage_id(did).map(String::from))
+        .collect();
+    let mut rows = store.passages_by_ids(&passage_ids, PASSAGE_SELECT).await?;
+    rows.retain(|row| {
+        let text = row
+            .get("zh_text_normalized")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !text.contains(&normalized) {
+            return false;
+        }
+        if let Some(canon) = canon {
+            if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
+                return false;
+            }
+        }
+        if let Some(period) = period {
+            if row.get("period").and_then(|v| v.as_str()).unwrap_or("") != period {
+                return false;
+            }
+        }
+        true
+    });
+    rows.sort_by_key(|row| {
+        let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("");
+        doc_table.doc_id(pid).unwrap_or(u32::MAX)
+    });
+    rows.truncate(limit);
     Ok((
         rows,
         json!({
             "used_phrase_index": false,
-            "scope_scan": "parquet_global",
-            "limit": limit,
+            "scope_scan": "doc_range",
+            "limit": limit.max(1),
         }),
     ))
 }

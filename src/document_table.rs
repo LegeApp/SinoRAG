@@ -332,9 +332,7 @@ fn fingerprints_match(index_fingerprint: &str, expected: &str) -> bool {
     // Legacy phrase/tfidf index writers reserved one byte for a null terminator
     // in a 64-byte SHA-256 hex field, so they stored the first 63 hex chars.
     // Accept only that exact legacy shape; new writers store the full value.
-    index_fingerprint.len() == 63
-        && expected.len() == 64
-        && expected.starts_with(index_fingerprint)
+    index_fingerprint.len() == 63 && expected.len() == 64 && expected.starts_with(index_fingerprint)
 }
 
 // ---------------------------------------------------------------------------
@@ -484,16 +482,14 @@ mod tests {
 
     #[test]
     fn fingerprint_match_accepts_legacy_truncated_index_header() {
-        let expected =
-            "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b6";
+        let expected = "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b6";
         let legacy = "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b";
         assert!(fingerprints_match(legacy, expected));
     }
 
     #[test]
     fn fingerprint_match_rejects_other_prefix_lengths() {
-        let expected =
-            "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b6";
+        let expected = "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052b6";
         let too_short = "969df216b7525bc165e5aafb264833c8099b8cd06b4880dd843e994a4cc052";
         assert!(!fingerprints_match(too_short, expected));
     }
