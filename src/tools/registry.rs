@@ -423,7 +423,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 description: "Find TF-IDF similar passages to a seed passage.",
                 input_schema: schema_for::<SimilarRequest>(),
                 output_schema: schema_for::<SimilarResponse>(),
-                requires: vec!["passages.parquet", "tfidf_v3.index", "doc_table.bin"],
+                requires: vec!["passages.parquet", "tfidf.index", "doc_table.bin"],
                 safety: ToolSafety::ReadOnly,
                 examples: vec![
                     ToolExample {
@@ -449,7 +449,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 description: "Generate a discovery frontier packet for an agent session.",
                 input_schema: schema_for::<FrontierRequest>(),
                 output_schema: schema_for::<FrontierResponse>(),
-                requires: vec!["passages.parquet", "tfidf_v3.index", "doc_table.bin"],
+                requires: vec!["passages.parquet", "tfidf.index", "doc_table.bin"],
                 safety: ToolSafety::ReadOnly,
                 examples: vec![
                     ToolExample {
@@ -528,7 +528,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 description: "Search for a phrase using the phrase index for fast lookup.",
                 input_schema: schema_for::<PhraseIndexSearchRequest>(),
                 output_schema: schema_for::<PhraseIndexSearchResponse>(),
-                requires: vec!["passages.parquet", "phrase_v3.index"],
+                requires: vec!["passages.parquet", "phrase.index"],
                 safety: ToolSafety::ReadOnly,
                 examples: vec![
                     ToolExample {

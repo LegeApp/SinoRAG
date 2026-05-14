@@ -68,6 +68,17 @@ impl AnalyzeScratch {
 pub fn analyze(text: &str, opts: &AnalyzeOptions, scratch: &mut AnalyzeScratch) {
     scratch.reset();
     normalize_zh_into(text, &mut scratch.normalized);
+    analyze_current_normalized(opts, scratch);
+}
+
+/// Analyze text that has already been normalized by SinoRAG ingest.
+pub fn analyze_normalized(normalized: &str, opts: &AnalyzeOptions, scratch: &mut AnalyzeScratch) {
+    scratch.reset();
+    scratch.normalized.push_str(normalized);
+    analyze_current_normalized(opts, scratch);
+}
+
+fn analyze_current_normalized(opts: &AnalyzeOptions, scratch: &mut AnalyzeScratch) {
     build_filtered_normalized(
         &scratch.normalized,
         opts.filter,
@@ -302,6 +313,26 @@ mod tests {
             total += c;
         }
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn normalized_entrypoint_matches_analyze_for_normalized_text() {
+        let opts = AnalyzeOptions {
+            min_n: 2,
+            max_n: 3,
+            filter: FilterMode::CjkOnly,
+            apply_low_value_filter: true,
+            dedup: false,
+            count_tf: true,
+        };
+        let mut regular = AnalyzeScratch::new();
+        let mut normalized = AnalyzeScratch::new();
+
+        analyze("如是我聞", &opts, &mut regular);
+        analyze_normalized("如是我聞", &opts, &mut normalized);
+
+        assert_eq!(regular.filtered, normalized.filtered);
+        assert_eq!(regular.counts, normalized.counts);
     }
 
     #[test]

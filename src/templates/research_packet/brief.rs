@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
-pub const BRIEF_SCHEMA: &str = "sinoragd-research-brief-v1";
+pub const BRIEF_SCHEMA: &str = "sinorag-research-brief-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Brief {

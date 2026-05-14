@@ -75,7 +75,7 @@ pub enum OutlineNodeKind {
 impl CorpusCatalogIndex {
     pub fn new() -> Self {
         Self {
-            schema: "readzen-corpus-catalog-v3".to_string(),
+            schema: "readzen-corpus-catalog".to_string(),
             source_fingerprint: None,
             doc_table_fingerprint: None,
             works: Vec::new(),

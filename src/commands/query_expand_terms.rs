@@ -91,7 +91,7 @@ pub fn run(
     }
 
     let payload = json!({
-        "schema": "sinoragd-query-expand-terms-v1",
+        "schema": "sinorag-query-expand-terms-v1",
         "input": phrase,
         "expanded": combined,
         "by_source": {

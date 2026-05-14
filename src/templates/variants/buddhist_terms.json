@@ -1,5 +1,5 @@
 {
-  "schema": "sinoragd-variants-v1",
+  "schema": "sinorag-variants-v1",
   "description": "Buddhist term variants — Sanskrit/Pali transliterations, traditional ↔ simplified Han pairs, common English ↔ Chinese mappings. Seed list; extend as needed.",
   "entries": [
     {"key": "Amitabha",       "variants": ["阿彌陀", "阿弥陀", "Amitābha", "無量壽", "无量寿", "無量光", "无量光"]},

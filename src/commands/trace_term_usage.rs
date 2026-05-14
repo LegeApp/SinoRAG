@@ -111,7 +111,7 @@ pub async fn run(
     }
 
     let payload = json!({
-        "schema": "sinoragd-term-usage-trace-v1",
+        "schema": "sinorag-term-usage-trace-v1",
         "phrase": phrase,
         "group_by": group_by,
         "groups": out_groups,

@@ -79,7 +79,7 @@ pub fn build(
         doc_table_param.unwrap_or_else(|| PathBuf::from("data/derived/doc_table.bin"));
     if !doc_table_path.exists() {
         anyhow::bail!(
-            "DocumentTable not found at {}. Run `sinoragd doc-table-build` first.",
+            "DocumentTable not found at {}. Run `sinorag doc-table-build` first.",
             doc_table_path.display()
         );
     }

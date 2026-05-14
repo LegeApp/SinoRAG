@@ -15,17 +15,17 @@ pub enum IngestSource {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "sinoragd")]
+#[command(name = "sinorag")]
 #[command(version)]
 #[command(about = "SinoRAGD — Buddhist corpus research engine.\n\n\
 User flow:\n  \
-  1. sinoragd ingest <source> <path>   # build the corpus (one-time, slow)\n  \
-  2. sinoragd status                   # see what's built / what's next\n  \
-  3. sinoragd optional-indexes         # optional heavy indexes\n  \
-  4. sinoragd tools-manifest           # discover JSON tool schemas\n\n\
+  1. sinorag ingest <source> <path>   # build the corpus (one-time, slow)\n  \
+  2. sinorag status                   # see what's built / what's next\n  \
+  3. sinorag optional-indexes         # optional heavy indexes\n  \
+  4. sinorag tools-manifest           # discover JSON tool schemas\n\n\
 Agents should use `tool-call` for one call or `run-tools` for JSONL batches.\n\
-Run `sinoragd tools-manifest --include-examples` for available tools.")]
-#[command(after_help = "Run `sinoragd help <COMMAND>` for command details.")]
+Run `sinorag tools-manifest --include-examples` for available tools.")]
+#[command(after_help = "Run `sinorag help <COMMAND>` for command details.")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -43,7 +43,7 @@ pub enum IndexCommand {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v3.index", hide = true)]
+        #[arg(long, default_value = "data/derived/phrase.index", hide = true)]
         out: PathBuf,
         #[arg(long, default_value_t = 4)]
         gram_len: usize,
@@ -63,7 +63,7 @@ pub enum IndexCommand {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index", hide = true)]
+        #[arg(long, default_value = "data/derived/tfidf.index", hide = true)]
         out: PathBuf,
         #[arg(long, default_value_t = 5)]
         min_ngram: usize,
@@ -83,13 +83,13 @@ pub enum IndexCommand {
 
     /// Print phrase-index metadata.
     PhraseInfo {
-        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        #[arg(long, default_value = "data/derived/phrase.index")]
         index: PathBuf,
     },
 
     /// Print tf-idf-index metadata.
     TfidfInfo {
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
     },
 }
@@ -122,9 +122,9 @@ pub enum Command {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v3.index", hide = true)]
+        #[arg(long, default_value = "data/derived/phrase.index", hide = true)]
         phrase_out: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index", hide = true)]
+        #[arg(long, default_value = "data/derived/tfidf.index", hide = true)]
         tfidf_out: PathBuf,
         #[arg(long, default_value_t = 4)]
         phrase_gram_len: usize,
@@ -147,10 +147,10 @@ pub enum Command {
     /// Ingest a corpus into the passage store (passages.parquet).
     ///
     /// Usage:
-    ///   sinoragd ingest cbeta    <PATH>   # CBETA TEI xml-p5 root directory
-    ///   sinoragd ingest kanripo  <PATH>   # Kanripo texts/ root directory
-    ///   sinoragd ingest cef      <FILE>   # CEF .jsonl file
-    ///   sinoragd ingest terebess <DIR>    # Terebess HTML directory
+    ///   sinorag ingest cbeta    <PATH>   # CBETA TEI xml-p5 root directory
+    ///   sinorag ingest kanripo  <PATH>   # Kanripo texts/ root directory
+    ///   sinorag ingest cef      <FILE>   # CEF .jsonl file
+    ///   sinorag ingest terebess <DIR>    # Terebess HTML directory
     ///
     /// Ingest appends to existing parquet partitions — running cbeta and
     /// kanripo separately is fine; they land in separate partitions.
@@ -173,13 +173,13 @@ pub enum Command {
         #[arg(long, default_value = "false")]
         build_tfidf: bool,
         /// Phrase index output path.
-        #[arg(long, default_value = "data/derived/phrase_v3.index", hide = true)]
+        #[arg(long, default_value = "data/derived/phrase.index", hide = true)]
         phrase_index_out: PathBuf,
         /// Phrase index gram length.
         #[arg(long, default_value = "4")]
         phrase_gram_len: usize,
         /// TF-IDF output path.
-        #[arg(long, default_value = "data/derived/tfidf_v3.index", hide = true)]
+        #[arg(long, default_value = "data/derived/tfidf.index", hide = true)]
         tfidf_out: Option<PathBuf>,
         #[arg(long, default_value = "data/derived/catalog.index", hide = true)]
         catalog_index_out: Option<PathBuf>,
@@ -202,7 +202,7 @@ pub enum Command {
         transport: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         tfidf_index: PathBuf,
         #[arg(long, default_value = "data/derived/catalog.index")]
         catalog_index: PathBuf,
@@ -217,7 +217,7 @@ pub enum Command {
     /// Stitch already-built index artifacts into a validated pack with manifest.
     ///
     /// Validates fingerprint consistency across doc_table.bin, catalog.index,
-    /// phrase_v3.index, and tfidf_v3.index, then writes manifest.json.
+    /// phrase.index, and tfidf.index, then writes manifest.json.
     BuildPack {
         /// Pack root directory (default: data/).
         #[arg(long, default_value = "data")]
@@ -229,7 +229,7 @@ pub enum Command {
 
     // -----------------------------------------------------------------------
     // Index build commands — run by users but not shown in top-level help.
-    // Use `sinoragd help <command>` for details.
+    // Use `sinorag help <command>` for details.
     // -----------------------------------------------------------------------
     /// Build TF-IDF similarity index from passage parquet.
     #[command(hide = true)]
@@ -238,7 +238,7 @@ pub enum Command {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 5)]
         min_ngram: usize,
@@ -259,7 +259,7 @@ pub enum Command {
     /// Show TF-IDF index metadata.
     #[command(hide = true)]
     TfidfInfo {
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
     },
 
@@ -270,7 +270,7 @@ pub enum Command {
         parquet: PathBuf,
         #[arg(long, default_value = "data/derived/doc_table.bin")]
         doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        #[arg(long, default_value = "data/derived/phrase.index")]
         out: PathBuf,
         #[arg(long, default_value_t = 4)]
         gram_len: usize,
@@ -283,19 +283,19 @@ pub enum Command {
     /// Show phrase index metadata.
     #[command(hide = true)]
     PhraseIndexInfo {
-        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        #[arg(long, default_value = "data/derived/phrase.index")]
         index: PathBuf,
     },
 
     /// Search phrase index directly.
     ///
     /// Debug entrypoint. Agents usually invoke the JSON tool instead.
-    /// Requires `sinoragd index phrase` to have been run.
+    /// Requires `sinorag index phrase` to have been run.
     #[command(hide = true)]
     PhraseIndexSearch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase_v3.index")]
+        #[arg(long, default_value = "data/derived/phrase.index")]
         index: PathBuf,
         #[arg(long)]
         phrase: String,
@@ -410,7 +410,7 @@ pub enum Command {
     // -----------------------------------------------------------------------
     /// Retrieve a single passage by ID.
     ///
-    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`;
+    /// JSON tool. Normally invoked by agents via `sinorag tool-call`;
     /// the direct CLI form is here for debugging.
     #[command(hide = true)]
     Passage {
@@ -424,7 +424,7 @@ pub enum Command {
 
     /// Full-text / metadata search across the passage store.
     ///
-    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`;
+    /// JSON tool. Normally invoked by agents via `sinorag tool-call`;
     /// the direct CLI form is here for debugging.
     #[command(hide = true)]
     Search {
@@ -492,13 +492,13 @@ pub enum Command {
 
     /// Find TF-IDF similar passages to a seed.
     ///
-    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`.
-    /// Requires `sinoragd index tfidf` to have been run.
+    /// JSON tool. Normally invoked by agents via `sinorag tool-call`.
+    /// Requires `sinorag index tfidf` to have been run.
     #[command(hide = true)]
     Similar {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long)]
         seed: String,
@@ -519,7 +519,7 @@ pub enum Command {
     SimilarBatch {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long)]
         seeds: PathBuf,
@@ -542,7 +542,7 @@ pub enum Command {
         phrase: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -552,15 +552,15 @@ pub enum Command {
 
     /// Generate a discovery frontier packet for an agent session.
     ///
-    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`.
-    /// Requires `sinoragd index tfidf` to have been run.
+    /// JSON tool. Normally invoked by agents via `sinorag tool-call`.
+    /// Requires `sinorag index tfidf` to have been run.
     #[command(hide = true)]
     Frontier {
         #[arg(long)]
         seed: String,
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf_v3.index")]
+        #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
         #[arg(long)]
         corpus: Option<PathBuf>,
@@ -577,8 +577,8 @@ pub enum Command {
     /// Show all unique canon codes, periods, traditions, and origins with passage counts.
     ///
     /// Use the output values as filter arguments to `search` and `works`.
-    /// Example: sinoragd taxonomy
-    ///   → then: sinoragd tool-call search --json '{"phrase":"","canon":"X","limit":5}'
+    /// Example: sinorag taxonomy
+    ///   → then: sinorag tool-call search --json '{"phrase":"","canon":"X","limit":5}'
     Taxonomy {
         #[arg(long, default_value = "data/passages.parquet")]
         parquet: PathBuf,
@@ -742,7 +742,7 @@ pub enum Command {
 
     /// Pick high-value seed passages for an agent to start from.
     ///
-    /// JSON tool. Normally invoked by agents via `sinoragd tool-call`.
+    /// JSON tool. Normally invoked by agents via `sinorag tool-call`.
     #[command(hide = true)]
     SeedPick {
         #[arg(long, default_value = "data/passages.parquet")]
@@ -1123,7 +1123,7 @@ pub enum Command {
 
     /// Call a single tool with JSON arguments.
     ///
-    /// Example: sinoragd tool-call search --json '{"phrase":"金剛經云","limit":5}'
+    /// Example: sinorag tool-call search --json '{"phrase":"金剛經云","limit":5}'
     ToolCall {
         /// Tool name to call.
         tool: String,
@@ -1155,7 +1155,7 @@ pub enum Command {
 
     /// Run a batch of tools from a JSONL file.
     ///
-    /// Example: sinoragd run-tools --input jobs.jsonl --output results.jsonl
+    /// Example: sinorag run-tools --input jobs.jsonl --output results.jsonl
     RunTools {
         #[arg(long)]
         input: PathBuf,

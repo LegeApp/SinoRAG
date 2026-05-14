@@ -76,7 +76,7 @@ pub fn render(payload: &Value, title: &str) -> Value {
         "graph_id": stable_id("gd-timeline", title),
         "name": title,
         "description": "Timeline graph draft generated from evidence periods.",
-        "created_by": "graphdiscovery-rust",
+        "created_by": "sinorag-rust",
         "layout_policy": {
             "orientation": "horizontal",
             "primary_shape": "standard",

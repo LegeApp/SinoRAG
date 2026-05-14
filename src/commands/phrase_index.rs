@@ -33,7 +33,7 @@ pub async fn search(
 ) -> Result<()> {
     if !index_path.exists() {
         anyhow::bail!(
-            "phrase index not found at {}. Run `sinoragd phrase-index-build` first.",
+            "phrase index not found at {}. Run `sinorag phrase-index-build` first.",
             index_path.display()
         );
     }

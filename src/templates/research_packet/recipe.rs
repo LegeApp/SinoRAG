@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
-pub const RECIPE_SCHEMA: &str = "sinoragd-recipe-v1";
+pub const RECIPE_SCHEMA: &str = "sinorag-recipe-v1";
 
 const BUILTIN_ACADEMIC_DEFAULT: &str = include_str!("recipes/academic-default.json");
 const BUILTIN_PHRASE_FOCUSED: &str = include_str!("recipes/phrase-focused.json");

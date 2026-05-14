@@ -60,11 +60,11 @@ pub fn build_all_indexes(
     buckets: usize,
     temp_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let phrase_temp = temp_dir.as_ref().map(|p| p.join("phrase_v3.work"));
-    let tfidf_temp = temp_dir.as_ref().map(|p| p.join("tfidf_v3.work"));
+    let phrase_temp = temp_dir.as_ref().map(|p| p.join("phrase.work"));
+    let tfidf_temp = temp_dir.as_ref().map(|p| p.join("tfidf.work"));
     let doc_table_loaded = DocumentTable::load(&doc_table)?;
 
-    eprintln!("=== Unified index build (phrase_v3 + tfidf_v3) ===");
+    eprintln!("=== Unified index build (phrase + tfidf) ===");
     if phrase_index_is_current(&phrase_out, &doc_table, &doc_table_loaded, phrase_gram_len)? {
         eprintln!("Phrase index is current; skipping.");
     } else {
@@ -337,10 +337,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             ingest::post_ingest(ingest::PostIngestOptions {
                 out_parquet,
                 build_phrase_index: false,
-                phrase_index_out: std::path::PathBuf::from("data/derived/phrase_v3.index"),
+                phrase_index_out: std::path::PathBuf::from("data/derived/phrase.index"),
                 phrase_gram_len: 4,
                 build_tfidf: false,
-                tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf_v3.index")),
+                tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf.index")),
                 catalog_index_out: Some(std::path::PathBuf::from("data/derived/catalog.index")),
                 phrase_max_memory: None,
             })
@@ -618,10 +618,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             ingest::post_ingest(ingest::PostIngestOptions {
                 out_parquet,
                 build_phrase_index: false,
-                phrase_index_out: std::path::PathBuf::from("data/derived/phrase_v3.index"),
+                phrase_index_out: std::path::PathBuf::from("data/derived/phrase.index"),
                 phrase_gram_len: 4,
                 build_tfidf: false,
-                tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf_v3.index")),
+                tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf.index")),
                 catalog_index_out: Some(std::path::PathBuf::from("data/derived/catalog.index")),
                 phrase_max_memory: None,
             })

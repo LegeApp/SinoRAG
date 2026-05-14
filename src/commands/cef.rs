@@ -374,17 +374,17 @@ This directory contains a corpus in the GD-CEF v1 format.
 
 1. Validate the corpus:
    ```bash
-   graphdiscovery cef-validate --input /path/to/corpus
+   sinorag cef-validate --input /path/to/corpus
    ```
 
 2. Ingest into GraphDiscovery:
    ```bash
-   graphdiscovery ingest-cef --input /path/to/corpus --out-parquet /path/to/passages.parquet
+   sinorag ingest-cef --input /path/to/corpus --out-parquet /path/to/passages.parquet
    ```
 
 3. View statistics:
    ```bash
-   graphdiscovery cef-stats --input /path/to/corpus
+   sinorag cef-stats --input /path/to/corpus
    ```
 
 ## Format Documentation

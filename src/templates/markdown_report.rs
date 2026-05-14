@@ -1,4 +1,4 @@
-//! Markdown report template — produces a `graphdiscovery-report-md-v1`
+//! Markdown report template — produces a `sinorag-report-md-v1`
 //! frontmatter + sectioned scaffold from an evidence payload.
 
 use super::{default_title, evidence_items, query_raw};
@@ -26,7 +26,7 @@ pub fn render_with_options(
 
     let mut out = String::new();
     out.push_str("---\n");
-    out.push_str("format: graphdiscovery-report-md-v1\n");
+    out.push_str("format: sinorag-report-md-v1\n");
     out.push_str(&format!("created_utc: {}\n", Utc::now().to_rfc3339()));
     out.push_str("report_kind: evidence_scaffold_not_final_prose\n");
     out.push_str(&format!(

@@ -72,7 +72,7 @@ pub fn render(payload: &Value, title: &str) -> Value {
         "name": title,
         "description": "Evidence graph draft generated from GraphDiscovery artifact.",
         "source_task_id": stable_id("gd-task", &query_raw(payload)),
-        "created_by": "graphdiscovery-rust",
+        "created_by": "sinorag-rust",
         "layout_policy": {
             "orientation": "free",
             "allowed_shapes": ["standard", "person", "concept", "source", "text"],

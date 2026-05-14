@@ -108,7 +108,7 @@ pub async fn run(
     }
 
     let payload = json!({
-        "schema": "sinoragd-outline-search-v1",
+        "schema": "sinorag-outline-search-v1",
         "phrase": phrase,
         "start_node_id": start_node,
         "start_label": start_label,

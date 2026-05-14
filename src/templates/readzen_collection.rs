@@ -27,7 +27,7 @@ pub fn render(payload: &Value, name_override: Option<&str>) -> Value {
             "ToLb": item.get("lb_range").and_then(Value::as_str).unwrap_or(""),
             "Summary": item.get("main_title").and_then(Value::as_str).unwrap_or(id),
             "Tags": ["GraphDiscovery"],
-            "CreatedBy": "graphdiscovery-rust",
+            "CreatedBy": "sinorag-rust",
             "AddedUtc": Utc::now().to_rfc3339()
         }));
     }
@@ -38,7 +38,7 @@ pub fn render(payload: &Value, name_override: Option<&str>) -> Value {
         "Description": "Generated from GraphDiscovery evidence artifact.",
         "Tags": ["GraphDiscovery"],
         "CreatedUtc": Utc::now().to_rfc3339(),
-        "CreatedBy": "graphdiscovery-rust",
+        "CreatedBy": "sinorag-rust",
         "SchemaVersion": 2,
         "Passages": passages,
         "Edges": [],

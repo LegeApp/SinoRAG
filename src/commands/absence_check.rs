@@ -71,7 +71,7 @@ pub async fn run(
     });
 
     let payload = json!({
-        "schema": "sinoragd-absence-check-v1",
+        "schema": "sinorag-absence-check-v1",
         "phrase": phrase,
         "scope": scope_desc,
         "found": found,

@@ -1,23 +1,30 @@
-// TF-IDF index over CJK character n-grams (v3, 8-bit log-quantized).
+// TF-IDF index over CJK character n-grams (8-bit log-quantized).
+//
+// Builder structure is partially inspired by the local `fasttfidf` crate:
+// stream already-normalized text, split parquet work at row-group granularity,
+// and aggregate worker-local document frequencies before writing buckets. We
+// intentionally keep SinoRAG's CJK n-gram hashing, Rayon execution, stable
+// hash-sorted term IDs, and mmap-oriented index format.
 //
 // Pipeline:
-//   Phase 1 — DF buckets:    write (gram_hash, doc_id) records per bucket.
-//   Phase 2 — Build vocab:   merge buckets, count DF, filter by min/max DF +
+//   Phase 1 — DF buckets:    write pre-aggregated (gram_hash, df_count)
+//                            records per bucket.
+//   Phase 2 — Build vocab:   merge buckets, sum DF, filter by min/max DF +
 //                            max_features, assign term_ids.
 //   Phase 3 — Rows + posting buckets: re-scan parquet, compute TF, multiply
 //             by IDF, L2-normalise, write row entries inline + write
 //             (term_id, doc_id, weight) records into posting buckets.
-//             Writer thread also accumulates per-term `w_max` while
-//             collecting f32 row bytes.
+//             Writer thread streams temporary f32 row records and tracks
+//             per-term `w_max`.
 //   Phase 4 — Posting merge: for each posting bucket, sort by (term_id, doc_id)
 //             and emit a contiguous posting list per term. Quantize on emit
 //             using `w_max[tid]`.
-//   Requantize rows — second pass over the in-memory f32 row blob,
+//   Requantize rows — second pass over the temporary f32 row records,
 //             quantizing each weight against `w_max` and rewriting as 5-byte
-//             entries in doc-id order.
+//             entries.
 //   Save  —   write the file directly from the build's local Vecs.
 //
-// On-disk format ("SRTF3VAA", version 3): header (512 B) + vocab table
+// On-disk format: header (512 B) + vocab table
 // (32 B/entry, adds w_max:f32) + IDF array + per-doc row offsets + per-doc
 // row lengths + row blob (5 B/entry: term_id u32 + q u8) + postings blob
 // (5 B/entry: doc_id u32 + q u8). See header constant ranges below.
@@ -26,7 +33,7 @@
 // into the mmap; weights are dequantized on the fly via per-term `w_max`.
 
 use crate::document_table::DocumentTable;
-use crate::text_analyzer::{analyze, AnalyzeOptions, AnalyzeScratch, FilterMode};
+use crate::text_analyzer::{analyze_normalized, AnalyzeOptions, AnalyzeScratch, FilterMode};
 use crate::tfidf::ngram::{char_ngram_hashes, char_ngrams};
 use crate::tfidf::quantize::{dequantize_log_u8, quantize_log_u8};
 use anyhow::Result;
@@ -38,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -53,7 +60,7 @@ pub type TermId = u32;
 // File format constants
 // ---------------------------------------------------------------------------
 
-const MAGIC_TFIDF_V3: &[u8; 8] = b"SRTF3VAA";
+const MAGIC_TFIDF: &[u8; 8] = b"SRTF3VAA";
 const HEADER_SIZE: usize = 512;
 const VOCAB_ENTRY_SIZE: usize = 32; // u64 + u32 + u32 + u64 + u32 + f32
 const ROW_ENTRY_SIZE: usize = 5; // term_id u32 + qweight u8
@@ -93,7 +100,7 @@ pub struct TfidfParams {
 }
 
 impl TfidfParams {
-    pub fn default_v2() -> Self {
+    pub fn default() -> Self {
         Self {
             min_ngram: 5,
             max_ngram: 8,
@@ -161,15 +168,12 @@ impl TfidfIndex {
         if mmap.len() < HEADER_SIZE {
             anyhow::bail!("TF-IDF index too small");
         }
-        if &mmap[0..8] != MAGIC_TFIDF_V3 {
-            anyhow::bail!(
-                "invalid TF-IDF magic (expected v3 `SRTF3VAA`; rebuild required \
-                 — v2 files are not readable by v3 code)"
-            );
+        if &mmap[0..8] != MAGIC_TFIDF {
+            anyhow::bail!("invalid TF-IDF magic; rebuild required");
         }
         let version = u16::from_le_bytes([mmap[8], mmap[9]]);
         if version != 3 {
-            anyhow::bail!("unsupported TF-IDF version: {} (expected 3)", version);
+            anyhow::bail!("unsupported TF-IDF format; rebuild required");
         }
 
         let vocab_count = u32::from_le_bytes(mmap[HDR_VOCAB_COUNT].try_into()?) as usize;
@@ -435,7 +439,7 @@ impl TfidfIndex {
             (row_nnz as f64) / ((docs * cols) as f64)
         };
         serde_json::json!({
-            "schema": "sinorag-tfidf-v3",
+            "schema": "sinorag-tfidf",
             "version": 3,
             "quantization": "u8-log",
             "documents": docs,
@@ -463,15 +467,12 @@ impl TfidfIndex {
         let mut file = File::open(path)?;
         let mut hdr = [0u8; HEADER_SIZE];
         file.read_exact(&mut hdr)?;
-        if &hdr[0..8] != MAGIC_TFIDF_V3 {
-            anyhow::bail!(
-                "invalid TF-IDF magic (expected v3 `SRTF3VAA`; rebuild required \
-                 — v2 files are not readable by v3 code)"
-            );
+        if &hdr[0..8] != MAGIC_TFIDF {
+            anyhow::bail!("invalid TF-IDF magic; rebuild required");
         }
         let version = u16::from_le_bytes([hdr[8], hdr[9]]);
         if version != 3 {
-            anyhow::bail!("unsupported TF-IDF version: {} (expected 3)", version);
+            anyhow::bail!("unsupported TF-IDF format; rebuild required");
         }
         let vocab_count = u32::from_le_bytes(hdr[HDR_VOCAB_COUNT].try_into()?) as usize;
         let doc_count = u32::from_le_bytes(hdr[HDR_DOC_COUNT].try_into()?) as usize;
@@ -490,7 +491,7 @@ impl TfidfIndex {
         let post_blob_len = u64::from_le_bytes(hdr[HDR_POST_BLOB_LEN].try_into()?);
         let file_bytes = std::fs::metadata(path)?.len();
         Ok(serde_json::json!({
-            "schema": "sinorag-tfidf-v3",
+            "schema": "sinorag-tfidf",
             "version": version,
             "quantization": "u8-log",
             "documents": doc_count,
@@ -557,6 +558,41 @@ fn progress_key(p: &Path) -> String {
         0 => String::new(),
         1 => comps[0].clone(),
         n => format!("{}/{}", comps[n - 2], comps[n - 1]),
+    }
+}
+
+#[derive(Clone)]
+struct ParquetWorkUnit {
+    path: PathBuf,
+    row_group: Option<usize>,
+}
+
+fn parquet_work_units(files: &[PathBuf]) -> Result<Vec<ParquetWorkUnit>> {
+    let mut units = Vec::new();
+    for path in files {
+        let builder = crate::parquet_metadata::global_cache().get_or_load(path)?;
+        let row_groups = builder.metadata().num_row_groups();
+        if row_groups == 0 {
+            units.push(ParquetWorkUnit {
+                path: path.clone(),
+                row_group: None,
+            });
+        } else {
+            for row_group in 0..row_groups {
+                units.push(ParquetWorkUnit {
+                    path: path.clone(),
+                    row_group: Some(row_group),
+                });
+            }
+        }
+    }
+    Ok(units)
+}
+
+fn progress_key_for_unit(unit: &ParquetWorkUnit) -> String {
+    match unit.row_group {
+        Some(row_group) => format!("{}#rg{}", progress_key(&unit.path), row_group),
+        None => progress_key(&unit.path),
     }
 }
 
@@ -629,9 +665,9 @@ impl BucketWriterCache {
     }
 }
 
-fn append_df_record(buf: &mut Vec<u8>, term_hash: u64, doc_id: u32) {
+fn append_df_count_record(buf: &mut Vec<u8>, term_hash: u64, df_count: u32) {
     buf.extend_from_slice(&term_hash.to_le_bytes());
-    buf.extend_from_slice(&doc_id.to_le_bytes());
+    buf.extend_from_slice(&df_count.to_le_bytes());
 }
 
 fn append_posting_record(buf: &mut Vec<u8>, term_id: TermId, doc_id: DocId, weight: f32) {
@@ -641,6 +677,7 @@ fn append_posting_record(buf: &mut Vec<u8>, term_id: TermId, doc_id: DocId, weig
 }
 
 const BUCKET_BUFFER_FLUSH_BYTES: usize = 64 * 1024 * 1024;
+const LOCAL_DF_FLUSH_TERMS: usize = 500_000;
 
 fn flush_bucket_buffers(writers: &mut BucketWriterCache, buffers: &mut [Vec<u8>]) -> Result<()> {
     for (bucket, buf) in buffers.iter_mut().enumerate() {
@@ -649,6 +686,26 @@ fn flush_bucket_buffers(writers: &mut BucketWriterCache, buffers: &mut [Vec<u8>]
             buf.clear();
         }
     }
+    Ok(())
+}
+
+fn flush_df_counts(
+    writers: &mut BucketWriterCache,
+    buffers: &mut [Vec<u8>],
+    counts: &mut FxHashMap<u64, u32>,
+    bucket_count: usize,
+    buffered_bytes: &mut usize,
+) -> Result<()> {
+    for (&hash, &count) in counts.iter() {
+        let bucket = (hash as usize) % bucket_count;
+        append_df_count_record(&mut buffers[bucket], hash, count);
+        *buffered_bytes += 12;
+        if *buffered_bytes >= BUCKET_BUFFER_FLUSH_BYTES {
+            flush_bucket_buffers(writers, buffers)?;
+            *buffered_bytes = 0;
+        }
+    }
+    counts.clear();
     Ok(())
 }
 
@@ -670,7 +727,7 @@ pub fn build(
         PathBuf::from(p)
     });
 
-    eprintln!("=== TF-IDF builder (v3, u8-log quantized) ===");
+    eprintln!("=== TF-IDF builder (u8-log quantized) ===");
     eprintln!("Parquet : {}", parquet_path.display());
     eprintln!("DocTable: {}", doc_table_path.display());
     eprintln!("Output  : {}", out_path.display());
@@ -716,7 +773,12 @@ pub fn build(
     eprintln!("  {} passages", doc_count);
 
     let files = crate::phrase_index::parquet_files(&parquet_path)?;
-    eprintln!("  {} parquet file(s)", files.len());
+    let work_units = parquet_work_units(&files)?;
+    eprintln!(
+        "  {} parquet file(s), {} row-group work unit(s)",
+        files.len(),
+        work_units.len()
+    );
 
     // -----------------------------------------------------------------------
     // Phase 1 — DF bucket writes (parallel, resumable)
@@ -730,24 +792,27 @@ pub fn build(
         if phase1_prog.exists() {
             for line in fs::read_to_string(&phase1_prog)?.lines() {
                 if !line.is_empty() {
-                    completed.insert(progress_key(Path::new(line)));
+                    completed.insert(line.to_string());
                 }
             }
             eprintln!(
-                "  Resume: {}/{} files already processed",
+                "  Resume: {}/{} work units already processed",
                 completed.len(),
-                files.len()
+                work_units.len()
             );
         }
-        let pending: Vec<&PathBuf> = files
+        let pending: Vec<&ParquetWorkUnit> = work_units
             .iter()
-            .filter(|f| !completed.contains(&progress_key(f)))
+            .filter(|unit| {
+                !completed.contains(&progress_key_for_unit(unit))
+                    && !completed.contains(&progress_key(&unit.path))
+            })
             .collect();
 
         let nthreads = rayon::current_num_threads();
         let handles_per_thread = (700usize / nthreads.max(1)).max(4).min(64);
         eprintln!(
-            "  {} pending files on {} threads ({} handles/thread)",
+            "  {} pending work units on {} threads ({} handles/thread)",
             pending.len(),
             nthreads,
             handles_per_thread
@@ -757,7 +822,7 @@ pub fn build(
         }
 
         let counter = AtomicUsize::new(completed.len());
-        let total = files.len();
+        let total = work_units.len();
         let prog_f = Mutex::new(
             OpenOptions::new()
                 .create(true)
@@ -775,34 +840,47 @@ pub fn build(
             count_tf: false,
         };
 
-        pending.par_iter().try_for_each(|fp| -> Result<()> {
+        pending.par_iter().try_for_each(|unit| -> Result<()> {
             let t = rayon::current_thread_index().unwrap_or(0);
             let mut w = BucketWriterCache::new(df_dir.join(format!("t{}", t)), handles_per_thread);
-            let mut bucket_buffers: Vec<Vec<u8>> =
-                (0..bucket_count).map(|_| Vec::new()).collect();
+            let mut bucket_buffers: Vec<Vec<u8>> = (0..bucket_count).map(|_| Vec::new()).collect();
             let mut buffered_bytes = 0usize;
+            let mut local_df: FxHashMap<u64, u32> = FxHashMap::default();
             let mut scratch = AnalyzeScratch::new();
 
-            let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
+            let mut builder = crate::parquet_metadata::global_cache().get_or_load(&unit.path)?;
+            if let Some(row_group) = unit.row_group {
+                builder = builder.with_row_groups(vec![row_group]);
+            }
             let reader = builder.build()?;
             for batch in reader {
                 let batch = batch?;
                 let (pids, texts) = extract_columns(&batch)?;
                 for i in 0..batch.num_rows() {
-                    if let Some(doc_id) = doc_table.doc_id(pids.value(i)) {
-                        analyze(texts.value(i), &analyze_opts, &mut scratch);
+                    if doc_table.doc_id(pids.value(i)).is_some() {
+                        analyze_normalized(texts.value(i), &analyze_opts, &mut scratch);
                         for &hash in &scratch.unique {
-                            let bucket = (hash as usize) % bucket_count;
-                            append_df_record(&mut bucket_buffers[bucket], hash, doc_id);
-                            buffered_bytes += 12;
-                            if buffered_bytes >= BUCKET_BUFFER_FLUSH_BYTES {
-                                flush_bucket_buffers(&mut w, &mut bucket_buffers)?;
-                                buffered_bytes = 0;
-                            }
+                            *local_df.entry(hash).or_insert(0) += 1;
+                        }
+                        if local_df.len() >= LOCAL_DF_FLUSH_TERMS {
+                            flush_df_counts(
+                                &mut w,
+                                &mut bucket_buffers,
+                                &mut local_df,
+                                bucket_count,
+                                &mut buffered_bytes,
+                            )?;
                         }
                     }
                 }
             }
+            flush_df_counts(
+                &mut w,
+                &mut bucket_buffers,
+                &mut local_df,
+                bucket_count,
+                &mut buffered_bytes,
+            )?;
             flush_bucket_buffers(&mut w, &mut bucket_buffers)?;
             w.flush_all()?;
 
@@ -810,7 +888,7 @@ pub fn build(
             if n % 100 == 0 || n == total {
                 eprintln!("  {}/{}", n, total);
             }
-            writeln!(prog_f.lock().unwrap(), "{}", progress_key(fp))?;
+            writeln!(prog_f.lock().unwrap(), "{}", progress_key_for_unit(unit))?;
             Ok(())
         })?;
 
@@ -865,20 +943,21 @@ pub fn build(
                 for k in 0..n {
                     let base = k * 12;
                     let h = u64::from_le_bytes(raw[base..base + 8].try_into()?);
-                    let id = u32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
-                    records.push((h, id));
+                    let df_count = u32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
+                    records.push((h, df_count));
                 }
-                records.sort_unstable();
-                records.dedup();
+                records.sort_unstable_by_key(|(h, _)| *h);
                 let mut local: Vec<(u64, u32)> = Vec::new();
                 let mut i = 0;
                 while i < records.len() {
                     let h = records[i].0;
                     let mut j = i;
+                    let mut df_sum: u64 = 0;
                     while j < records.len() && records[j].0 == h {
+                        df_sum += records[j].1 as u64;
                         j += 1;
                     }
-                    local.push((h, (j - i) as u32));
+                    local.push((h, df_sum.min(u32::MAX as u64) as u32));
                     i = j;
                 }
                 Ok(local)
@@ -948,7 +1027,7 @@ pub fn build(
 
     // -----------------------------------------------------------------------
     // Phase 3 — rows + posting bucket writes (parallel)
-    // The writer thread accumulates an *intermediate* f32 row blob and
+    // The writer thread streams *intermediate* f32 row records to disk and
     // tracks per-term w_max (largest weight ever observed).
     // -----------------------------------------------------------------------
     eprintln!("\n[Phase 3] Rows + posting buckets...");
@@ -960,17 +1039,17 @@ pub fn build(
 
     // Intermediate row bytes are (term_id u32, weight f32) = 8 B per entry.
     const ROW_F32_ENTRY: usize = 8;
+    const ROW_F32_RECORD_HEADER: usize = 8;
+    let row_f32_path = temp_dir.join("rows_f32.tmp");
 
     let (row_tx, row_rx) = std::sync::mpsc::sync_channel::<(DocId, Vec<u8>)>(8192);
     let writer_handle = {
-        let mut row_offsets = vec![u64::MAX; doc_count];
-        let mut row_lengths = vec![0u32; doc_count];
-        let mut row_blob_f32: Vec<u8> = Vec::new();
+        let row_f32_path = row_f32_path.clone();
         let mut w_max: Vec<f32> = vec![0.0; vocab_count];
-        std::thread::spawn(move || {
+        std::thread::spawn(move || -> Result<(u64, Vec<f32>)> {
+            let mut row_file = BufWriter::new(File::create(&row_f32_path)?);
+            let mut bytes_written = 0u64;
             for (doc_id, bytes) in row_rx {
-                row_offsets[doc_id as usize] = row_blob_f32.len() as u64;
-                row_lengths[doc_id as usize] = (bytes.len() / ROW_F32_ENTRY) as u32;
                 // Track per-term w_max while consuming the row.
                 for chunk in bytes.chunks_exact(ROW_F32_ENTRY) {
                     let tid = u32::from_le_bytes(chunk[0..4].try_into().unwrap()) as usize;
@@ -979,14 +1058,19 @@ pub fn build(
                         w_max[tid] = w;
                     }
                 }
-                row_blob_f32.extend_from_slice(&bytes);
+                let byte_len = bytes.len() as u32;
+                row_file.write_all(&doc_id.to_le_bytes())?;
+                row_file.write_all(&byte_len.to_le_bytes())?;
+                row_file.write_all(&bytes)?;
+                bytes_written += (ROW_F32_RECORD_HEADER + bytes.len()) as u64;
             }
-            (row_offsets, row_lengths, row_blob_f32, w_max)
+            row_file.flush()?;
+            Ok((bytes_written, w_max))
         })
     };
 
     let counter3 = AtomicUsize::new(0usize);
-    let total3 = files.len();
+    let total3 = work_units.len();
     let min_n = params.min_ngram;
     let max_n = params.max_ngram;
     let analyze_opts = AnalyzeOptions {
@@ -998,31 +1082,32 @@ pub fn build(
         count_tf: true,
     };
 
-    files
+    work_units
         .par_iter()
-        .try_for_each_with(row_tx, |tx, fp| -> Result<()> {
+        .try_for_each_with(row_tx, |tx, unit| -> Result<()> {
             let t = rayon::current_thread_index().unwrap_or(0);
             let mut post_w =
                 BucketWriterCache::new(post_dir.join(format!("t{}", t)), handles_per_thread);
-            let mut posting_buffers: Vec<Vec<u8>> =
-                (0..bucket_count).map(|_| Vec::new()).collect();
+            let mut posting_buffers: Vec<Vec<u8>> = (0..bucket_count).map(|_| Vec::new()).collect();
             let mut buffered_bytes = 0usize;
             let mut scratch = AnalyzeScratch::new();
 
-            let builder = crate::parquet_metadata::global_cache().get_or_load(fp)?;
+            let mut builder = crate::parquet_metadata::global_cache().get_or_load(&unit.path)?;
+            if let Some(row_group) = unit.row_group {
+                builder = builder.with_row_groups(vec![row_group]);
+            }
             let reader = builder.build()?;
             for batch in reader {
                 let batch = batch?;
                 let (pids, texts) = extract_columns(&batch)?;
                 for i in 0..batch.num_rows() {
                     let pid = pids.value(i);
-                    let text = texts.value(i);
                     let Some(doc_id) = doc_table.doc_id(pid) else {
                         continue;
                     };
 
                     let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
-                    analyze(text, &analyze_opts, &mut scratch);
+                    analyze_normalized(texts.value(i), &analyze_opts, &mut scratch);
                     for &(h, count) in &scratch.counts {
                         if let Some(&tid) = term_to_id.get(&h) {
                             *term_counts.entry(tid).or_insert(0) += count;
@@ -1075,14 +1160,14 @@ pub fn build(
             Ok(())
         })?;
 
-    let (row_offsets_f32, row_lengths, row_blob_f32, w_max) = writer_handle
+    let (row_f32_bytes, w_max) = writer_handle
         .join()
-        .map_err(|_| anyhow::anyhow!("row writer thread panicked"))?;
+        .map_err(|_| anyhow::anyhow!("row writer thread panicked"))??;
 
     eprintln!(
-        "  Intermediate f32 row blob: {} bytes ({:.1} MB)",
-        row_blob_f32.len(),
-        row_blob_f32.len() as f64 / 1e6
+        "  Intermediate f32 row records: {} bytes ({:.1} MB)",
+        row_f32_bytes,
+        row_f32_bytes as f64 / 1e6
     );
 
     // Persist w_max into vocab entries now (used both by Phase 4 quantization
@@ -1179,34 +1264,45 @@ pub fn build(
     );
 
     // -----------------------------------------------------------------------
-    // Quantize row blob — second pass converting the intermediate f32 blob
-    // into a packed 5-byte/entry quantized blob keyed by doc_id order.
+    // Quantize row blob — second pass converting the intermediate f32 row
+    // records into a packed 5-byte/entry quantized blob.
     // -----------------------------------------------------------------------
     eprintln!("\n[Quantize] Re-emitting row blob with u8 weights...");
-    let mut row_blob_q: Vec<u8> = Vec::with_capacity(row_blob_f32.len() * 5 / 8);
+    let mut row_blob_q: Vec<u8> = Vec::with_capacity((row_f32_bytes as usize) * 5 / 8);
     let mut row_offsets_q: Vec<u64> = vec![u64::MAX; doc_count];
-    for doc_id in 0..doc_count {
-        let off_f32 = row_offsets_f32[doc_id];
-        if off_f32 == u64::MAX {
-            continue;
+    let mut row_lengths: Vec<u32> = vec![0u32; doc_count];
+    let mut row_file = File::open(&row_f32_path)?;
+    let mut header = [0u8; ROW_F32_RECORD_HEADER];
+    let mut row_buf = Vec::new();
+    loop {
+        match row_file.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
         }
-        let len = row_lengths[doc_id] as usize;
-        if len == 0 {
-            row_offsets_q[doc_id] = row_blob_q.len() as u64;
-            continue;
+        let doc_id = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+        let byte_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        if byte_len % ROW_F32_ENTRY != 0 {
+            return Err(anyhow::anyhow!(
+                "corrupt temporary row record for doc {}: {} bytes",
+                doc_id,
+                byte_len
+            ));
         }
+        row_buf.resize(byte_len, 0);
+        row_file.read_exact(&mut row_buf)?;
         row_offsets_q[doc_id] = row_blob_q.len() as u64;
-        let base = off_f32 as usize;
-        for k in 0..len {
-            let e = base + k * ROW_F32_ENTRY;
-            let tid = u32::from_le_bytes(row_blob_f32[e..e + 4].try_into().unwrap());
-            let w = f32::from_le_bytes(row_blob_f32[e + 4..e + 8].try_into().unwrap());
+        row_lengths[doc_id] = (byte_len / ROW_F32_ENTRY) as u32;
+        for chunk in row_buf.chunks_exact(ROW_F32_ENTRY) {
+            let tid = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+            let w = f32::from_le_bytes(chunk[4..8].try_into().unwrap());
             let wm = vocab_entries[tid as usize].w_max;
             row_blob_q.extend_from_slice(&tid.to_le_bytes());
             row_blob_q.push(quantize_log_u8(w, wm));
         }
     }
-    drop(row_blob_f32);
+    drop(row_file);
+    let _ = fs::remove_file(&row_f32_path);
     eprintln!(
         "  Quantized row blob: {} bytes ({:.1} MB)",
         row_blob_q.len(),
@@ -1237,7 +1333,7 @@ pub fn build(
 }
 
 // ---------------------------------------------------------------------------
-// Write the on-disk v3 index from the builder's in-memory state
+// Write the on-disk index from the builder's in-memory state.
 // ---------------------------------------------------------------------------
 
 fn write_index_file(
@@ -1271,7 +1367,7 @@ fn write_index_file(
     let post_blob_off = row_blob_off + row_blob_len;
 
     let mut hdr = vec![0u8; HEADER_SIZE];
-    hdr[0..8].copy_from_slice(MAGIC_TFIDF_V3);
+    hdr[0..8].copy_from_slice(MAGIC_TFIDF);
     hdr[8..10].copy_from_slice(&3u16.to_le_bytes());
     hdr[HDR_VOCAB_COUNT].copy_from_slice(&vocab_count.to_le_bytes());
     hdr[HDR_DOC_COUNT].copy_from_slice(&doc_count_u32.to_le_bytes());

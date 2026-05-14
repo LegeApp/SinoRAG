@@ -55,7 +55,7 @@ pub fn render(payload: &Value, title: &str) -> Value {
         "graph_id": stable_id("gd-lineage", title),
         "name": title,
         "description": "Lineage-oriented graph draft. Person extraction is conservative and rule-based.",
-        "created_by": "graphdiscovery-rust",
+        "created_by": "sinorag-rust",
         "layout_policy": {
             "orientation": "vertical",
             "primary_shape": "person",

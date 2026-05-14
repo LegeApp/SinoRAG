@@ -1,4 +1,4 @@
-// Streaming, memory-bounded CJK phrase index (v3, hybrid roaring/varint).
+// Streaming, memory-bounded CJK phrase index (hybrid roaring/varint).
 //
 // Pipeline (single canonical version):
 //   Phase 1 — scan parquet, normalise text, write (gram_hash, doc_id) records
@@ -9,10 +9,10 @@
 //             dense grams), stream to a single postings file.
 //   Phase 4 — write the final index file: header + gram entries + postings blob.
 //
-// On-disk format ("SRPH3VAA", version 3):
+// On-disk format:
 //   header (256 B)
 //     [0..8]     magic = "SRPH3VAA"
-//     [8..10]    version u16 = 3
+//     [8..10]    format version u16
 //     [10..12]   gram_len u16
 //     [12..16]   num_grams u32
 //     [16..80]   doc_table_fingerprint (null-padded utf8, max 64 B)
@@ -53,7 +53,7 @@ pub type DocId = u32;
 const MAGIC: &[u8; 8] = b"SRPH3VAA";
 const HEADER_SIZE: usize = 256;
 const GRAM_ENTRY_SIZE: usize = 24;
-const SCHEMA_LABEL: &[u8] = b"sinorag-phrase-index-v3-range-buckets";
+const SCHEMA_LABEL: &[u8] = b"sinorag-phrase-index-range-buckets";
 
 const ENC_VARINT: u8 = 0;
 const ENC_ROARING: u8 = 1;
@@ -95,14 +95,11 @@ impl PhraseIndex {
             anyhow::bail!("PhraseIndex file too small");
         }
         if &mmap[0..8] != MAGIC {
-            anyhow::bail!(
-                "PhraseIndex magic mismatch (expected v3 `SRPH3VAA`; rebuild required \
-                 — v2 files are not readable by v3 code)"
-            );
+            anyhow::bail!("PhraseIndex magic mismatch; rebuild required");
         }
         let version = u16::from_le_bytes([mmap[8], mmap[9]]);
         if version != 3 {
-            anyhow::bail!("Unsupported PhraseIndex version: {} (expected 3)", version);
+            anyhow::bail!("Unsupported PhraseIndex format; rebuild required");
         }
 
         let gram_len = u16::from_le_bytes(mmap[HDR_GRAM_LEN].try_into()?) as usize;
@@ -347,7 +344,6 @@ impl PhraseIndex {
             "varint_gram_count": self.varint_gram_count,
             "num_docs_at_build": self.num_docs_at_build,
             "postings_bytes": self.postings_len,
-            "version": 3,
         })
     }
 
@@ -357,11 +353,11 @@ impl PhraseIndex {
         let mut hdr = [0u8; HEADER_SIZE];
         file.read_exact(&mut hdr)?;
         if &hdr[0..8] != MAGIC {
-            anyhow::bail!("PhraseIndex magic mismatch (expected v3 `SRPH3VAA`; rebuild required)");
+            anyhow::bail!("PhraseIndex magic mismatch; rebuild required");
         }
         let version = u16::from_le_bytes([hdr[8], hdr[9]]);
         if version != 3 {
-            anyhow::bail!("Unsupported PhraseIndex version: {} (expected 3)", version);
+            anyhow::bail!("Unsupported PhraseIndex format; rebuild required");
         }
         let gram_len = u16::from_le_bytes(hdr[HDR_GRAM_LEN].try_into()?) as usize;
         let num_grams = u32::from_le_bytes(hdr[HDR_NUM_GRAMS].try_into()?) as usize;
@@ -760,7 +756,7 @@ pub fn build(
         PathBuf::from(p)
     });
 
-    eprintln!("=== PhraseIndex builder (v3, hybrid roaring/varint) ===");
+    eprintln!("=== PhraseIndex builder (hybrid roaring/varint) ===");
     eprintln!("Parquet : {}", parquet_path.display());
     eprintln!("DocTable: {}", doc_table_path.display());
     eprintln!("Output  : {}", out_path.display());
@@ -827,7 +823,7 @@ pub fn build(
                         continue;
                     };
 
-                    crate::text_analyzer::analyze(text, &analyze_opts, &mut scratch);
+                    crate::text_analyzer::analyze_normalized(text, &analyze_opts, &mut scratch);
                     for &hash in &scratch.unique {
                         let bucket = hash_bucket(hash, bucket_count);
                         append_bucket_record(&mut bucket_buffers[bucket], hash, doc_id);
@@ -1138,10 +1134,7 @@ fn write_final_index(
     hdr[HDR_GRAM_LEN].copy_from_slice(&(gram_len as u16).to_le_bytes());
     hdr[HDR_NUM_GRAMS].copy_from_slice(&(gram_count as u32).to_le_bytes());
     write_padded_string(&mut hdr[HDR_FP], doc_table_fingerprint);
-    write_padded_string(
-        &mut hdr[HDR_SCHEMA],
-        schema_label(),
-    );
+    write_padded_string(&mut hdr[HDR_SCHEMA], schema_label());
     hdr[HDR_GRAM_TABLE_OFF].copy_from_slice(&(HEADER_SIZE as u64).to_le_bytes());
     hdr[HDR_POSTINGS_SIZE].copy_from_slice(&postings_size.to_le_bytes());
     hdr[HDR_DENSE_GRAMS].copy_from_slice(&(dense_gram_count as u32).to_le_bytes());
@@ -1240,11 +1233,13 @@ fn read_padded_string(field: &[u8]) -> String {
 }
 
 fn schema_label() -> &'static str {
-    std::str::from_utf8(SCHEMA_LABEL).unwrap_or("sinorag-phrase-index-v3-range-buckets")
+    std::str::from_utf8(SCHEMA_LABEL).unwrap_or("sinorag-phrase-index-range-buckets")
 }
 
 fn ensure_supported_schema(schema: &str) -> Result<()> {
-    if schema != schema_label() {
+    let legacy_range_bucket_schema =
+        schema.starts_with("sinorag-phrase-index-") && schema.ends_with("-range-buckets");
+    if schema != schema_label() && !legacy_range_bucket_schema {
         anyhow::bail!(
             "unsupported PhraseIndex schema `{}`; rebuild required (expected `{}`)",
             schema,

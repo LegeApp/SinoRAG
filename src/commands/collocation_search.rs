@@ -95,7 +95,7 @@ pub async fn run(
     let collocates = score_collocates(&near_counts, &background_counts, limit_collocates);
 
     let payload = json!({
-        "schema": "sinoragd-collocation-search-v1",
+        "schema": "sinorag-collocation-search-v1",
         "phrase": phrase,
         "window_chars": window_chars,
         "gram_len": gram_len,

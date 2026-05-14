@@ -16,7 +16,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
 
-pub const PACKET_SCHEMA: &str = "sinoragd-research-packet-v1";
+pub const PACKET_SCHEMA: &str = "sinorag-research-packet-v1";
 
 #[derive(Debug, Clone)]
 pub struct CitedPassage {
@@ -149,7 +149,7 @@ fn try_emit_passage(
 fn render_passage_md(item: &Value) -> String {
     let mut s = String::new();
     s.push_str("---\n");
-    s.push_str("schema: sinoragd-passage-md-v1\n");
+    s.push_str("schema: sinorag-passage-md-v1\n");
     for k in [
         "passage_id",
         "source_work_id",
@@ -285,7 +285,7 @@ fn render_work_md(work_id: &str, rows: &[Value]) -> String {
     };
     let mut s = String::new();
     s.push_str("---\n");
-    s.push_str("schema: sinoragd-work-md-v1\n");
+    s.push_str("schema: sinorag-work-md-v1\n");
     s.push_str(&format!("work_id: {work_id}\n"));
     for k in ["main_title", "author", "period", "canon"] {
         let v = f(k);
@@ -370,7 +370,7 @@ pub fn write_pre_diagrams(
         .collect();
 
     let payload = json!({
-        "schema": "sinoragd-packet-evidence-payload-v1",
+        "schema": "sinorag-packet-evidence-payload-v1",
         "query": { "raw": brief.topic.clone() },
         "evidence": evidence_items,
     });

@@ -1,5 +1,5 @@
 {
-  "schema": "sinoragd-recipe-v1",
+  "schema": "sinorag-recipe-v1",
   "name": "full-genealogy",
   "description": "Lineage-oriented: similarity from passage seeds + phrase tools for any phrase seeds. Lowers the full-work threshold to pull more source material.",
   "full_work_threshold": 3,

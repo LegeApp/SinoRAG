@@ -104,7 +104,7 @@ pub async fn run(
     }
 
     let payload = json!({
-        "schema": "sinoragd-cluster-hits-v1",
+        "schema": "sinorag-cluster-hits-v1",
         "phrase": phrase,
         "cluster_by": cluster_by,
         "total_hits": doc_rows.len(),

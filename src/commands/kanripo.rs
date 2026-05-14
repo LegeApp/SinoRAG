@@ -95,7 +95,7 @@ pub fn run(input: PathBuf, out_corpus: PathBuf, snapshot_id: Option<String>) -> 
             "quality_flags_json": serde_json::to_string(&json!({
                 "synthetic_paragraph_segmentation": true,
                 "kanripo_plain_text_source": true,
-                "source_downloaded_by_graphdiscovery": false
+                "source_downloaded_by_sinorag": false
             }))?,
             "canon": "KANRIPO",
             "canon_name": "Kanseki Repository",

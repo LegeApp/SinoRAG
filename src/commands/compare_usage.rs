@@ -99,7 +99,7 @@ pub async fn run(
         .collect();
 
     let payload = json!({
-        "schema": "sinoragd-compare-usage-v1",
+        "schema": "sinorag-compare-usage-v1",
         "scope_a": {
             "node_id": scope_a_node_id,
             "work_id": scope_a_work_id,

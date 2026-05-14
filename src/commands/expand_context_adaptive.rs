@@ -103,7 +103,7 @@ pub async fn run(
         .sum();
 
     let payload = json!({
-        "schema": "sinoragd-expand-context-adaptive-v1",
+        "schema": "sinorag-expand-context-adaptive-v1",
         "seed_passage_id": passage_id,
         "selected_node_id": selected.node_id,
         "selected_node_kind": format!("{:?}", selected.node_kind),

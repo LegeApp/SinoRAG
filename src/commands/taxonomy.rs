@@ -97,7 +97,7 @@ pub async fn run(parquet_path: PathBuf) -> Result<()> {
         .collect();
 
     let out = serde_json::json!({
-        "schema": "sinoragd-taxonomy-v1",
+        "schema": "sinorag-taxonomy-v1",
         "note": "Pass id numbers OR exact name strings to --tradition / --period / --origin filters. Canon uses the 'code' string directly.",
         "legend": {
             "tradition": leg::traditions_json(),

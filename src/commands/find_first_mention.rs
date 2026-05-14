@@ -90,7 +90,7 @@ pub async fn run(
         .collect();
 
     let payload = json!({
-        "schema": "sinoragd-first-mention-v1",
+        "schema": "sinorag-first-mention-v1",
         "phrase": phrase,
         "first": first,
         "next_earlier": next_earlier,

@@ -26,7 +26,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-const CHECKPOINT_SCHEMA: &str = "sinoragd-ingest-checkpoint-v1";
+const CHECKPOINT_SCHEMA: &str = "sinorag-ingest-checkpoint-v1";
 const CHECKPOINT_FLUSH_INTERVAL: usize = 100;
 
 pub struct PostIngestOptions {
@@ -443,7 +443,7 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
     let tfidf_out_path = opts
         .tfidf_out
         .clone()
-        .unwrap_or_else(|| out.join("derived").join("tfidf_v3.index"));
+        .unwrap_or_else(|| out.join("derived").join("tfidf.index"));
 
     // -- Downstream builders --------------------------------------------
     // doc_table.bin is always built or updated — it's small, fast, and
@@ -489,7 +489,7 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
 
     if opts.build_tfidf {
         println!("\n=== Building TF-IDF index ===");
-        let params = crate::tfidf::index::TfidfParams::default_v2();
+        let params = crate::tfidf::index::TfidfParams::default();
         let buckets =
             crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
         crate::tfidf::index::build(
@@ -536,11 +536,11 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
         println!("  similarity search, or frontier discovery.");
         println!();
         if need_phrase && need_tfidf {
-            println!("  ./sinoragd optional-indexes");
+            println!("  ./sinorag optional-indexes");
         } else if need_phrase {
-            println!("  ./sinoragd index phrase");
+            println!("  ./sinorag index phrase");
         } else if need_tfidf {
-            println!("  ./sinoragd index tfidf");
+            println!("  ./sinorag index tfidf");
         }
         println!();
         if need_tfidf {
@@ -554,7 +554,7 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
         println!();
     }
     println!("Check what's built:");
-    println!("  ./sinoragd status");
+    println!("  ./sinorag status");
 }
 
 /// Move staging partitions into their final home. Refuses to overwrite an

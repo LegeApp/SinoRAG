@@ -51,7 +51,7 @@ pub async fn run(
         Vec::new()
     };
     let payload = json!({
-        "schema": "readzen-graphdiscovery-frontier-v1",
+        "schema": "readzen-sinorag-frontier-v1",
         "seed_passage_id": seed,
         "seed": seed_row,
         "inputs": {

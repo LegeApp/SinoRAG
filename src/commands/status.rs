@@ -1,4 +1,4 @@
-//! `sinoragd status` — report what's built under the data root.
+//! `sinorag status` — report what's built under the data root.
 //!
 //! Intentionally cheap: no parquet row scans, just filesystem inspection.
 //! Designed so first-time users (or agents) can answer "what do I have,
@@ -13,8 +13,8 @@ pub fn run(data: PathBuf) -> Result<()> {
     let derived = data.join("derived");
     let doc_table = derived.join("doc_table.bin");
     let catalog_index = derived.join("catalog.index");
-    let phrase_index = derived.join("phrase_v3.index");
-    let tfidf_index = derived.join("tfidf_v3.index");
+    let phrase_index = derived.join("phrase.index");
+    let tfidf_index = derived.join("tfidf.index");
     let registry = derived.join("registry.sqlite");
 
     println!("SinoRAGD status — data root: {}", data.display());
@@ -24,7 +24,7 @@ pub fn run(data: PathBuf) -> Result<()> {
     println!("Corpus:");
     let corpora = list_partitions(&parquet_root);
     if corpora.is_empty() {
-        println!("  (none ingested — run `sinoragd ingest <source> <path>`)");
+        println!("  (none ingested — run `sinorag ingest <source> <path>`)");
     } else {
         for (corpus, files) in &corpora {
             println!("  • {corpus:<10} {files} partition file(s)");
@@ -37,12 +37,12 @@ pub fn run(data: PathBuf) -> Result<()> {
     report("doc_table", &doc_table, "base");
     report("catalog.index", &catalog_index, "base");
     report(
-        "phrase_v3.index",
+        "phrase.index",
         &phrase_index,
         "optional — exact phrase search",
     );
     report(
-        "tfidf_v3.index",
+        "tfidf.index",
         &tfidf_index,
         "optional — similarity / frontier",
     );
@@ -62,34 +62,34 @@ pub fn run(data: PathBuf) -> Result<()> {
     // --- Next steps -----------------------------------------------------
     println!("Suggested next:");
     if corpora.is_empty() {
-        println!("  1. Ingest a corpus: `sinoragd ingest cbeta <PATH>`");
+        println!("  1. Ingest a corpus: `sinorag ingest cbeta <PATH>`");
         return Ok(());
     }
     let parquet_bytes = super::estimate::dir_size(&parquet_root);
     let mut shown_any = false;
     if !phrase_index.exists() && !tfidf_index.exists() {
         println!(
-            "  • Build phrase + tf-idf indexes (optional): `sinoragd optional-indexes`\n    phrase estimate: {}\n    tf-idf estimate: {}",
+            "  • Build phrase + tf-idf indexes (optional): `sinorag optional-indexes`\n    phrase estimate: {}\n    tf-idf estimate: {}",
             super::estimate::phrase_index_estimate(parquet_bytes),
             super::estimate::tfidf_estimate(parquet_bytes)
         );
         shown_any = true;
     } else if !phrase_index.exists() {
         println!(
-            "  • Build phrase index (optional): `sinoragd index phrase`\n    estimate: {}",
+            "  • Build phrase index (optional): `sinorag index phrase`\n    estimate: {}",
             super::estimate::phrase_index_estimate(parquet_bytes)
         );
         shown_any = true;
     } else if !tfidf_index.exists() {
         println!(
-            "  • Build tf-idf index (optional):  `sinoragd index tfidf`\n    estimate: {}",
+            "  • Build tf-idf index (optional):  `sinorag index tfidf`\n    estimate: {}",
             super::estimate::tfidf_estimate(parquet_bytes)
         );
         shown_any = true;
     }
-    println!("  • Single tool call:  `sinoragd tool-call search --json '{{\"phrase\":\"...\"}}'`");
+    println!("  • Single tool call:  `sinorag tool-call search --json '{{\"phrase\":\"...\"}}'`");
     println!(
-        "  • Batch tool calls:  `sinoragd run-tools --input jobs.jsonl --output results.jsonl`"
+        "  • Batch tool calls:  `sinorag run-tools --input jobs.jsonl --output results.jsonl`"
     );
     if !shown_any {
         println!("  (all heavy indexes already built — you're ready.)");

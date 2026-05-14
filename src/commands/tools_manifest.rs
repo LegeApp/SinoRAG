@@ -47,8 +47,8 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
         .collect();
 
     let manifest = serde_json::json!({
-        "schema": "sinoragd-tools-manifest-v1",
-        "generated_by": "sinoragd",
+        "schema": "sinorag-tools-manifest-v1",
+        "generated_by": "sinorag",
         "pack": args.pack.as_ref().map(|p| p.display().to_string()),
         "tools": tools
     });
@@ -73,8 +73,8 @@ fn resource_exists(pack_root: Option<&std::path::Path>, name: &str) -> bool {
         "passages.parquet" => pack::DEFAULT_PASSAGES,
         "doc_table.bin" => pack::DEFAULT_DOC_TABLE,
         "catalog.index" => pack::DEFAULT_CATALOG,
-        "phrase_v3.index" => pack::DEFAULT_PHRASE,
-        "tfidf_v3.index" => pack::DEFAULT_TFIDF,
+        "phrase.index" => pack::DEFAULT_PHRASE,
+        "tfidf.index" => pack::DEFAULT_TFIDF,
         "registry.sqlite" => pack::DEFAULT_REGISTRY,
         other => other,
     };
@@ -87,8 +87,8 @@ fn resource_exists(pack_root: Option<&std::path::Path>, name: &str) -> bool {
         "passages.parquet" => std::path::Path::new("data/passages.parquet").exists(),
         "doc_table.bin" => std::path::Path::new("data/derived/doc_table.bin").exists(),
         "catalog.index" => std::path::Path::new("data/derived/catalog.index").exists(),
-        "phrase_v3.index" => std::path::Path::new("data/derived/phrase_v3.index").exists(),
-        "tfidf_v3.index" => std::path::Path::new("data/derived/tfidf_v3.index").exists(),
+        "phrase.index" => std::path::Path::new("data/derived/phrase.index").exists(),
+        "tfidf.index" => std::path::Path::new("data/derived/tfidf.index").exists(),
         "registry.sqlite" => std::path::Path::new("data/derived/registry.sqlite").exists(),
         _ => false,
     }

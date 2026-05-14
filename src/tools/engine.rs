@@ -229,12 +229,12 @@ impl ToolEngine {
             }
         }
 
-        let default = PathBuf::from("data/derived/phrase_v3.index");
+        let default = PathBuf::from("data/derived/phrase.index");
         if default.exists() {
             return Ok(default);
         }
 
-        Err(anyhow::anyhow!("Cannot resolve phrase_v3.index path"))
+        Err(anyhow::anyhow!("Cannot resolve phrase.index path"))
     }
 
     /// Resolve the tfidf index path
@@ -250,12 +250,12 @@ impl ToolEngine {
             }
         }
 
-        let default = PathBuf::from("data/derived/tfidf_v3.index");
+        let default = PathBuf::from("data/derived/tfidf.index");
         if default.exists() {
             return Ok(default);
         }
 
-        Err(anyhow::anyhow!("Cannot resolve tfidf_v3.index path"))
+        Err(anyhow::anyhow!("Cannot resolve tfidf.index path"))
     }
 
     /// Resolve a phrase index path if present, and validate it against the
@@ -532,7 +532,7 @@ impl ToolEngine {
         let registry_exists = self.resolve_registry_path().is_ok();
 
         Ok(StatusResponse {
-            schema: "sinoragd-status-v1",
+            schema: "sinorag-status-v1",
             data_root,
             passages_parquet_exists,
             phrase_index_exists,
@@ -565,7 +565,7 @@ impl ToolEngine {
             .ok_or_else(|| anyhow::anyhow!("Passage not found: {}", req.id))?;
 
         Ok(PassageResponse {
-            schema: "sinoragd-passage-v1",
+            schema: "sinorag-passage-v1",
             passage_id: req.id.clone(),
             zh_quote: row
                 .get("zh_text_raw")
@@ -1077,7 +1077,7 @@ impl ToolEngine {
         });
 
         Ok(SearchResponse {
-            schema: "sinoragd-search-v1",
+            schema: "sinorag-search-v1",
             phrase: req.phrase,
             mode,
             brief: req.brief,
@@ -1192,7 +1192,7 @@ impl ToolEngine {
         let hit_count = hits.len();
 
         Ok(CanonicalSourceResponse {
-            schema: "sinoragd-canonical-source-v1",
+            schema: "sinorag-canonical-source-v1",
             phrase: req.phrase,
             hits,
             search_strategy: SearchStrategy {
@@ -1297,7 +1297,7 @@ impl ToolEngine {
             })
             .collect();
         Ok(HeadingSearchResponse {
-            schema: "sinoragd-heading-search-v1",
+            schema: "sinorag-heading-search-v1",
             query: req.query,
             brief: req.brief,
             returned_count: sections.len(),
@@ -1325,7 +1325,7 @@ impl ToolEngine {
     ) -> Result<crate::tools::responses::ToolDocsResponse> {
         let docs = crate::tools::docs::docs_payload(req.tool.as_deref());
         Ok(crate::tools::responses::ToolDocsResponse {
-            schema: "sinoragd-tool-docs-v1",
+            schema: "sinorag-tool-docs-v1",
             tool: req.tool,
             docs,
         })
@@ -1344,7 +1344,7 @@ impl ToolEngine {
         validate::run(req.path.clone())?;
 
         Ok(ValidateAdjudicationResponse {
-            schema: "sinoragd-validate-adjudication-v1",
+            schema: "sinorag-validate-adjudication-v1",
             path: req.path,
             valid: true,
             errors: vec![],
@@ -1387,7 +1387,7 @@ impl ToolEngine {
         let edge_count = graph["edges"].as_array().map(|v| v.len()).unwrap_or(0);
 
         Ok(GraphBuildResponse {
-            schema: "sinoragd-graph-build-v1",
+            schema: "sinorag-graph-build-v1",
             out: req.out,
             node_count,
             edge_count,
@@ -1416,7 +1416,7 @@ impl ToolEngine {
         let section_count = content.matches("##").count();
 
         Ok(ReportBuildResponse {
-            schema: "sinoragd-report-build-v1",
+            schema: "sinorag-report-build-v1",
             out: req.out,
             section_count,
         })
@@ -1464,7 +1464,7 @@ impl ToolEngine {
             .collect();
 
         Ok(WorksResponse {
-            schema: "sinoragd-works-v1",
+            schema: "sinorag-works-v1",
             works,
         })
     }
@@ -1482,7 +1482,7 @@ impl ToolEngine {
         let info = catalog.info_payload();
 
         Ok(CatalogIndexInfoResponse {
-            schema: "sinoragd-catalog-index-info-v1",
+            schema: "sinorag-catalog-index-info-v1",
             info,
         })
     }
@@ -1513,7 +1513,7 @@ impl ToolEngine {
         .await?;
 
         Ok(SimilarResponse {
-            schema: "sinoragd-similar-v1",
+            schema: "sinorag-similar-v1",
             seed: req.seed,
             similar_passages,
         })
@@ -1559,7 +1559,7 @@ impl ToolEngine {
         };
 
         let payload = serde_json::json!({
-            "schema": "readzen-graphdiscovery-frontier-v1",
+            "schema": "readzen-sinorag-frontier-v1",
             "seed_passage_id": req.seed,
             "seed": seed_row,
             "similar_passages": similar,
@@ -1570,7 +1570,7 @@ impl ToolEngine {
         });
 
         Ok(FrontierResponse {
-            schema: "sinoragd-frontier-v1",
+            schema: "sinorag-frontier-v1",
             seed_passage_id: req.seed,
             payload,
         })
@@ -1667,7 +1667,7 @@ impl ToolEngine {
             .collect();
 
         Ok(FirstAttestationResponse {
-            schema: "sinoragd-first-attestation-v1",
+            schema: "sinorag-first-attestation-v1",
             phrase: req.phrase,
             first,
             next_earlier,
@@ -1706,7 +1706,7 @@ impl ToolEngine {
         .await?;
 
         Ok(PhraseHistoryResponse {
-            schema: "sinoragd-phrase-history-v1",
+            schema: "sinorag-phrase-history-v1",
             payload,
         })
     }
@@ -1729,7 +1729,7 @@ impl ToolEngine {
                     .config
                     .phrase_index
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("data/derived/phrase_v3.index")),
+                    .unwrap_or_else(|| PathBuf::from("data/derived/phrase.index")),
             }
             .into_anyhow());
         }
@@ -1747,7 +1747,7 @@ impl ToolEngine {
         .await?;
 
         Ok(PhraseIndexSearchResponse {
-            schema: "sinoragd-phrase-index-search-v1",
+            schema: "sinorag-phrase-index-search-v1",
             phrase: req.phrase,
             returned_count: rows.len(),
             limit: req.limit.max(1),
@@ -1822,7 +1822,7 @@ impl ToolEngine {
         let results = passages.query_json(&sql).await?;
 
         Ok(SeedPickResponse {
-            schema: "sinoragd-seed-pick-v1",
+            schema: "sinorag-seed-pick-v1",
             limit: req.limit,
             already_worked_count: already_worked.len(),
             filters: FilterInfo {
@@ -1923,7 +1923,7 @@ impl ToolEngine {
             .sum();
 
         Ok(ExpandContextAdaptiveResponse {
-            schema: "sinoragd-expand-context-adaptive-v1",
+            schema: "sinorag-expand-context-adaptive-v1",
             seed_passage_id: req.passage_id,
             selected_node_id: selected.node_id,
             selected_node_kind: format!("{:?}", selected.node_kind),
@@ -2042,7 +2042,7 @@ impl ToolEngine {
         }
 
         Ok(TraceTermUsageResponse {
-            schema: "sinoragd-term-usage-trace-v1",
+            schema: "sinorag-term-usage-trace-v1",
             phrase: req.phrase,
             group_by: req.group_by,
             groups: out_groups,
@@ -2143,7 +2143,7 @@ impl ToolEngine {
         };
 
         Ok(QueryExpandTermsResponse {
-            schema: "sinoragd-query-expand-terms-v1",
+            schema: "sinorag-query-expand-terms-v1",
             input: req.phrase,
             expanded: combined,
             by_source: ExpandTermsBySource {
@@ -2240,7 +2240,7 @@ impl ToolEngine {
             .collect();
 
         Ok(CompareUsageResponse {
-            schema: "sinoragd-compare-usage-v1",
+            schema: "sinorag-compare-usage-v1",
             scope_a: CompareUsageScope {
                 node_id: req.scope_a_node_id,
                 work_id: req.scope_a_work_id,
@@ -2358,7 +2358,7 @@ impl ToolEngine {
             .collect();
 
         Ok(CollocationSearchResponse {
-            schema: "sinoragd-collocation-search-v1",
+            schema: "sinorag-collocation-search-v1",
             phrase: req.phrase,
             window_chars: req.window_chars,
             gram_len: req.gram_len,
@@ -2443,7 +2443,7 @@ impl ToolEngine {
                 })
                 .collect();
             return Ok(OutlineSearchResponse {
-                schema: "sinoragd-outline-search-v1",
+                schema: "sinorag-outline-search-v1",
                 phrase: req.phrase,
                 start_node_id: 0,
                 start_label: "corpus".to_string(),
@@ -2551,7 +2551,7 @@ impl ToolEngine {
             .collect();
 
         Ok(OutlineSearchResponse {
-            schema: "sinoragd-outline-search-v1",
+            schema: "sinorag-outline-search-v1",
             phrase: req.phrase,
             start_node_id: start_node,
             start_label,
@@ -2663,7 +2663,7 @@ impl ToolEngine {
             .collect();
 
         Ok(ClusterHitsResponse {
-            schema: "sinoragd-cluster-hits-v1",
+            schema: "sinorag-cluster-hits-v1",
             phrase: req.phrase,
             cluster_by: req.cluster_by,
             total_hits: doc_rows.len(),
@@ -2726,7 +2726,7 @@ impl ToolEngine {
         let hit_count = scoped_hits.len();
 
         Ok(AbsenceCheckResponse {
-            schema: "sinoragd-absence-check-v1",
+            schema: "sinorag-absence-check-v1",
             phrase: req.phrase,
             scope: AbsenceCheckScope {
                 work_id: req.scope_work_id,

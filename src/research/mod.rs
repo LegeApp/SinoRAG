@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-pub const CREATED_BY: &str = "graphdiscovery-rust";
+pub const CREATED_BY: &str = "sinorag-rust";
 
 #[derive(Debug, Clone)]
 pub struct SearchSpec {

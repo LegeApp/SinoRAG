@@ -1584,9 +1584,7 @@ fn artifact_type(rel_path: &str, payload: &Value) -> String {
     }
     if parts.iter().any(|p| *p == "frontiers") {
         if let Some(obj) = payload.as_object() {
-            if obj.get("schema").and_then(|v| v.as_str())
-                == Some("readzen-graphdiscovery-frontier-v1")
-            {
+            if obj.get("schema").and_then(|v| v.as_str()) == Some("readzen-sinorag-frontier-v1") {
                 return "frontier_packet".to_string();
             }
         }

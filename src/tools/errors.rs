@@ -75,7 +75,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "unknown_tool".to_string(),
                 message: format!("Unknown tool: {}", name),
                 suggested_command: Some(
-                    "Run 'sinoragd tools-manifest' to see available tools".to_string(),
+                    "Run 'sinorag tools-manifest' to see available tools".to_string(),
                 ),
                 details: None,
             },
@@ -83,7 +83,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "missing_phrase_index".to_string(),
                 message: format!("Phrase index not found at {}", path.display()),
                 suggested_command: Some(format!(
-                    "sinoragd index phrase --parquet data/passages.parquet --out {}",
+                    "sinorag index phrase --parquet data/passages.parquet --out {}",
                     path.display()
                 )),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
@@ -92,7 +92,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "missing_tfidf_index".to_string(),
                 message: format!("TF-IDF index not found at {}", path.display()),
                 suggested_command: Some(format!(
-                    "sinoragd index tfidf --parquet data/passages.parquet --out {}",
+                    "sinorag index tfidf --parquet data/passages.parquet --out {}",
                     path.display()
                 )),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
@@ -101,7 +101,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "missing_catalog_index".to_string(),
                 message: format!("Catalog index not found at {}", path.display()),
                 suggested_command: Some(
-                    "Run 'sinoragd catalog-index-build' to build the catalog index".to_string(),
+                    "Run 'sinorag catalog-index-build' to build the catalog index".to_string(),
                 ),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
@@ -109,14 +109,14 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "missing_doc_table".to_string(),
                 message: format!("Document table not found at {}", path.display()),
                 suggested_command: Some(
-                    "Run 'sinoragd doc-table-build' to build the document table".to_string(),
+                    "Run 'sinorag doc-table-build' to build the document table".to_string(),
                 ),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
             ToolError::MissingPassages { path } => ToolErrorBody {
                 code: "missing_passages".to_string(),
                 message: format!("Passages parquet not found at {}", path.display()),
-                suggested_command: Some("Run 'sinoragd ingest' to build the corpus".to_string()),
+                suggested_command: Some("Run 'sinorag ingest' to build the corpus".to_string()),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
             ToolError::ReadonlyViolation { tool } => ToolErrorBody {
@@ -160,7 +160,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "invalid_args".to_string(),
                 message: format!("Invalid arguments: {}", s),
                 suggested_command: Some(
-                    "Run 'sinoragd explain-tool <tool>' for usage information".to_string(),
+                    "Run 'sinorag explain-tool <tool>' for usage information".to_string(),
                 ),
                 details: None,
             },
@@ -179,7 +179,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             code: "missing_phrase_index".to_string(),
             message: msg,
             suggested_command: Some(
-                "sinoragd index phrase --parquet data/passages.parquet --out data/derived/phrase_v3.index".to_string()
+                "sinorag index phrase --parquet data/passages.parquet --out data/derived/phrase.index".to_string()
             ),
             details: None,
         };
@@ -190,7 +190,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             code: "missing_tfidf_index".to_string(),
             message: msg,
             suggested_command: Some(
-                "sinoragd index tfidf --parquet data/passages.parquet --out data/derived/tfidf_v3.index".to_string()
+                "sinorag index tfidf --parquet data/passages.parquet --out data/derived/tfidf.index".to_string()
             ),
             details: None,
         };
@@ -201,7 +201,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             code: "missing_catalog_index".to_string(),
             message: msg,
             suggested_command: Some(
-                "Run 'sinoragd catalog-index-build' to build the catalog index".to_string(),
+                "Run 'sinorag catalog-index-build' to build the catalog index".to_string(),
             ),
             details: None,
         };
@@ -211,7 +211,7 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
         return ToolErrorBody {
             code: "missing_passages".to_string(),
             message: msg,
-            suggested_command: Some("Run 'sinoragd ingest' to build the corpus".to_string()),
+            suggested_command: Some("Run 'sinorag ingest' to build the corpus".to_string()),
             details: None,
         };
     }

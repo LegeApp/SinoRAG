@@ -708,7 +708,7 @@ impl GraphDiscoveryServer {
         };
 
         Ok(Json(JsonObj(serde_json::json!({
-            "schema": "readzen-graphdiscovery-frontier-v1",
+            "schema": "readzen-sinorag-frontier-v1",
             "seed_passage_id": params.seed,
             "seed": seed_row,
             "similar_passages": similar,
@@ -1316,8 +1316,8 @@ rights_id = "CC-BY-SA-4.0""#
                     "2. Create corpus.toml with corpus metadata",
                     "3. Create works.jsonl with one row per work/book",
                     "4. Create passages.jsonl with one row per searchable passage",
-                    "5. Run validation: graphdiscovery cef-validate --input /path/to/corpus",
-                    "6. Ingest: graphdiscovery ingest-cef --input /path/to/corpus --out-parquet /path/to/passages.parquet"
+                    "5. Run validation: sinorag cef-validate --input /path/to/corpus",
+                    "6. Ingest: sinorag ingest-cef --input /path/to/corpus --out-parquet /path/to/passages.parquet"
                 ],
                 "minimum_viable": {
                     "corpus.toml": "schema, corpus_id, name, language, snapshot_id, rights_id",

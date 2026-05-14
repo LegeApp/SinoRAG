@@ -6,8 +6,8 @@
 //!   data/passages.parquet/...
 //!   derived/doc_table.bin
 //!   derived/catalog.index
-//!   derived/phrase_v3.index
-//!   derived/tfidf_v3.index
+//!   derived/phrase.index
+//!   derived/tfidf.index
 //!   derived/registry.sqlite
 //! ```
 //!
@@ -22,14 +22,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const MANIFEST_FILE: &str = "manifest.json";
-pub const PACK_SCHEMA: &str = "sinoragd-pack-v1";
+pub const PACK_SCHEMA: &str = "sinorag-pack-v1";
 
 pub const DEFAULT_PASSAGES: &str = "data/passages.parquet";
 pub const DEFAULT_DOC_TABLE: &str = "derived/doc_table.bin";
 pub const DEFAULT_CATALOG: &str = "derived/catalog.index";
 pub const DEFAULT_REGISTRY: &str = "derived/registry.sqlite";
-pub const DEFAULT_PHRASE: &str = "derived/phrase_v3.index";
-pub const DEFAULT_TFIDF: &str = "derived/tfidf_v3.index";
+pub const DEFAULT_PHRASE: &str = "derived/phrase.index";
+pub const DEFAULT_TFIDF: &str = "derived/tfidf.index";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackManifest {

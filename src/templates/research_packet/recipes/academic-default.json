@@ -1,5 +1,5 @@
 {
-  "schema": "sinoragd-recipe-v1",
+  "schema": "sinorag-recipe-v1",
   "name": "academic-default",
   "description": "Default scholarly recipe: phrase search, history, first attestation, timeline, canonical source, similarity from passage seeds. Full text of works contributing >=5 cited passages is included.",
   "full_work_threshold": 5,

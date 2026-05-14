@@ -86,7 +86,7 @@ pub fn report_build(
         "schema": "readzen-research-report-v1",
         "report_kind": "evidence_scaffold_not_final_prose",
         "title": inferred_title.clone(),
-        "created_by": "graphdiscovery-rust",
+        "created_by": "sinorag-rust",
         "created_utc": Utc::now().to_rfc3339(),
         "essay_max_pages": essay_max_pages,
         "query": {

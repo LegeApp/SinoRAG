@@ -1,5 +1,5 @@
 {
-  "schema": "sinoragd-recipe-v1",
+  "schema": "sinorag-recipe-v1",
   "name": "phrase-focused",
   "description": "Phrase-only recipe for fast attestation work: search + history + first-attestation + timeline. No similarity or canonical-source passes.",
   "full_work_threshold": 10,

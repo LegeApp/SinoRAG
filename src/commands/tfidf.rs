@@ -28,7 +28,7 @@ pub async fn similar(
 ) -> Result<()> {
     if !index_path.exists() {
         anyhow::bail!(
-            "TF-IDF index not found at {}. Run `sinoragd tfidf-build` first.",
+            "TF-IDF index not found at {}. Run `sinorag tfidf-build` first.",
             index_path.display()
         );
     }
@@ -80,7 +80,7 @@ pub async fn similar_batch(
 ) -> Result<()> {
     if !index_path.exists() {
         anyhow::bail!(
-            "TF-IDF index not found at {}. Run `sinoragd tfidf-build` first.",
+            "TF-IDF index not found at {}. Run `sinorag tfidf-build` first.",
             index_path.display()
         );
     }
@@ -149,7 +149,7 @@ pub async fn similar_passages(
 ) -> Result<Vec<Value>> {
     if !index_path.exists() {
         anyhow::bail!(
-            "TF-IDF index not found at {}. Run `sinoragd tfidf-build` first.",
+            "TF-IDF index not found at {}. Run `sinorag tfidf-build` first.",
             index_path.display()
         );
     }
