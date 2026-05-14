@@ -4,6 +4,7 @@ pub mod cli;
 pub mod commands;
 pub mod datafusion_store;
 pub mod document_table;
+pub mod embedding;
 pub mod ingest;
 pub mod jsonout;
 // pub mod mcp;  // Commented out - requires rmcp dependency

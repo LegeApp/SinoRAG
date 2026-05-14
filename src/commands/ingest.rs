@@ -593,6 +593,9 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
         println!();
         if need_phrase && need_tfidf {
             println!("  ./sinorag optional-indexes");
+            println!(
+                "  ./sinorag optional-indexes --with-vector --embedding-model bge-small-zh-v1.5"
+            );
         } else if need_phrase {
             println!("  ./sinorag index phrase");
         } else if need_tfidf {
@@ -607,6 +610,10 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
             println!("  phrase index: exact CJK phrase lookup and source tracing");
             println!("    estimate: {}", phrase_index_estimate(parquet_bytes));
         }
+        println!("  vector index: semantic discovery");
+        println!(
+            "    requires a binary built with --features local-embeddings, or external embeddings"
+        );
         println!();
     }
     println!("Check what's built:");

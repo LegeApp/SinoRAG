@@ -37,7 +37,7 @@ sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
 - Builds a document table for stable `doc_id ↔ passage_id` mapping
 - Builds catalog indexes for corpus/work/section navigation
 - Builds TF-IDF indexes for similarity and textual reuse discovery
-- Builds optional vector indexes from external embedding JSONL for semantic discovery
+- Builds optional vector indexes from external embedding JSONL or local FastEmbed models for semantic discovery
 - Exposes research tools through JSON schemas for LLM agents
 - Produces structured JSON output for reports, graph generation, and downstream apps
 
@@ -83,16 +83,23 @@ These are not required for basic `search` and `passage` tools. Build them when t
 # Exact phrase search + similarity / frontier discovery
 sinorag optional-indexes
 
+# Include local semantic vector discovery, when built with local embeddings
+sinorag optional-indexes --with-vector --embedding-model bge-small-zh-v1.5
+
 # Incremental rebuilds remain available
 sinorag index phrase
 sinorag index tfidf
 
-# Optional semantic discovery index: export, embed externally, then import
+# Optional semantic discovery index: local cached embedding + vector build
+sinorag index vector-update --model bge-small-zh-v1.5
+
+# External embedding flow remains available for provider-managed batches
 sinorag index vector-export --out data/derived/vector_input.jsonl
 sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id BAAI/bge-m3
 ```
 
 Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
+Local embedding commands require a binary built with `--features local-embeddings`.
 
 ### Step 4 — Use JSON tools
 

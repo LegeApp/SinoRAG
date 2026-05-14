@@ -7,7 +7,12 @@ edition = "2021"
 name = "sinorag"
 path = "src/main.rs"
 
+[features]
+default = []
+local-embeddings = ["dep:fastembed"]
+
 [dependencies]
+fastembed = { git = "https://github.com/Anush008/fastembed-rs", rev = "c34435d99c84a8e907c86cbde281984d810f31fa", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

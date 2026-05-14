@@ -73,7 +73,7 @@ pub struct VectorExportRecord {
     pub embedding_text: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingRecord {
     pub doc_id: u32,
     pub embedding: Vec<f32>,
@@ -276,6 +276,108 @@ impl Default for VectorBuildMetadata {
             instruction: None,
         }
     }
+}
+
+/// Build a vector index directly from in-memory embedding rows (no intermediate JSONL file).
+///
+/// Validates that every row's doc_id is present in the doc_table and that doc_ids are unique.
+/// Normalises vectors to unit length before writing.
+pub fn build_from_rows(
+    doc_table: &DocumentTable,
+    mut rows: Vec<EmbeddingRecord>,
+    out_path: &Path,
+    model_id: String,
+    model_revision: String,
+    metadata: VectorBuildMetadata,
+    hnsw: HnswParams,
+) -> Result<VectorIndexHeader> {
+    if rows.is_empty() {
+        anyhow::bail!("no embedding rows provided");
+    }
+
+    let mut seen = FxHashSet::default();
+    for row in &rows {
+        if !seen.insert(row.doc_id) {
+            anyhow::bail!(
+                "duplicate embedding doc_id {} in embedding rows",
+                row.doc_id
+            );
+        }
+    }
+
+    rows.sort_unstable_by_key(|r| r.doc_id);
+
+    // Validate
+    for row in &rows {
+        if doc_table.passage_id(row.doc_id).is_none() {
+            anyhow::bail!(
+                "embedding row references unknown doc_id {} (not in doc_table)",
+                row.doc_id
+            );
+        }
+    }
+
+    let dim = rows[0].embedding.len();
+    if dim == 0 {
+        anyhow::bail!("embedding dimension must be > 0");
+    }
+    for row in &rows {
+        if row.embedding.len() != dim {
+            anyhow::bail!(
+                "embedding dimension mismatch for doc_id {}: expected {}, got {}",
+                row.doc_id,
+                dim,
+                row.embedding.len()
+            );
+        }
+    }
+
+    // Fingerprint the raw embeddings for provenance
+    let mut hasher = Sha256::new();
+    for row in &rows {
+        hasher.update(&row.doc_id.to_le_bytes());
+        for v in &row.embedding {
+            hasher.update(&v.to_le_bytes());
+        }
+    }
+    let embeddings_fingerprint = hex::encode(hasher.finalize());
+
+    let mut doc_ids = Vec::with_capacity(rows.len());
+    let mut vectors = Vec::with_capacity(rows.len() * dim);
+    for mut row in rows {
+        normalize_l2(&mut row.embedding)?;
+        doc_ids.push(row.doc_id);
+        vectors.extend_from_slice(&row.embedding);
+    }
+
+    let header = VectorIndexHeader {
+        schema: "sinorag-vector-index-v1".to_string(),
+        schema_version: 1,
+        doc_table_fingerprint: doc_table.source_fingerprint.clone(),
+        embeddings_fingerprint,
+        source_fingerprint: metadata.source_fingerprint,
+        model_id,
+        model_revision,
+        embedding_text_template: metadata.embedding_text_template,
+        input_text_field_policy: metadata.input_text_field_policy,
+        truncation_policy: metadata.truncation_policy,
+        max_input_chars: metadata.max_input_chars,
+        pooling: metadata.pooling,
+        instruction: metadata.instruction,
+        embedding_dim: dim as u32,
+        distance: "normalized_l2_cosine_ordering".to_string(),
+        normalized: true,
+        row_count: doc_ids.len() as u32,
+        created_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        backend: "hnsw_rs".to_string(),
+        hnsw,
+    };
+
+    write_index(out_path, &header, &doc_ids, &vectors)?;
+    Ok(header)
 }
 
 pub fn ensure_matches_doc_table(

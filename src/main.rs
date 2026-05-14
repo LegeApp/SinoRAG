@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod datafusion_store;
 mod document_table;
+mod embedding;
 mod ingest;
 mod jsonout;
 // mod mcp;  // Commented out - requires rmcp dependency

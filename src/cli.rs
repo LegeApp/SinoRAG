@@ -1,3 +1,4 @@
+use crate::embedding::models::LocalEmbeddingProfile;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -147,6 +148,49 @@ pub enum IndexCommand {
         #[arg(long, default_value = "data/derived/vector.index")]
         index: PathBuf,
     },
+
+    /// Embed passages with a local model and build the vector index.
+    ///
+    /// Uses fastembed-rs to embed passages directly from the parquet corpus.
+    /// Maintains an append-only embedding cache so only new/changed passages
+    /// are re-embedded on subsequent runs.
+    ///
+    /// Requires the binary to be built with --features local-embeddings.
+    VectorUpdate {
+        /// Passages parquet directory.
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
+        parquet: PathBuf,
+        /// DocumentTable path.
+        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
+        doc_table: PathBuf,
+        /// Embedding model profile.
+        #[arg(long, value_enum)]
+        model: LocalEmbeddingProfile,
+        /// Embedding cache JSONL path (defaults to derived/<model-slug>.jsonl).
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Vector index output path.
+        #[arg(long, default_value = "data/derived/vector.index")]
+        out: PathBuf,
+        /// Embedding batch size (default: model-specific).
+        #[arg(long)]
+        batch_size: Option<usize>,
+        /// Directory for fastembed model weight downloads.
+        #[arg(long)]
+        model_cache_dir: Option<PathBuf>,
+        /// Show download progress bar when fetching model weights.
+        #[arg(long, default_value_t = true)]
+        show_download_progress: bool,
+        /// HNSW max_nb_connection (graph connectivity).
+        #[arg(long, default_value_t = 32)]
+        max_nb_connection: usize,
+        /// HNSW ef_construction (index quality / build time trade-off).
+        #[arg(long, default_value_t = 200)]
+        ef_construction: usize,
+        /// HNSW nb_layer.
+        #[arg(long, default_value_t = 16)]
+        nb_layer: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -169,9 +213,11 @@ pub enum Command {
         command: IndexCommand,
     },
 
-    /// Build the optional phrase and TF-IDF indexes together.
+    /// Build the optional phrase, TF-IDF, and (optionally) vector indexes together.
     ///
-    /// Run after ingest when you need exact phrase tools and similarity/frontier tools.
+    /// Run after ingest when you need exact phrase tools, similarity/frontier tools,
+    /// and/or semantic vector search. Pass --with-vector --embedding-model <MODEL> to
+    /// also embed all passages and build the vector index (requires --features local-embeddings).
     OptionalIndexes {
         #[arg(long, default_value = "data/passages.parquet", hide = true)]
         parquet: PathBuf,
@@ -197,6 +243,24 @@ pub enum Command {
         buckets: usize,
         #[arg(long)]
         temp_dir: Option<PathBuf>,
+        /// Also build the vector index using a local embedding model.
+        #[arg(long, default_value_t = false)]
+        with_vector: bool,
+        /// Embedding model to use when --with-vector is set.
+        #[arg(long, value_enum, default_value = "bge-small-zh-v1.5")]
+        embedding_model: LocalEmbeddingProfile,
+        /// Embedding cache path (default: derived/<model-slug>.jsonl).
+        #[arg(long)]
+        embedding_cache: Option<PathBuf>,
+        /// Vector index output path when --with-vector is set.
+        #[arg(long, default_value = "data/derived/vector.index", hide = true)]
+        vector_out: PathBuf,
+        /// Embedding batch size override.
+        #[arg(long)]
+        embedding_batch_size: Option<usize>,
+        /// Directory for fastembed model weight downloads.
+        #[arg(long)]
+        model_cache_dir: Option<PathBuf>,
     },
 
     /// Ingest a corpus into the passage store (passages.parquet).

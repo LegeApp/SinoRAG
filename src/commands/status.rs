@@ -96,7 +96,7 @@ pub fn run(data: PathBuf) -> Result<()> {
     println!("  • Single tool call:  `sinorag tool-call search --json '{{\"phrase\":\"...\"}}'`");
     if !vector_index.exists() {
         println!(
-            "  • Vector discovery: `sinorag index vector-export`, embed externally, then `sinorag index vector-build`"
+            "  • Vector discovery: `sinorag index vector-update --model bge-small-zh-v1.5` with a local-embeddings build, or `sinorag index vector-export` + external embeddings + `sinorag index vector-build`"
         );
     }
     println!(

@@ -37,6 +37,7 @@ pub mod tool_call;
 pub mod tools_manifest;
 pub mod trace_term_usage;
 pub mod validate;
+pub mod vector_embed;
 pub mod vector_index;
 
 use crate::cli::{Cli, Command, IndexCommand};
@@ -267,6 +268,34 @@ pub async fn run(cli: Cli) -> Result<()> {
                 nb_layer,
             ),
             IndexCommand::VectorInfo { index } => vector_index::info(index),
+            IndexCommand::VectorUpdate {
+                parquet,
+                doc_table,
+                model,
+                cache,
+                out,
+                batch_size,
+                model_cache_dir,
+                show_download_progress,
+                max_nb_connection,
+                ef_construction,
+                nb_layer,
+            } => {
+                vector_embed::update(
+                    parquet,
+                    doc_table,
+                    model,
+                    cache,
+                    out,
+                    batch_size,
+                    model_cache_dir,
+                    show_download_progress,
+                    max_nb_connection,
+                    ef_construction,
+                    nb_layer,
+                )
+                .await
+            }
         },
         Command::OptionalIndexes {
             parquet,
@@ -281,20 +310,45 @@ pub async fn run(cli: Cli) -> Result<()> {
             max_features,
             buckets,
             temp_dir,
-        } => build_all_indexes(
-            parquet,
-            doc_table,
-            phrase_out,
-            tfidf_out,
-            phrase_gram_len,
-            min_ngram,
-            max_ngram,
-            min_df,
-            max_df_ratio,
-            max_features,
-            buckets,
-            temp_dir,
-        ),
+            with_vector,
+            embedding_model,
+            embedding_cache,
+            vector_out,
+            embedding_batch_size,
+            model_cache_dir,
+        } => {
+            build_all_indexes(
+                parquet.clone(),
+                doc_table.clone(),
+                phrase_out,
+                tfidf_out,
+                phrase_gram_len,
+                min_ngram,
+                max_ngram,
+                min_df,
+                max_df_ratio,
+                max_features,
+                buckets,
+                temp_dir,
+            )?;
+            if with_vector {
+                vector_embed::update(
+                    parquet,
+                    doc_table,
+                    embedding_model,
+                    embedding_cache,
+                    vector_out,
+                    embedding_batch_size,
+                    model_cache_dir,
+                    true,
+                    32,
+                    200,
+                    16,
+                )
+                .await?;
+            }
+            Ok(())
+        }
         Command::Ingest {
             source,
             path,
