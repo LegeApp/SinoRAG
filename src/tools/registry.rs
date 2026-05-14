@@ -190,6 +190,42 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
 
+        // Source-read tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "source-read",
+                description: "Read an ordered source stream in cursor-based, citation-aware chunks.",
+                input_schema: schema_for::<SourceReadRequest>(),
+                output_schema: schema_for::<SourceReadResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Start reading a work",
+                        args: serde_json::json!({
+                            "source_work_id": "T08n0235",
+                            "direction": "start",
+                            "max_chars": 4000
+                        }),
+                    },
+                    ToolExample {
+                        title: "Read around a passage",
+                        args: serde_json::json!({
+                            "passage_id": "T/T08/T08n0235.xml#pT08p0750c0201",
+                            "direction": "around",
+                            "before_chars": 1200,
+                            "after_chars": 1800
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: SourceReadRequest = serde_json::from_value(args)?;
+                let res = engine.source_read_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // Search tool
         ToolDef {
             spec: ToolSpec {
@@ -977,6 +1013,32 @@ pub fn tool_defs() -> Vec<ToolDef> {
             call: |engine, args| Box::pin(async move {
                 let req: ScopeProfileRequest = serde_json::from_value(args)?;
                 let res = engine.scope_profile_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Batch-evidence-search wrapper
+        ToolDef {
+            spec: ToolSpec {
+                name: "batch-evidence-search",
+                description: "Search for multiple phrases and return compact per-phrase summaries.",
+                input_schema: schema_for::<BatchEvidenceSearchRequest>(),
+                output_schema: schema_for::<BatchEvidenceSearchResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Search multiple phrases",
+                        args: serde_json::json!({
+                            "phrases": ["金剛經", "般若波羅蜜多"],
+                            "limit": 10
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: BatchEvidenceSearchRequest = serde_json::from_value(args)?;
+                let res = engine.batch_evidence_search_impl(req).await?;
                 Ok(serde_json::to_value(res)?)
             }),
         },

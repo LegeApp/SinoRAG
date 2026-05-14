@@ -99,6 +99,65 @@ pub struct PassageRequest {
     pub id: String,
 }
 
+/// Request for the source-read tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SourceReadRequest {
+    #[serde(default)]
+    pub source_work_id: Option<String>,
+
+    #[serde(default)]
+    pub passage_id: Option<String>,
+
+    #[serde(default)]
+    pub node_id: Option<u32>,
+
+    #[serde(default)]
+    pub cursor: Option<String>,
+
+    #[serde(default = "default_read_direction")]
+    pub direction: String,
+
+    #[serde(default = "default_read_unit")]
+    pub unit: String,
+
+    #[serde(default = "default_source_read_max_chars")]
+    pub max_chars: usize,
+
+    #[serde(default = "default_source_read_overlap_chars")]
+    pub overlap_chars: usize,
+
+    #[serde(default)]
+    pub before_chars: Option<usize>,
+
+    #[serde(default)]
+    pub after_chars: Option<usize>,
+
+    #[serde(default = "default_true")]
+    pub include_previous_tail: bool,
+
+    #[serde(default = "default_true")]
+    pub include_next_head: bool,
+
+    #[serde(default = "default_true")]
+    pub include_metadata: bool,
+}
+
+fn default_read_direction() -> String {
+    "start".to_string()
+}
+
+fn default_read_unit() -> String {
+    "chunk".to_string()
+}
+
+fn default_source_read_max_chars() -> usize {
+    4000
+}
+
+fn default_source_read_overlap_chars() -> usize {
+    400
+}
+
 /// Request for the canonical-source tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct CanonicalSourceRequest {
@@ -677,9 +736,6 @@ pub struct ScopeProfileRequest {
     #[serde(default = "default_limit_terms")]
     pub limit_terms: usize,
 
-    #[serde(default)]
-    pub include_examples_per_term: bool,
-
     #[serde(default = "default_workflow_quality")]
     pub quality: String,
 }
@@ -693,6 +749,15 @@ pub struct PlanToolsRequest {
 
     #[serde(default)]
     pub seed_passage_id: Option<String>,
+}
+
+/// Request for the batch-evidence-search tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct BatchEvidenceSearchRequest {
+    pub phrases: Vec<String>,
+
+    #[serde(default = "default_limit")]
+    pub limit: usize,
 }
 
 fn default_variant_policy() -> String {

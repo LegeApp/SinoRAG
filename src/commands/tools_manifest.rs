@@ -12,6 +12,9 @@ pub struct ToolsManifestArgs {
 
     #[arg(long, default_value_t = false)]
     pub include_examples: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub include_schemas: bool,
 }
 
 pub async fn run(args: ToolsManifestArgs) -> Result<()> {
@@ -25,6 +28,13 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
             if !args.include_examples {
                 if let Some(obj) = spec.as_object_mut() {
                     obj.remove("examples");
+                }
+            }
+
+            if !args.include_schemas {
+                if let Some(obj) = spec.as_object_mut() {
+                    obj.remove("input_schema");
+                    obj.remove("output_schema");
                 }
             }
 
@@ -101,6 +111,12 @@ fn workflow_profiles(pack_root: Option<&std::path::Path>) -> serde_json::Value {
             "source-investigate",
             &["passages.parquet", "doc_table.bin"],
             &["catalog.index", "tfidf.index", "vector.index"],
+        ),
+        profile(
+            "source_reading",
+            "source-read",
+            &["passages.parquet"],
+            &["catalog.index"],
         ),
         profile(
             "scope_comparison",

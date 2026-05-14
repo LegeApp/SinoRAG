@@ -52,6 +52,8 @@ pub enum ComponentStatus {
     Ok,
     SkippedNotRequested,
     SkippedUnavailable,
+    SkippedBudgetExhausted,
+    TimedOut,
     Failed,
 }
 
@@ -113,6 +115,60 @@ pub struct PassageResponse {
     pub source_work_id: Option<String>,
     pub main_title: Option<String>,
     pub heading: Option<String>,
+}
+
+/// Response from the source-read tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceReadResponse {
+    pub schema: &'static str,
+    pub source_work_id: String,
+    pub work_title: Option<String>,
+    pub cursor: SourceReadCursorInfo,
+    pub position: SourceReadPosition,
+    pub segments: Vec<SourceReadSegment>,
+    pub metadata: Option<serde_json::Value>,
+    pub reading_state: SourceReadingState,
+    pub suggested_next_tools: Vec<SuggestedToolCall>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceReadCursorInfo {
+    pub current: String,
+    pub next: Option<String>,
+    pub prev: Option<String>,
+    pub has_next: bool,
+    pub has_prev: bool,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceReadPosition {
+    pub char_start: usize,
+    pub char_end: usize,
+    pub total_chars: usize,
+    pub estimated_percent: f64,
+    pub passage_start: Option<String>,
+    pub passage_end: Option<String>,
+    pub section_path: Vec<String>,
+    pub boundary_policy: String,
+    pub boundary_quality: String,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceReadSegment {
+    pub kind: String,
+    pub citeable: bool,
+    pub char_start: usize,
+    pub char_end: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceReadingState {
+    pub work_title: Option<String>,
+    pub current_location: Option<String>,
+    pub progress: serde_json::Value,
+    pub running_summary_prompt: String,
 }
 
 /// Response from the canonical-source tool
@@ -664,9 +720,36 @@ pub struct ReportFromEvidenceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ResourceStatus {
+    pub passages_parquet: bool,
+    pub phrase_index: bool,
+    pub catalog_index: bool,
+    pub doc_table: bool,
+    pub tfidf_index: bool,
+    pub vector_index: bool,
+    pub registry: bool,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PlanToolsResponse {
     pub schema: &'static str,
     pub recommended_workflow: String,
     pub steps: Vec<SuggestedToolCall>,
     pub notes: Vec<String>,
+    pub resource_status: ResourceStatus,
+}
+
+/// Response from the batch-evidence-search tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct BatchEvidenceSearchResponse {
+    pub schema: &'static str,
+    pub results: Vec<BatchEvidenceSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct BatchEvidenceSearchResult {
+    pub phrase: String,
+    pub hit_count: usize,
+    pub sample_passage_ids: Vec<String>,
+    pub error: Option<String>,
 }

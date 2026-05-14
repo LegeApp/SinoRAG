@@ -1168,6 +1168,9 @@ pub enum Command {
         format: String,
         #[arg(long, default_value_t = false)]
         include_examples: bool,
+        /// Include full JSON input/output schemas. Omitted by default to keep the manifest agent-readable.
+        #[arg(long, default_value_t = false)]
+        include_schemas: bool,
     },
 
     /// Print compiled-in documentation for tools.

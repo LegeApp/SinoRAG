@@ -56,6 +56,9 @@ pub enum ToolError {
     #[error("query embedding provider is not configured")]
     QueryEmbeddingProviderNotConfigured,
 
+    #[error("tool component timed out: {component} after {timeout_ms} ms")]
+    Timeout { component: String, timeout_ms: u64 },
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -184,6 +187,18 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 message: "Native query_text embedding is not configured; use seed_passage_id or query_embedding.".to_string(),
                 suggested_command: None,
                 details: None,
+            },
+            ToolError::Timeout {
+                component,
+                timeout_ms,
+            } => ToolErrorBody {
+                code: "timeout".to_string(),
+                message: format!("{component} timed out after {timeout_ms} ms"),
+                suggested_command: None,
+                details: Some(serde_json::json!({
+                    "component": component,
+                    "timeout_ms": timeout_ms
+                })),
             },
             ToolError::Internal(s) => ToolErrorBody {
                 code: "internal_error".to_string(),

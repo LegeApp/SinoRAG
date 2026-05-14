@@ -13,7 +13,7 @@ pub fn docs_payload(tool: Option<&str>) -> Value {
     }
 
     json!({
-        "overview": "SinoRAG tools are JSON commands intended for agents and scripts. Start with status, then use evidence-search for exact evidence, hybrid-discover for discovery, and passage/expand-context-adaptive for context.",
+        "overview": "SinoRAG tools are JSON commands intended for agents and scripts. Start with status, then use evidence-search for exact evidence, hybrid-discover for discovery, source-read for continuous close reading, and passage/expand-context-adaptive for targeted context.",
         "workflow": [
             "status: verify which indexes are available in the pack.",
             "plan-tools: choose the recommended workflow tool sequence for a task.",
@@ -23,7 +23,8 @@ pub fn docs_payload(tool: Option<&str>) -> Value {
             "heading-search: find section or heading names before searching inside a scope.",
             "cluster-hits: answer where the phrase occurs by work or division.",
             "trace-term-usage: answer how usage is distributed by period, canon, author, or work.",
-            "passage or expand-context-adaptive: retrieve full context for selected hits."
+            "source-read: read a source sequentially in cursor-based chunks after search/discovery identifies a work or passage.",
+            "passage or expand-context-adaptive: retrieve compact or adaptive context for selected hits."
         ],
         "important_distinctions": {
             "trace-term-usage_vs_cluster-hits": "trace-term-usage is for analytical distribution by metadata buckets such as period, canon, author, or work. cluster-hits is for navigational clustering by catalog outline nodes such as work or division, with representative passages.",
@@ -36,6 +37,8 @@ pub fn docs_payload(tool: Option<&str>) -> Value {
             "first attestation": "evidence-search",
             "absence or negative evidence": "evidence-search",
             "related passages": "hybrid-discover",
+            "continuous source reading": "source-read",
+            "read around a passage": "source-read",
             "one passage investigation": "source-investigate",
             "scope comparison": "scope-profile",
             "artifact generation": "report-from-evidence",
@@ -76,6 +79,7 @@ const DOCS: &[ToolDoc] = &[
     ToolDoc { name: "search", purpose: "Quick corpus-wide exact phrase lookup.", use_when: "Use for ordinary text search across every loaded passage. Add mode=clusters, trace, or all for grouped summaries.", notes: "Layered: phrase index when available, parquet verification, parquet scan fallback. brief=true suppresses verbose representative metadata." },
     ToolDoc { name: "heading-search", purpose: "Find headings, section names, and heading paths.", use_when: "Use when the query is a title, case heading, section label, or when you need a work/section scope before text search.", notes: "Works with passages.parquet alone; catalog indexes are not required." },
     ToolDoc { name: "passage", purpose: "Retrieve one passage by passage_id.", use_when: "Use after search or cluster tools identify an exact passage.", notes: "Returns compact passage text and basic work metadata." },
+    ToolDoc { name: "source-read", purpose: "Read an ordered source stream in stable, cursor-based chunks.", use_when: "Use when search/discovery has identified a work or passage and the agent needs to inspect the source continuously instead of piecemeal snippets.", notes: "Returns citeable main text plus labeled overlap/preview segments, explicit cursors, location metadata, and reading-state hints. V1 supports chunk reading over passage order." },
     ToolDoc { name: "canonical-source", purpose: "Find canon-side source passages for a phrase.", use_when: "Use for source verification, citation dependence, and sutra-side candidates.", notes: "Filters toward rows with canon metadata." },
     ToolDoc { name: "validate-adjudication", purpose: "Validate adjudication JSON structure.", use_when: "Use before graph/report building from adjudication files.", notes: "Checks structure, not scholarly correctness." },
     ToolDoc { name: "graph-build", purpose: "Build an evidence graph from adjudication JSON.", use_when: "Use after adjudication is validated and you need graph artifacts.", notes: "Writes output files." },
@@ -99,6 +103,7 @@ const DOCS: &[ToolDoc] = &[
     ToolDoc { name: "cluster-hits", purpose: "Cluster phrase hits by work or division.", use_when: "Use to answer where hits are concentrated in the corpus outline.", notes: "This is navigational clustering. For period/canon/author distributions, use trace-term-usage." },
     ToolDoc { name: "absence-check", purpose: "Check whether a phrase appears within a specific scope.", use_when: "Use for negative evidence in a work, canon, period, or node.", notes: "Absence is only meaningful for the loaded corpus and selected scope." },
     ToolDoc { name: "evidence-search", purpose: "Run exact phrase evidence search plus optional summaries.", use_when: "Use as the default agent tool for phrase evidence, attestation, history, term usage, and clusters.", notes: "Wraps simpler exact-evidence tools and reports index/fallback details." },
+    ToolDoc { name: "batch-evidence-search", purpose: "Run compact exact searches for multiple phrases.", use_when: "Use for quick triage over a list of known phrases before selecting individual phrases for full evidence-search.", notes: "Returns hit counts and sample passage IDs only; use evidence-search for attestation/history details." },
     ToolDoc { name: "hybrid-discover", purpose: "Merge semantic and lexical discovery candidates.", use_when: "Use for broader candidate finding from a seed passage or external query embedding.", notes: "Labels vector-only hits as semantic candidates, not evidence." },
     ToolDoc { name: "source-investigate", purpose: "Gather context, frontier, similarity, vector neighbors, and phrase histories for one seed.", use_when: "Use when beginning a source-dependence or passage-level investigation.", notes: "Optional indexes are used when present; component statuses explain unavailable or failed pieces." },
     ToolDoc { name: "scope-profile", purpose: "Compare two corpus scopes and optionally trace a phrase.", use_when: "Use for period/canon/work vocabulary comparison and scoped term usage.", notes: "Wraps compare-usage and trace-term-usage." },

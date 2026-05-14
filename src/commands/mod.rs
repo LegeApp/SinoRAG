@@ -1358,11 +1358,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             pack,
             format,
             include_examples,
+            include_schemas,
         } => {
             tools_manifest::run(tools_manifest::ToolsManifestArgs {
                 pack,
                 format,
                 include_examples,
+                include_schemas,
             })
             .await
         }
