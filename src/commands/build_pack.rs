@@ -9,10 +9,11 @@ use crate::catalog_index::CorpusCatalogIndex;
 use crate::document_table::{match_index_fingerprint, DocumentTable, IndexCoverage};
 use crate::pack::{
     self, IndexRef, IndexSet, Pack, DEFAULT_CATALOG, DEFAULT_DOC_TABLE, DEFAULT_PHRASE,
-    DEFAULT_TFIDF,
+    DEFAULT_TFIDF, DEFAULT_VECTOR,
 };
 use crate::phrase_index::PhraseIndex;
 use crate::tfidf::index::TfidfIndex;
+use crate::vector_index::VectorIndex;
 use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -163,6 +164,37 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
     } else {
         eprintln!("[4/5] TF-IDF index not present (skipping)");
     }
+
+    // --- vector index (optional) -----------------------------------------
+    let vector_path = pack_root.join(DEFAULT_VECTOR);
+    let vector_present = vector_path.exists();
+    let mut vector_info_holder: Option<serde_json::Value> = None;
+    if vector_present {
+        eprintln!("[4b/5] Validating vector index...");
+        let info = VectorIndex::header_info(&vector_path)
+            .with_context(|| format!("read header {}", vector_path.display()))?;
+        let fp = info
+            .get("doc_table_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if match_index_fingerprint(&doc_table, &doc_table_path, fp)?.is_none() {
+            return Err(anyhow!(
+                "vector index fingerprint {} matches neither current doc_table {} nor lineage base. Rebuild vector index.",
+                short(fp),
+                short(&dt_fp)
+            ));
+        }
+        eprintln!(
+            "      OK: {} rows, dim {}",
+            info.get("row_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            info.get("embedding_dim")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        );
+        vector_info_holder = Some(info);
+    } else {
+        eprintln!("[4b/5] vector index not present (skipping)");
+    }
     // Coverage is recorded by the registry populator + manifest below.
     let _ = (&phrase_coverage, &tfidf_coverage);
 
@@ -202,6 +234,12 @@ pub fn run(pack_root: PathBuf, pack_id: Option<String>) -> Result<()> {
             path: PathBuf::from(DEFAULT_TFIDF),
             doc_table_fingerprint: dt_fp.clone(),
             file_bytes: fs::metadata(&tfidf_path).map(|m| m.len()).unwrap_or(0),
+            params_hash: None,
+        }),
+        vector: vector_info_holder.as_ref().map(|_| IndexRef {
+            path: PathBuf::from(DEFAULT_VECTOR),
+            doc_table_fingerprint: dt_fp.clone(),
+            file_bytes: fs::metadata(&vector_path).map(|m| m.len()).unwrap_or(0),
             params_hash: None,
         }),
     };

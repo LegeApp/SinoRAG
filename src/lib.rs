@@ -24,3 +24,4 @@ pub mod templates;
 pub mod text_analyzer;
 pub mod tfidf;
 pub mod tools;
+pub mod vector_index;

@@ -92,6 +92,44 @@ pub enum IndexCommand {
         #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
     },
+
+    /// Export passage records for external embedding generation.
+    VectorExport {
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/vector_input.jsonl")]
+        out: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
+    /// Build the vector index from external embedding JSONL.
+    VectorBuild {
+        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
+        doc_table: PathBuf,
+        #[arg(long)]
+        embeddings: PathBuf,
+        #[arg(long, default_value = "data/derived/vector.index")]
+        out: PathBuf,
+        #[arg(long)]
+        model_id: String,
+        #[arg(long, default_value = "unknown")]
+        model_revision: String,
+        #[arg(long, default_value_t = 32)]
+        max_nb_connection: usize,
+        #[arg(long, default_value_t = 200)]
+        ef_construction: usize,
+        #[arg(long, default_value_t = 16)]
+        nb_layer: usize,
+    },
+
+    /// Print vector-index metadata.
+    VectorInfo {
+        #[arg(long, default_value = "data/derived/vector.index")]
+        index: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1144,6 +1182,8 @@ pub enum Command {
         #[arg(long)]
         tfidf_index: Option<PathBuf>,
         #[arg(long)]
+        vector_index: Option<PathBuf>,
+        #[arg(long)]
         catalog_index: Option<PathBuf>,
         #[arg(long)]
         doc_table: Option<PathBuf>,
@@ -1179,6 +1219,8 @@ pub enum Command {
         phrase_index: Option<PathBuf>,
         #[arg(long)]
         tfidf_index: Option<PathBuf>,
+        #[arg(long)]
+        vector_index: Option<PathBuf>,
         #[arg(long)]
         catalog_index: Option<PathBuf>,
         #[arg(long)]

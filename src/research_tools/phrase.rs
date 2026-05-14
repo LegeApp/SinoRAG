@@ -14,7 +14,7 @@ pub async fn phrase_rows_with_explicit_doc_table(
     phrase: &str,
     limit: usize,
     doc_range: Option<(u32, u32)>,
-    canon: Option<&str>,
+    canon: Option<&[String]>,
     period: Option<&str>,
 ) -> Result<(Vec<Value>, Value)> {
     let normalized = normalize_zh(phrase);
@@ -82,7 +82,8 @@ pub async fn phrase_rows_with_explicit_doc_table(
                         return false;
                     }
                     if let Some(canon) = canon {
-                        if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
+                        let value = row.get("canon").and_then(|v| v.as_str()).unwrap_or("");
+                        if !canon.iter().any(|c| c == value) {
                             return false;
                         }
                     }
@@ -158,12 +159,12 @@ async fn parquet_global_rows(
     store: &DataFusionStore,
     phrase: &str,
     limit: usize,
-    canon: Option<&str>,
+    canon: Option<&[String]>,
     period: Option<&str>,
 ) -> Result<Vec<Value>> {
     let mut spec = SearchSpec::exact_phrase(phrase.to_string(), limit);
     if let Some(canon) = canon {
-        spec.canon = vec![canon.to_string()];
+        spec.canon = canon.to_vec();
     }
     let mut rows = exact_phrase_rows(store, &spec).await?;
     if let Some(period) = period {
@@ -180,7 +181,7 @@ async fn doc_range_rows(
     limit: usize,
     lo: u32,
     hi: u32,
-    canon: Option<&str>,
+    canon: Option<&[String]>,
     period: Option<&str>,
 ) -> Result<(Vec<Value>, Value)> {
     let normalized = normalize_zh(phrase);
@@ -197,7 +198,8 @@ async fn doc_range_rows(
             return false;
         }
         if let Some(canon) = canon {
-            if row.get("canon").and_then(|v| v.as_str()).unwrap_or("") != canon {
+            let value = row.get("canon").and_then(|v| v.as_str()).unwrap_or("");
+            if !canon.iter().any(|c| c == value) {
                 return false;
             }
         }

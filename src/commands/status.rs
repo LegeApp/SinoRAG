@@ -15,6 +15,7 @@ pub fn run(data: PathBuf) -> Result<()> {
     let catalog_index = derived.join("catalog.index");
     let phrase_index = derived.join("phrase.index");
     let tfidf_index = derived.join("tfidf.index");
+    let vector_index = derived.join("vector.index");
     let registry = derived.join("registry.sqlite");
 
     println!("SinoRAGD status — data root: {}", data.display());
@@ -45,6 +46,11 @@ pub fn run(data: PathBuf) -> Result<()> {
         "tfidf.index",
         &tfidf_index,
         "optional — similarity / frontier",
+    );
+    report(
+        "vector.index",
+        &vector_index,
+        "optional — semantic discovery",
     );
     println!();
 
@@ -88,6 +94,11 @@ pub fn run(data: PathBuf) -> Result<()> {
         shown_any = true;
     }
     println!("  • Single tool call:  `sinorag tool-call search --json '{{\"phrase\":\"...\"}}'`");
+    if !vector_index.exists() {
+        println!(
+            "  • Vector discovery: `sinorag index vector-export`, embed externally, then `sinorag index vector-build`"
+        );
+    }
     println!(
         "  • Batch tool calls:  `sinorag run-tools --input jobs.jsonl --output results.jsonl`"
     );

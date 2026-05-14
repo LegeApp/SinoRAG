@@ -6,6 +6,7 @@ use crate::text_analyzer::{analyze, AnalyzeOptions, AnalyzeScratch, FilterMode};
 use crate::tfidf::TfidfIndex;
 use crate::tools::errors::ToolError;
 use crate::tools::spec::{ToolSafety, ToolSpec};
+use crate::vector_index::VectorIndex;
 use anyhow::Result;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ pub struct EngineConfig {
     pub passages_parquet: Option<PathBuf>,
     pub phrase_index: Option<PathBuf>,
     pub tfidf_index: Option<PathBuf>,
+    pub vector_index: Option<PathBuf>,
     pub catalog_index: Option<PathBuf>,
     pub doc_table: Option<PathBuf>,
     pub registry: Option<PathBuf>,
@@ -35,6 +37,7 @@ impl Default for EngineConfig {
             passages_parquet: None,
             phrase_index: None,
             tfidf_index: None,
+            vector_index: None,
             catalog_index: None,
             doc_table: None,
             registry: None,
@@ -54,6 +57,7 @@ pub struct ToolEngine {
     passages: OnceCell<Arc<DataFusionStore>>,
     phrase: OnceCell<Arc<PhraseIndex>>,
     tfidf: OnceCell<Arc<TfidfIndex>>,
+    vector: OnceCell<Arc<VectorIndex>>,
     catalog: OnceCell<Arc<CorpusCatalogIndex>>,
     doc_table: OnceCell<Arc<DocumentTable>>,
     registry: OnceCell<Arc<()>>, // Placeholder - Registry may not exist yet
@@ -117,6 +121,17 @@ fn brief_row(row: &serde_json::Value) -> serde_json::Value {
         "period": row.get("period").and_then(|v| v.as_str()).unwrap_or(""),
         "zh_quote": row.get("zh_text_raw").and_then(|v| v.as_str()).unwrap_or(""),
     })
+}
+
+fn opt_str(row: &serde_json::Value, key: &str) -> Option<String> {
+    row.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn char_prefix(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn count_unique_ngrams_with_terms(
@@ -187,6 +202,7 @@ impl ToolEngine {
             passages: OnceCell::new(),
             phrase: OnceCell::new(),
             tfidf: OnceCell::new(),
+            vector: OnceCell::new(),
             catalog: OnceCell::new(),
             doc_table: OnceCell::new(),
             registry: OnceCell::new(),
@@ -258,6 +274,27 @@ impl ToolEngine {
         Err(anyhow::anyhow!("Cannot resolve tfidf.index path"))
     }
 
+    /// Resolve the vector index path.
+    pub fn resolve_vector_path(&self) -> Result<PathBuf> {
+        if let Some(ref path) = self.config.vector_index {
+            return Ok(path.clone());
+        }
+
+        if let Some(pack) = self.config.pack.as_ref() {
+            let pack_path = pack.join(crate::pack::DEFAULT_VECTOR);
+            if pack_path.exists() {
+                return Ok(pack_path);
+            }
+        }
+
+        let default = PathBuf::from("data/derived/vector.index");
+        if default.exists() {
+            return Ok(default);
+        }
+
+        Err(ToolError::MissingVectorIndex { path: default }.into_anyhow())
+    }
+
     /// Resolve a phrase index path if present, and validate it against the
     /// active doc table before any doc_id-bearing lookup uses it.
     pub async fn optional_phrase_path(&self) -> Result<Option<PathBuf>> {
@@ -296,6 +333,12 @@ impl ToolEngine {
             .unwrap_or("");
         self.ensure_index_matches_doc_table("TF-IDF index", path, fingerprint)
             .await
+    }
+
+    async fn ensure_vector_index_matches_doc_table(&self, index: &VectorIndex) -> Result<()> {
+        let doc_table_path = self.resolve_doc_table_path()?;
+        let doc_table = self.doc_table().await?;
+        crate::vector_index::ensure_matches_doc_table(index, &doc_table, &doc_table_path)
     }
 
     async fn ensure_index_matches_doc_table(
@@ -388,6 +431,19 @@ impl ToolEngine {
         Err(anyhow::anyhow!("Cannot resolve registry.sqlite path"))
     }
 
+    /// Resolve where registry.sqlite should live, even when it does not exist yet.
+    pub fn registry_path_or_default(&self) -> PathBuf {
+        if let Some(ref path) = self.config.registry {
+            return path.clone();
+        }
+
+        if let Some(pack) = self.config.pack.as_ref() {
+            return pack.join(crate::pack::DEFAULT_REGISTRY);
+        }
+
+        PathBuf::from("data/derived/registry.sqlite")
+    }
+
     /// Get or load the passages store
     pub async fn passages(&self) -> Result<Arc<DataFusionStore>> {
         self.passages
@@ -418,6 +474,19 @@ impl ToolEngine {
                 let path = self.resolve_tfidf_path()?;
                 self.ensure_tfidf_index_matches_doc_table(&path).await?;
                 Ok(Arc::new(TfidfIndex::open(&path)?))
+            })
+            .await
+            .map(Clone::clone)
+    }
+
+    /// Get or load the vector index.
+    pub async fn vector(&self) -> Result<Arc<VectorIndex>> {
+        self.vector
+            .get_or_try_init(|| async {
+                let path = self.resolve_vector_path()?;
+                let index = VectorIndex::open(&path)?;
+                self.ensure_vector_index_matches_doc_table(&index).await?;
+                Ok(Arc::new(index))
             })
             .await
             .map(Clone::clone)
@@ -527,6 +596,7 @@ impl ToolEngine {
         let passages_parquet_exists = self.resolve_passages_path().is_ok();
         let phrase_index_exists = self.resolve_phrase_path().is_ok();
         let tfidf_index_exists = self.resolve_tfidf_path().is_ok();
+        let vector_index_exists = self.resolve_vector_path().is_ok();
         let catalog_index_exists = self.resolve_catalog_path().is_ok();
         let doc_table_exists = self.resolve_doc_table_path().is_ok();
         let registry_exists = self.resolve_registry_path().is_ok();
@@ -537,6 +607,7 @@ impl ToolEngine {
             passages_parquet_exists,
             phrase_index_exists,
             tfidf_index_exists,
+            vector_index_exists,
             catalog_index_exists,
             doc_table_exists,
             registry_exists,
@@ -652,10 +723,10 @@ impl ToolEngine {
             None
         };
 
-        let canon_for_index = if canon.len() == 1 {
-            Some(canon[0].as_str())
-        } else {
+        let canon_for_index = if canon.is_empty() {
             None
+        } else {
+            Some(canon.as_slice())
         };
         let period_for_index = if period.len() == 1 {
             Some(period[0].as_str())
@@ -701,7 +772,12 @@ impl ToolEngine {
                     ));
                 }
                 if let Some(canon) = canon_for_index {
-                    where_parts.push(format!("canon = {}", sql_literal(canon)));
+                    let quoted = canon
+                        .iter()
+                        .map(|c| sql_literal(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    where_parts.push(format!("canon IN ({quoted})"));
                 }
                 if let Some(period) = period_for_index {
                     where_parts.push(format!("period = {}", sql_literal(period)));
@@ -1533,7 +1609,10 @@ impl ToolEngine {
         let passages = self.passages().await?;
         let tfidf = self.tfidf().await?;
         let doc_table = self.doc_table().await?;
-        let registry_path = self.resolve_registry_path()?;
+        let registry_path = self.registry_path_or_default();
+        if !registry_path.exists() {
+            registry::init_registry(&registry_path)?;
+        }
 
         // Get seed passage
         let seed_row = passages.get_passage(&req.seed).await?;
@@ -2732,7 +2811,11 @@ impl ToolEngine {
             &req.phrase,
             req.limit,
             doc_range,
-            req.scope_canon.as_deref(),
+            if req.scope_canon.is_empty() {
+                None
+            } else {
+                Some(req.scope_canon.as_slice())
+            },
             req.scope_period.as_deref(),
         )
         .await?;
@@ -2757,6 +2840,583 @@ impl ToolEngine {
                 phrase: phrase_strategy,
                 limit: req.limit,
             },
+        })
+    }
+
+    pub async fn vector_info_impl(
+        &self,
+        _req: crate::tools::requests::VectorInfoRequest,
+    ) -> Result<crate::tools::responses::VectorInfoResponse> {
+        use crate::tools::responses::VectorInfoResponse;
+
+        let path = self.resolve_vector_path()?;
+        let info = crate::vector_index::VectorIndex::header_info(&path)?;
+        let doc_table = self.doc_table().await?;
+        let doc_table_path = self.resolve_doc_table_path()?;
+        let fp = info
+            .get("doc_table_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let doc_table_fingerprint_match =
+            crate::document_table::match_index_fingerprint(&doc_table, &doc_table_path, fp)?
+                .is_some();
+        Ok(VectorInfoResponse {
+            schema: "sinorag-vector-info-v1",
+            index_path: path.display().to_string(),
+            info,
+            doc_table_fingerprint_match,
+        })
+    }
+
+    pub async fn vector_neighbors_impl(
+        &self,
+        req: crate::tools::requests::VectorNeighborsRequest,
+    ) -> Result<crate::tools::responses::VectorNeighborsResponse> {
+        use crate::tools::errors::ToolError;
+        use crate::tools::responses::{VectorNeighborHit, VectorNeighborsResponse};
+
+        let modes = req.seed_passage_id.is_some() as u8
+            + req.query_embedding.is_some() as u8
+            + req.query_text.is_some() as u8;
+        if modes != 1 {
+            return Err(ToolError::InvalidArgs(
+                "provide exactly one of seed_passage_id, query_embedding, or query_text"
+                    .to_string(),
+            )
+            .into_anyhow());
+        }
+        if req.query_text.is_some() {
+            return Err(ToolError::QueryEmbeddingProviderNotConfigured.into_anyhow());
+        }
+
+        let vector = self.vector().await?;
+        let doc_table = self.doc_table().await?;
+        let (query_mode, seed_passage_id, query) = if let Some(seed) = req.seed_passage_id.clone() {
+            let doc_id = doc_table.doc_id(&seed).ok_or_else(|| {
+                anyhow::anyhow!("Seed passage not found in DocumentTable: {seed}")
+            })?;
+            let query = vector
+                .vector_for_doc_id(doc_id)
+                .ok_or_else(|| anyhow::anyhow!("Seed doc_id {doc_id} has no vector row"))?;
+            ("seed_passage".to_string(), Some(seed), query)
+        } else {
+            (
+                "query_embedding".to_string(),
+                None,
+                req.query_embedding.clone().unwrap_or_default(),
+            )
+        };
+
+        let raw_hits = vector.search_embedding(
+            &query,
+            req.k + seed_passage_id.is_some() as usize,
+            req.ef_search,
+        )?;
+        let mut ids = Vec::new();
+        let seed_doc_id = seed_passage_id
+            .as_deref()
+            .and_then(|seed| doc_table.doc_id(seed));
+        let mut hits = Vec::new();
+        for hit in raw_hits {
+            if Some(hit.doc_id) == seed_doc_id {
+                continue;
+            }
+            if let Some(pid) = doc_table.passage_id(hit.doc_id) {
+                ids.push(pid.to_string());
+                hits.push(hit);
+            }
+            if hits.len() >= req.k.max(1) {
+                break;
+            }
+        }
+
+        let rows = if req.include_text && !ids.is_empty() {
+            self.passages()
+                .await?
+                .passages_by_ids(
+                    &ids,
+                    "passage_id, source_work_id, main_title, heading, period, zh_text_raw",
+                )
+                .await?
+        } else {
+            Vec::new()
+        };
+        let by_id: FxHashMap<String, serde_json::Value> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let id = row.get("passage_id").and_then(|v| v.as_str())?.to_string();
+                Some((id, row))
+            })
+            .collect();
+
+        let hit_rows = hits
+            .into_iter()
+            .filter_map(|hit| {
+                let passage_id = doc_table.passage_id(hit.doc_id)?.to_string();
+                let row = by_id.get(&passage_id);
+                Some(VectorNeighborHit {
+                    passage_id,
+                    doc_id: hit.doc_id,
+                    vector_score: hit.vector_score,
+                    source_work_id: row.and_then(|r| opt_str(r, "source_work_id")),
+                    main_title: row.and_then(|r| opt_str(r, "main_title")),
+                    heading: row.and_then(|r| opt_str(r, "heading")),
+                    period: row.and_then(|r| opt_str(r, "period")),
+                    snippet: row
+                        .and_then(|r| opt_str(r, "zh_text_raw"))
+                        .map(|s| char_prefix(&s, 160)),
+                    warning: "semantic-neighbor-not-exact-evidence".to_string(),
+                })
+            })
+            .collect();
+
+        Ok(VectorNeighborsResponse {
+            schema: "sinorag-vector-neighbors-v1",
+            query_mode,
+            seed_passage_id,
+            model_id: vector.header.model_id.clone(),
+            model_revision: vector.header.model_revision.clone(),
+            embedding_dim: vector.header.embedding_dim,
+            distance: vector.header.distance.clone(),
+            normalized: vector.header.normalized,
+            reranked: req.rerank,
+            hits: hit_rows,
+        })
+    }
+
+    pub async fn evidence_search_impl(
+        &self,
+        req: crate::tools::requests::EvidenceSearchRequest,
+    ) -> Result<crate::tools::responses::EvidenceSearchResponse> {
+        use crate::tools::responses::EvidenceSearchResponse;
+
+        let expanded = self
+            .query_expand_terms_impl(crate::tools::requests::QueryExpandTermsRequest {
+                phrase: req.phrase.clone(),
+                mode: "all".to_string(),
+                person_aliases: Vec::new(),
+                max: 20,
+            })
+            .await?;
+        let exact = self
+            .search_impl(crate::tools::requests::SearchRequest {
+                phrase: req.phrase.clone(),
+                limit: req.limit,
+                mode: "hits".to_string(),
+                depth: "exact".to_string(),
+                group_by: "work".to_string(),
+                include_variants: false,
+                limit_per_group: 5,
+                brief: false,
+                canon: None,
+                source_work_id: None,
+                tradition: None,
+                period: None,
+                origin: None,
+                author: None,
+                title: None,
+                heading_path_prefix: None,
+            })
+            .await?;
+
+        let first_attestation = if req.include_attestation {
+            Some(
+                self.first_attestation_impl(crate::tools::requests::FirstAttestationRequest {
+                    phrase: req.phrase.clone(),
+                    scope_canon: Vec::new(),
+                    scope_period: Vec::new(),
+                    scope_source_work_id: None,
+                    limit: req.limit,
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+        let phrase_history = if req.include_history {
+            Some(
+                self.phrase_history_impl(crate::tools::requests::PhraseHistoryRequest {
+                    phrase: req.phrase.clone(),
+                    include_variants: false,
+                    timeline: true,
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+        let usage = if req.include_usage {
+            Some(
+                self.trace_term_usage_impl(crate::tools::requests::TraceTermUsageRequest {
+                    phrase: req.phrase.clone(),
+                    group_by: "period".to_string(),
+                    limit_total: req.limit.max(200),
+                    limit_per_group: 5,
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+        let clusters = if req.include_clusters {
+            Some(
+                self.cluster_hits_impl(crate::tools::requests::ClusterHitsRequest {
+                    phrase: req.phrase.clone(),
+                    cluster_by: "work".to_string(),
+                    limit_total: req.limit.max(200),
+                    limit_per_cluster: 20,
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let mut indexes_used = vec!["passages.parquet".to_string()];
+        if self.resolve_phrase_path().is_ok() {
+            indexes_used.push("phrase.index".to_string());
+        }
+        if self.resolve_doc_table_path().is_ok() {
+            indexes_used.push("doc_table.bin".to_string());
+        }
+        if self.resolve_catalog_path().is_ok() {
+            indexes_used.push("catalog.index".to_string());
+        }
+        let mut fallbacks = Vec::new();
+        if exact.search_strategy.method.contains("parquet") {
+            fallbacks.push("phrase_index_unavailable_or_not_used".to_string());
+        }
+
+        Ok(EvidenceSearchResponse {
+            schema: "sinorag-evidence-search-v1",
+            phrase: req.phrase,
+            expanded_terms: expanded.expanded,
+            exact,
+            first_attestation,
+            phrase_history,
+            usage,
+            clusters,
+            indexes_used,
+            fallbacks,
+        })
+    }
+
+    pub async fn hybrid_discover_impl(
+        &self,
+        req: crate::tools::requests::HybridDiscoverRequest,
+    ) -> Result<crate::tools::responses::HybridDiscoverResponse> {
+        use crate::tools::responses::{HybridDiscoverHit, HybridDiscoverResponse};
+
+        if req.seed_passage_id.is_none() && req.query_embedding.is_none() {
+            return Err(ToolError::InvalidArgs(
+                "provide seed_passage_id or query_embedding".to_string(),
+            )
+            .into_anyhow());
+        }
+
+        let mut warnings = Vec::new();
+        let mut indexes_used = Vec::new();
+        let vector_neighbors = match self
+            .vector_neighbors_impl(crate::tools::requests::VectorNeighborsRequest {
+                seed_passage_id: req.seed_passage_id.clone(),
+                query_embedding: req.query_embedding.clone(),
+                query_text: None,
+                k: req.limit,
+                ef_search: 64,
+                include_text: true,
+                rerank: true,
+            })
+            .await
+        {
+            Ok(v) => {
+                indexes_used.push("vector.index".to_string());
+                Some(v)
+            }
+            Err(err) => {
+                warnings.push(format!("vector_neighbors_unavailable: {err}"));
+                None
+            }
+        };
+
+        let tfidf_similar = if let Some(seed) = &req.seed_passage_id {
+            match self
+                .similar_impl(crate::tools::requests::SimilarRequest {
+                    seed: seed.clone(),
+                    limit: req.limit,
+                    shared_ngram_limit: 12,
+                    shared_phrase_limit: 8,
+                    min_shared_phrase_len: 4,
+                })
+                .await
+            {
+                Ok(v) => {
+                    indexes_used.push("tfidf.index".to_string());
+                    Some(v)
+                }
+                Err(err) => {
+                    warnings.push(format!("tfidf_similar_unavailable: {err}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let context = if req.include_context {
+            if let Some(seed) = &req.seed_passage_id {
+                self.expand_context_adaptive_impl(
+                    crate::tools::requests::ExpandContextAdaptiveRequest {
+                        passage_id: seed.clone(),
+                        max_chars: 5000,
+                    },
+                )
+                .await
+                .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut merged: FxHashMap<String, HybridDiscoverHit> = FxHashMap::default();
+        if let Some(v) = &vector_neighbors {
+            for hit in &v.hits {
+                merged.insert(
+                    hit.passage_id.clone(),
+                    HybridDiscoverHit {
+                        passage_id: hit.passage_id.clone(),
+                        labels: vec!["semantic_candidate".to_string()],
+                        vector_score: Some(hit.vector_score),
+                        tfidf_score: None,
+                        title: hit.main_title.clone(),
+                        snippet: hit.snippet.clone(),
+                    },
+                );
+            }
+        }
+        if let Some(s) = &tfidf_similar {
+            for item in &s.similar_passages {
+                let Some(pid) = item.get("passage_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let entry = merged.entry(pid.to_string()).or_insert(HybridDiscoverHit {
+                    passage_id: pid.to_string(),
+                    labels: Vec::new(),
+                    vector_score: None,
+                    tfidf_score: None,
+                    title: opt_str(item, "main_title"),
+                    snippet: opt_str(item, "zh_text_raw").map(|s| char_prefix(&s, 160)),
+                });
+                if !entry.labels.iter().any(|l| l == "lexical_parallel") {
+                    entry.labels.push("lexical_parallel".to_string());
+                }
+                entry.tfidf_score = item
+                    .get("tfidf_cosine")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as f32);
+            }
+        }
+        let mut merged_hits: Vec<_> = merged.into_values().collect();
+        merged_hits.sort_by(|a, b| {
+            let sa = a.vector_score.unwrap_or(0.0) + a.tfidf_score.unwrap_or(0.0);
+            let sb = b.vector_score.unwrap_or(0.0) + b.tfidf_score.unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        merged_hits.truncate(req.limit);
+
+        Ok(HybridDiscoverResponse {
+            schema: "sinorag-hybrid-discover-v1",
+            seed_passage_id: req.seed_passage_id,
+            vector_neighbors,
+            tfidf_similar,
+            context,
+            merged_hits,
+            indexes_used,
+            warnings,
+        })
+    }
+
+    pub async fn source_investigate_impl(
+        &self,
+        req: crate::tools::requests::SourceInvestigateRequest,
+    ) -> Result<crate::tools::responses::SourceInvestigateResponse> {
+        use crate::tools::responses::SourceInvestigateResponse;
+
+        let seed = self
+            .passage_impl(crate::tools::requests::PassageRequest {
+                id: req.seed_passage_id.clone(),
+            })
+            .await?;
+        let context = if req.include_context {
+            self.expand_context_adaptive_impl(
+                crate::tools::requests::ExpandContextAdaptiveRequest {
+                    passage_id: req.seed_passage_id.clone(),
+                    max_chars: req.max_context_chars,
+                },
+            )
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let frontier = if req.include_frontier {
+            self.frontier_impl(crate::tools::requests::FrontierRequest {
+                seed: req.seed_passage_id.clone(),
+                limit: req.limit,
+                phrase_limit: 20,
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let similar = if req.include_similar {
+            self.similar_impl(crate::tools::requests::SimilarRequest {
+                seed: req.seed_passage_id.clone(),
+                limit: req.limit,
+                shared_ngram_limit: 12,
+                shared_phrase_limit: 8,
+                min_shared_phrase_len: 4,
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let vector_neighbors = if req.include_vector {
+            self.vector_neighbors_impl(crate::tools::requests::VectorNeighborsRequest {
+                seed_passage_id: Some(req.seed_passage_id.clone()),
+                query_embedding: None,
+                query_text: None,
+                k: req.limit,
+                ef_search: 64,
+                include_text: true,
+                rerank: true,
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let mut phrase_histories = Vec::new();
+        for phrase in &req.phrases {
+            if let Ok(history) = self
+                .phrase_history_impl(crate::tools::requests::PhraseHistoryRequest {
+                    phrase: phrase.clone(),
+                    include_variants: false,
+                    timeline: true,
+                })
+                .await
+            {
+                phrase_histories.push(history);
+            }
+        }
+        let suggested_next_searches = req
+            .phrases
+            .iter()
+            .map(|p| format!("evidence-search phrase={p}"))
+            .chain(std::iter::once(format!(
+                "hybrid-discover seed_passage_id={}",
+                req.seed_passage_id
+            )))
+            .collect();
+
+        Ok(SourceInvestigateResponse {
+            schema: "sinorag-source-investigate-v1",
+            seed_passage_id: req.seed_passage_id,
+            seed,
+            context,
+            frontier,
+            similar,
+            vector_neighbors,
+            phrase_histories,
+            suggested_next_searches,
+        })
+    }
+
+    pub async fn scope_profile_impl(
+        &self,
+        req: crate::tools::requests::ScopeProfileRequest,
+    ) -> Result<crate::tools::responses::ScopeProfileResponse> {
+        use crate::tools::responses::ScopeProfileResponse;
+
+        let comparison = self
+            .compare_usage_impl(crate::tools::requests::CompareUsageRequest {
+                scope_a_node_id: req.scope_a_node_id,
+                scope_a_work_id: req.scope_a_work_id,
+                scope_a_canon: req.scope_a_canon,
+                scope_a_period: req.scope_a_period,
+                scope_b_node_id: req.scope_b_node_id,
+                scope_b_work_id: req.scope_b_work_id,
+                scope_b_canon: req.scope_b_canon,
+                scope_b_period: req.scope_b_period,
+                gram_len: req.gram_len,
+                limit_passages: req.limit_passages,
+                limit_terms: req.limit_terms,
+            })
+            .await?;
+        let term_usage = if let Some(phrase) = &req.phrase {
+            Some(
+                self.trace_term_usage_impl(crate::tools::requests::TraceTermUsageRequest {
+                    phrase: phrase.clone(),
+                    group_by: "period".to_string(),
+                    limit_total: req.limit_passages,
+                    limit_per_group: 5,
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+        Ok(ScopeProfileResponse {
+            schema: "sinorag-scope-profile-v1",
+            phrase: req.phrase,
+            comparison,
+            term_usage,
+        })
+    }
+
+    pub async fn report_from_evidence_impl(
+        &self,
+        req: crate::tools::requests::ReportFromEvidenceRequest,
+    ) -> Result<crate::tools::responses::ReportFromEvidenceResponse> {
+        use crate::tools::responses::ReportFromEvidenceResponse;
+
+        let validation = self
+            .validate_adjudication_impl(crate::tools::requests::ValidateAdjudicationRequest {
+                path: req.adjudication.clone(),
+            })
+            .await?;
+        if !validation.valid {
+            return Ok(ReportFromEvidenceResponse {
+                schema: "sinorag-report-from-evidence-v1",
+                validation,
+                graph: None,
+                report: None,
+            });
+        }
+        let graph = self
+            .graph_build_impl(crate::tools::requests::GraphBuildRequest {
+                input: req.adjudication.clone(),
+                kind: req.kind,
+                name: req.name,
+                out: req.graph_out.clone(),
+            })
+            .await?;
+        let report = self
+            .report_build_impl(crate::tools::requests::ReportBuildRequest {
+                inputs: vec![req.adjudication, req.graph_out],
+                out: req.report_out,
+                title: req.title,
+                essay_max_pages: 5,
+            })
+            .await?;
+        Ok(ReportFromEvidenceResponse {
+            schema: "sinorag-report-from-evidence-v1",
+            validation,
+            graph: Some(graph),
+            report: Some(report),
         })
     }
 

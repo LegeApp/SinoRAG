@@ -37,6 +37,9 @@ pub struct RunToolsArgs {
     pub tfidf_index: Option<PathBuf>,
 
     #[arg(long)]
+    pub vector_index: Option<PathBuf>,
+
+    #[arg(long)]
     pub catalog_index: Option<PathBuf>,
 
     #[arg(long)]
@@ -59,6 +62,7 @@ pub async fn run(args: RunToolsArgs) -> Result<()> {
         passages_parquet: args.passages_parquet,
         phrase_index: args.phrase_index,
         tfidf_index: args.tfidf_index,
+        vector_index: args.vector_index,
         catalog_index: args.catalog_index,
         doc_table: args.doc_table,
         registry: args.registry,

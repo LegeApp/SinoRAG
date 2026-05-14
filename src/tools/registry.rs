@@ -416,6 +416,55 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
 
+        // Vector-info tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "vector-info",
+                description: "Show vector index metadata and doc-table compatibility.",
+                input_schema: schema_for::<VectorInfoRequest>(),
+                output_schema: schema_for::<VectorInfoResponse>(),
+                requires: vec!["vector.index", "doc_table.bin"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Get vector index info",
+                        args: serde_json::json!({}),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: VectorInfoRequest = serde_json::from_value(args)?;
+                let res = engine.vector_info_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Vector-neighbors tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "vector-neighbors",
+                description: "Find semantic neighbor candidates from a seed passage or external query embedding. Results are discovery candidates, not exact evidence.",
+                input_schema: schema_for::<VectorNeighborsRequest>(),
+                output_schema: schema_for::<VectorNeighborsResponse>(),
+                requires: vec!["vector.index", "doc_table.bin", "passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Find seed passage vector neighbors",
+                        args: serde_json::json!({
+                            "seed_passage_id": "B/B13/B13n0079.xml#pB13p0047a0417",
+                            "k": 25
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: VectorNeighborsRequest = serde_json::from_value(args)?;
+                let res = engine.vector_neighbors_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // Similar tool
         ToolDef {
             spec: ToolSpec {
@@ -793,6 +842,143 @@ pub fn tool_defs() -> Vec<ToolDef> {
             call: |engine, args| Box::pin(async move {
                 let req: AbsenceCheckRequest = serde_json::from_value(args)?;
                 let res = engine.absence_check_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Evidence-search wrapper
+        ToolDef {
+            spec: ToolSpec {
+                name: "evidence-search",
+                description: "Run exact phrase evidence search plus optional attestation/history/usage/cluster summaries.",
+                input_schema: schema_for::<EvidenceSearchRequest>(),
+                output_schema: schema_for::<EvidenceSearchResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Search phrase evidence",
+                        args: serde_json::json!({
+                            "phrase": "一切有為法",
+                            "limit": 25,
+                            "include_attestation": true,
+                            "include_history": true
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: EvidenceSearchRequest = serde_json::from_value(args)?;
+                let res = engine.evidence_search_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Hybrid-discover wrapper
+        ToolDef {
+            spec: ToolSpec {
+                name: "hybrid-discover",
+                description: "Combine vector and TF-IDF discovery candidates with explicit semantic/lexical labels.",
+                input_schema: schema_for::<HybridDiscoverRequest>(),
+                output_schema: schema_for::<HybridDiscoverResponse>(),
+                requires: vec!["passages.parquet", "doc_table.bin"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Hybrid discovery from a seed passage",
+                        args: serde_json::json!({
+                            "seed_passage_id": "B/B13/B13n0079.xml#pB13p0047a0417",
+                            "limit": 25
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: HybridDiscoverRequest = serde_json::from_value(args)?;
+                let res = engine.hybrid_discover_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Source-investigate wrapper
+        ToolDef {
+            spec: ToolSpec {
+                name: "source-investigate",
+                description: "Gather seed passage context, frontier, similarity, vector neighbors, and phrase histories for source investigation.",
+                input_schema: schema_for::<SourceInvestigateRequest>(),
+                output_schema: schema_for::<SourceInvestigateResponse>(),
+                requires: vec!["passages.parquet", "doc_table.bin"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Investigate a seed passage",
+                        args: serde_json::json!({
+                            "seed_passage_id": "B/B13/B13n0079.xml#pB13p0047a0417",
+                            "phrases": ["一切有為法"],
+                            "limit": 10
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: SourceInvestigateRequest = serde_json::from_value(args)?;
+                let res = engine.source_investigate_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Scope-profile wrapper
+        ToolDef {
+            spec: ToolSpec {
+                name: "scope-profile",
+                description: "Compare two corpus scopes and optionally trace a phrase inside the same profile.",
+                input_schema: schema_for::<ScopeProfileRequest>(),
+                output_schema: schema_for::<ScopeProfileResponse>(),
+                requires: vec!["passages.parquet", "catalog.index", "doc_table.bin"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Compare usage between two canons",
+                        args: serde_json::json!({
+                            "scope_a_canon": "T",
+                            "scope_b_canon": "X",
+                            "gram_len": 1,
+                            "limit_passages": 1000
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: ScopeProfileRequest = serde_json::from_value(args)?;
+                let res = engine.scope_profile_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Report-from-evidence wrapper
+        ToolDef {
+            spec: ToolSpec {
+                name: "report-from-evidence",
+                description: "Validate adjudication, build evidence graph, and build the markdown report in one workflow.",
+                input_schema: schema_for::<ReportFromEvidenceRequest>(),
+                output_schema: schema_for::<ReportFromEvidenceResponse>(),
+                requires: vec![],
+                safety: ToolSafety::WritesOutput,
+                examples: vec![
+                    ToolExample {
+                        title: "Build graph and report",
+                        args: serde_json::json!({
+                            "adjudication": "GraphDiscovery/Runs/text-reuse-discovery/adjudications/test3.json",
+                            "graph_out": "GraphDiscovery/Runs/text-reuse-discovery/drafts/test3.graph-draft.json",
+                            "report_out": "GraphDiscovery/Runs/text-reuse-discovery/dossiers/test3.report.md",
+                            "title": "Canonical Dependence"
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: ReportFromEvidenceRequest = serde_json::from_value(args)?;
+                let res = engine.report_from_evidence_impl(req).await?;
                 Ok(serde_json::to_value(res)?)
             }),
         },

@@ -26,6 +26,9 @@ pub enum ToolError {
     #[error("missing tfidf index at {path}")]
     MissingTfidfIndex { path: PathBuf },
 
+    #[error("missing vector index at {path}")]
+    MissingVectorIndex { path: PathBuf },
+
     #[error("missing catalog index at {path}")]
     MissingCatalogIndex { path: PathBuf },
 
@@ -49,6 +52,9 @@ pub enum ToolError {
 
     #[error("invalid args: {0}")]
     InvalidArgs(String),
+
+    #[error("query embedding provider is not configured")]
+    QueryEmbeddingProviderNotConfigured,
 
     #[error("internal error: {0}")]
     Internal(String),
@@ -93,6 +99,15 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 message: format!("TF-IDF index not found at {}", path.display()),
                 suggested_command: Some(format!(
                     "sinorag index tfidf --parquet data/passages.parquet --out {}",
+                    path.display()
+                )),
+                details: Some(serde_json::json!({ "path": path.display().to_string() })),
+            },
+            ToolError::MissingVectorIndex { path } => ToolErrorBody {
+                code: "missing_vector_index".to_string(),
+                message: format!("Vector index not found at {}", path.display()),
+                suggested_command: Some(format!(
+                    "sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id MODEL --out {}",
                     path.display()
                 )),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
@@ -164,6 +179,12 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 ),
                 details: None,
             },
+            ToolError::QueryEmbeddingProviderNotConfigured => ToolErrorBody {
+                code: "query_embedding_provider_not_configured".to_string(),
+                message: "Native query_text embedding is not configured; use seed_passage_id or query_embedding.".to_string(),
+                suggested_command: None,
+                details: None,
+            },
             ToolError::Internal(s) => ToolErrorBody {
                 code: "internal_error".to_string(),
                 message: format!("Internal error: {}", s),
@@ -191,6 +212,17 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
             message: msg,
             suggested_command: Some(
                 "sinorag index tfidf --parquet data/passages.parquet --out data/derived/tfidf.index".to_string()
+            ),
+            details: None,
+        };
+    }
+
+    if msg.contains("vector") && (msg.contains("not found") || msg.contains("No such file")) {
+        return ToolErrorBody {
+            code: "missing_vector_index".to_string(),
+            message: msg,
+            suggested_command: Some(
+                "sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id MODEL --out data/derived/vector.index".to_string(),
             ),
             details: None,
         };

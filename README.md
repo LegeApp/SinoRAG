@@ -2,7 +2,7 @@
 
 **SinoRAG** is a local-first research backend for Chinese Buddhist and classical Chinese corpora.
 
-It ingests TEI/XML, Kanripo, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, catalog browsing, and JSONL-based LLM-agent research workflows.
+It ingests TEI/XML, Kanripo, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, optional vector discovery, catalog browsing, and JSONL-based LLM-agent research workflows.
 
 > Let an LLM agent research Chinese source texts with tools instead of guessing from memory.
 
@@ -37,6 +37,7 @@ sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
 - Builds a document table for stable `doc_id ↔ passage_id` mapping
 - Builds catalog indexes for corpus/work/section navigation
 - Builds TF-IDF indexes for similarity and textual reuse discovery
+- Builds optional vector indexes from external embedding JSONL for semantic discovery
 - Exposes research tools through JSON schemas for LLM agents
 - Produces structured JSON output for reports, graph generation, and downstream apps
 
@@ -85,6 +86,10 @@ sinorag optional-indexes
 # Incremental rebuilds remain available
 sinorag index phrase
 sinorag index tfidf
+
+# Optional semantic discovery index: export, embed externally, then import
+sinorag index vector-export --out data/derived/vector_input.jsonl
+sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id BAAI/bge-m3
 ```
 
 Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
@@ -93,7 +98,8 @@ Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp
 
 ```bash
 sinorag tools-manifest --include-examples
-sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
+sinorag tool-call evidence-search --json '{"phrase":"金剛經","limit":5}'
+sinorag tool-call hybrid-discover --json '{"seed_passage_id":"B/B13/B13n0079.xml#pB13p0047a0417","limit":10}'
 sinorag run-tools --input jobs.jsonl --output results.jsonl
 ```
 
@@ -113,6 +119,7 @@ data/
     catalog.index             corpus / work / outline navigation
     phrase.index           exact phrase candidate index  (optional)
     tfidf.index            similarity index              (optional)
+    vector.index           semantic discovery index       (optional)
     registry.sqlite           mutable research state        (auto-created)
 ```
 
@@ -122,24 +129,26 @@ data/
 
 Which artifacts each tool needs:
 
-| Tool | parquet | doc_table | catalog | phrase_index | tfidf | Notes |
-|---|---|---|---|---|---|---|
-| `passage` | ✓ | — | — | — | — | |
-| `search` | ✓ | — | — | optional | — | phrase_index speeds exact match |
-| `expand-context` | ✓ | — | — | — | — | pure parquet window |
-| `expand-context-adaptive` | ✓ | — | ✓ | — | — | catalog for node climbing |
-| `find-first-mention` | ✓ | ✓ | — | optional | — | phrase_index greatly speeds it up |
-| `trace-term-usage` | ✓ | ✓ | — | optional | — | |
-| `phrase-history` | ✓ | ✓ | — | optional | — | |
-| `first-attestation` | ✓ | ✓ | — | optional | — | |
-| `outline-search` | ✓ | ✓ | ✓ | optional | — | |
-| `cluster-hits` | ✓ | ✓ | ✓ | optional | — | |
-| `absence-check` | ✓ | ✓ | ✓ | optional | — | |
-| `collocation-search` | ✓ | ✓ | — | optional | — | no catalog needed |
-| `compare-usage` | ✓ | ✓ | ✓ | — | — | |
-| `similar` / `similar-batch` | ✓ | ✓ | — | — | ✓ | |
-| `frontier` / `research-packet` | ✓ | ✓ | optional | optional | optional | |
-| `query-expand-terms` | — | — | — | — | — | zero corpus deps |
+| Tool | parquet | doc_table | catalog | phrase_index | tfidf | vector | Notes |
+|---|---|---|---|---|---|---|---|
+| `passage` | ✓ | — | — | — | — | — | |
+| `search` / `evidence-search` | ✓ | optional | optional | optional | — | — | phrase_index speeds exact match |
+| `expand-context` | ✓ | — | — | — | — | — | pure parquet window |
+| `expand-context-adaptive` | ✓ | ✓ | ✓ | — | — | — | catalog for node climbing |
+| `find-first-mention` | ✓ | ✓ | — | optional | — | — | phrase_index greatly speeds it up |
+| `trace-term-usage` | ✓ | ✓ | — | optional | — | — | |
+| `phrase-history` | ✓ | ✓ | — | optional | — | — | |
+| `first-attestation` | ✓ | ✓ | — | optional | — | — | |
+| `outline-search` | ✓ | ✓ | ✓ | optional | — | — | |
+| `cluster-hits` | ✓ | ✓ | ✓ | optional | — | — | |
+| `absence-check` | ✓ | ✓ | ✓ | optional | — | — | |
+| `collocation-search` | ✓ | ✓ | — | optional | — | — | no catalog needed |
+| `compare-usage` / `scope-profile` | ✓ | ✓ | ✓ | — | — | — | |
+| `similar` / `similar-batch` | ✓ | ✓ | — | — | ✓ | — | |
+| `vector-info` / `vector-neighbors` | optional | ✓ | — | — | — | ✓ | semantic candidates, not evidence |
+| `hybrid-discover` / `source-investigate` | ✓ | ✓ | optional | optional | optional | optional | orchestrates discovery tools |
+| `frontier` / `research-packet` | ✓ | ✓ | optional | optional | optional | — | |
+| `query-expand-terms` | — | — | — | — | — | — | zero corpus deps |
 
 **Minimum viable agent workflow** (just `passage`, `search`, `expand-context`): ingest only, no heavy indexes required.
 

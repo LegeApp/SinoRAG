@@ -28,6 +28,7 @@ pub async fn run(
     let doc_table = DocumentTable::load(&doc_table_path)?;
     let catalog = CorpusCatalogIndex::load(&catalog_path)?;
     let store = DataFusionStore::open(&parquet).await?;
+    let scope_canon_filter = scope_canon.as_ref().map(std::slice::from_ref);
 
     // Determine the doc range for the scope.
     let doc_range: Option<(u32, u32)> = if let Some(nid) = scope_node_id {
@@ -54,7 +55,7 @@ pub async fn run(
         &phrase,
         limit,
         doc_range,
-        scope_canon.as_deref(),
+        scope_canon_filter,
         scope_period.as_deref(),
     )
     .await?;

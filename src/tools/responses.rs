@@ -105,6 +105,7 @@ pub struct StatusResponse {
     pub passages_parquet_exists: bool,
     pub phrase_index_exists: bool,
     pub tfidf_index_exists: bool,
+    pub vector_index_exists: bool,
     pub catalog_index_exists: bool,
     pub doc_table_exists: bool,
     pub registry_exists: bool,
@@ -456,7 +457,7 @@ pub struct AbsenceCheckResponse {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AbsenceCheckScope {
     pub work_id: Option<String>,
-    pub canon: Option<String>,
+    pub canon: Vec<String>,
     pub period: Option<String>,
     pub node_id: Option<u32>,
     pub doc_range: Option<Vec<u32>>,
@@ -466,4 +467,104 @@ pub struct AbsenceCheckScope {
 pub struct AbsenceCheckSearchStrategy {
     pub phrase: serde_json::Value,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct VectorInfoResponse {
+    pub schema: &'static str,
+    pub index_path: String,
+    pub info: serde_json::Value,
+    pub doc_table_fingerprint_match: bool,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct VectorNeighborsResponse {
+    pub schema: &'static str,
+    pub query_mode: String,
+    pub seed_passage_id: Option<String>,
+    pub model_id: String,
+    pub model_revision: String,
+    pub embedding_dim: u32,
+    pub distance: String,
+    pub normalized: bool,
+    pub reranked: bool,
+    pub hits: Vec<VectorNeighborHit>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct VectorNeighborHit {
+    pub passage_id: String,
+    pub doc_id: u32,
+    pub vector_score: f32,
+    pub source_work_id: Option<String>,
+    pub main_title: Option<String>,
+    pub heading: Option<String>,
+    pub period: Option<String>,
+    pub snippet: Option<String>,
+    pub warning: String,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct EvidenceSearchResponse {
+    pub schema: &'static str,
+    pub phrase: String,
+    pub expanded_terms: Vec<String>,
+    pub exact: SearchResponse,
+    pub first_attestation: Option<FirstAttestationResponse>,
+    pub phrase_history: Option<PhraseHistoryResponse>,
+    pub usage: Option<TraceTermUsageResponse>,
+    pub clusters: Option<ClusterHitsResponse>,
+    pub indexes_used: Vec<String>,
+    pub fallbacks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct HybridDiscoverResponse {
+    pub schema: &'static str,
+    pub seed_passage_id: Option<String>,
+    pub vector_neighbors: Option<VectorNeighborsResponse>,
+    pub tfidf_similar: Option<SimilarResponse>,
+    pub context: Option<ExpandContextAdaptiveResponse>,
+    pub merged_hits: Vec<HybridDiscoverHit>,
+    pub indexes_used: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct HybridDiscoverHit {
+    pub passage_id: String,
+    pub labels: Vec<String>,
+    pub vector_score: Option<f32>,
+    pub tfidf_score: Option<f32>,
+    pub title: Option<String>,
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceInvestigateResponse {
+    pub schema: &'static str,
+    pub seed_passage_id: String,
+    pub seed: PassageResponse,
+    pub context: Option<ExpandContextAdaptiveResponse>,
+    pub frontier: Option<FrontierResponse>,
+    pub similar: Option<SimilarResponse>,
+    pub vector_neighbors: Option<VectorNeighborsResponse>,
+    pub phrase_histories: Vec<PhraseHistoryResponse>,
+    pub suggested_next_searches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ScopeProfileResponse {
+    pub schema: &'static str,
+    pub phrase: Option<String>,
+    pub comparison: CompareUsageResponse,
+    pub term_usage: Option<TraceTermUsageResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ReportFromEvidenceResponse {
+    pub schema: &'static str,
+    pub validation: ValidateAdjudicationResponse,
+    pub graph: Option<GraphBuildResponse>,
+    pub report: Option<ReportBuildResponse>,
 }

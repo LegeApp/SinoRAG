@@ -24,6 +24,7 @@ mod templates;
 mod text_analyzer;
 mod tfidf;
 mod tools;
+mod vector_index;
 
 use anyhow::Result;
 use clap::Parser;

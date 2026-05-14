@@ -30,6 +30,7 @@ pub const DEFAULT_CATALOG: &str = "derived/catalog.index";
 pub const DEFAULT_REGISTRY: &str = "derived/registry.sqlite";
 pub const DEFAULT_PHRASE: &str = "derived/phrase.index";
 pub const DEFAULT_TFIDF: &str = "derived/tfidf.index";
+pub const DEFAULT_VECTOR: &str = "derived/vector.index";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackManifest {
@@ -63,6 +64,8 @@ pub struct IndexSet {
     pub phrase: Option<IndexRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tfidf: Option<IndexRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<IndexRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +160,13 @@ impl Pack {
         self.manifest
             .indexes
             .tfidf
+            .as_ref()
+            .map(|i| self.resolve(&i.path))
+    }
+    pub fn vector_path(&self) -> Option<PathBuf> {
+        self.manifest
+            .indexes
+            .vector
             .as_ref()
             .map(|i| self.resolve(&i.path))
     }

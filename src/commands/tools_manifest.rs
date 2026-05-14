@@ -75,6 +75,7 @@ fn resource_exists(pack_root: Option<&std::path::Path>, name: &str) -> bool {
         "catalog.index" => pack::DEFAULT_CATALOG,
         "phrase.index" => pack::DEFAULT_PHRASE,
         "tfidf.index" => pack::DEFAULT_TFIDF,
+        "vector.index" => pack::DEFAULT_VECTOR,
         "registry.sqlite" => pack::DEFAULT_REGISTRY,
         other => other,
     };
@@ -89,6 +90,7 @@ fn resource_exists(pack_root: Option<&std::path::Path>, name: &str) -> bool {
         "catalog.index" => std::path::Path::new("data/derived/catalog.index").exists(),
         "phrase.index" => std::path::Path::new("data/derived/phrase.index").exists(),
         "tfidf.index" => std::path::Path::new("data/derived/tfidf.index").exists(),
+        "vector.index" => std::path::Path::new("data/derived/vector.index").exists(),
         "registry.sqlite" => std::path::Path::new("data/derived/registry.sqlite").exists(),
         _ => false,
     }

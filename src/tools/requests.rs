@@ -336,7 +336,7 @@ pub struct AbsenceCheckRequest {
     pub scope_work_id: Option<String>,
 
     #[serde(default)]
-    pub scope_canon: Option<String>,
+    pub scope_canon: Vec<String>,
 
     #[serde(default)]
     pub scope_period: Option<String>,
@@ -477,4 +477,167 @@ pub struct OutlineSearchRequest {
 
     #[serde(default = "default_limit_per_group")]
     pub limit_per_group: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct VectorInfoRequest {}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct VectorNeighborsRequest {
+    #[serde(default)]
+    pub seed_passage_id: Option<String>,
+
+    #[serde(default)]
+    pub query_embedding: Option<Vec<f32>>,
+
+    #[serde(default)]
+    pub query_text: Option<String>,
+
+    #[serde(default = "default_vector_k")]
+    pub k: usize,
+
+    #[serde(default = "default_ef_search")]
+    pub ef_search: usize,
+
+    #[serde(default = "default_true")]
+    pub include_text: bool,
+
+    #[serde(default = "default_true")]
+    pub rerank: bool,
+}
+
+fn default_vector_k() -> usize {
+    25
+}
+
+fn default_ef_search() -> usize {
+    64
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct EvidenceSearchRequest {
+    pub phrase: String,
+
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    #[serde(default)]
+    pub include_attestation: bool,
+
+    #[serde(default)]
+    pub include_history: bool,
+
+    #[serde(default)]
+    pub include_usage: bool,
+
+    #[serde(default)]
+    pub include_clusters: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct HybridDiscoverRequest {
+    #[serde(default)]
+    pub seed_passage_id: Option<String>,
+
+    #[serde(default)]
+    pub query_embedding: Option<Vec<f32>>,
+
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    #[serde(default)]
+    pub include_context: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SourceInvestigateRequest {
+    pub seed_passage_id: String,
+
+    #[serde(default)]
+    pub phrases: Vec<String>,
+
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    #[serde(default = "default_max_chars")]
+    pub max_context_chars: usize,
+
+    #[serde(default = "default_true")]
+    pub include_context: bool,
+
+    #[serde(default = "default_true")]
+    pub include_frontier: bool,
+
+    #[serde(default = "default_true")]
+    pub include_similar: bool,
+
+    #[serde(default = "default_true")]
+    pub include_vector: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ScopeProfileRequest {
+    #[serde(default)]
+    pub phrase: Option<String>,
+
+    #[serde(default)]
+    pub scope_a_node_id: Option<u32>,
+
+    #[serde(default)]
+    pub scope_a_work_id: Option<String>,
+
+    #[serde(default)]
+    pub scope_a_canon: Option<String>,
+
+    #[serde(default)]
+    pub scope_a_period: Option<String>,
+
+    #[serde(default)]
+    pub scope_b_node_id: Option<u32>,
+
+    #[serde(default)]
+    pub scope_b_work_id: Option<String>,
+
+    #[serde(default)]
+    pub scope_b_canon: Option<String>,
+
+    #[serde(default)]
+    pub scope_b_period: Option<String>,
+
+    #[serde(default = "default_gram_len")]
+    pub gram_len: usize,
+
+    #[serde(default = "default_limit_passages")]
+    pub limit_passages: usize,
+
+    #[serde(default = "default_limit_terms")]
+    pub limit_terms: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ReportFromEvidenceRequest {
+    pub adjudication: PathBuf,
+    pub graph_out: PathBuf,
+    pub report_out: PathBuf,
+
+    #[serde(default = "default_report_kind")]
+    pub kind: String,
+
+    #[serde(default = "default_report_name")]
+    pub name: String,
+
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+fn default_report_kind() -> String {
+    "evidence".to_string()
+}
+
+fn default_report_name() -> String {
+    "evidence-report".to_string()
 }

@@ -511,10 +511,66 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
             None,
             Some(doc_table_path.clone()),
         )?;
+        initialize_registry_after_ingest(
+            &out,
+            &doc_table_path,
+            Some(&catalog_index_out),
+            Some(&opts.phrase_index_out),
+            Some(&tfidf_out_path),
+        )?;
+    } else {
+        initialize_registry_after_ingest(&out, &doc_table_path, None, None, None)?;
     }
 
     let parquet_bytes = crate::commands::estimate::dir_size(&opts.out_parquet);
     print_next_steps(opts.build_phrase_index, opts.build_tfidf, parquet_bytes);
+    Ok(())
+}
+
+fn initialize_registry_after_ingest(
+    data_root: &Path,
+    doc_table_path: &Path,
+    catalog_index_path: Option<&Path>,
+    phrase_index_path: Option<&Path>,
+    tfidf_index_path: Option<&Path>,
+) -> Result<()> {
+    let registry_path = data_root.join("derived").join("registry.sqlite");
+    crate::registry::init_registry(&registry_path)?;
+
+    let Some(catalog_index_path) = catalog_index_path else {
+        println!("initialized {}", registry_path.display());
+        return Ok(());
+    };
+    if !doc_table_path.exists() || !catalog_index_path.exists() {
+        println!("initialized {}", registry_path.display());
+        return Ok(());
+    }
+
+    let doc_table = crate::document_table::DocumentTable::load(doc_table_path)?;
+    let catalog = crate::catalog_index::CorpusCatalogIndex::load(catalog_index_path)?;
+
+    let phrase_info = phrase_index_path
+        .filter(|p| p.exists())
+        .and_then(|p| crate::phrase_index::PhraseIndex::header_info(p).ok());
+    let tfidf_info = tfidf_index_path
+        .filter(|p| p.exists())
+        .and_then(|p| crate::tfidf::index::TfidfIndex::header_info(p).ok());
+    let phrase_for_db = phrase_info
+        .as_ref()
+        .and_then(|info| phrase_index_path.map(|path| (path, info)));
+    let tfidf_for_db = tfidf_info
+        .as_ref()
+        .and_then(|info| tfidf_index_path.map(|path| (path, info)));
+
+    crate::registry::populate_identity_from_pack(
+        &registry_path,
+        &doc_table,
+        &catalog,
+        phrase_for_db,
+        tfidf_for_db,
+        data_root,
+    )?;
+    println!("initialized {}", registry_path.display());
     Ok(())
 }
 

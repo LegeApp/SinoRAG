@@ -13,6 +13,16 @@ const CATALOG_BATCH_SIZE: usize = 500;
 const BATCH_INSERT_WORK: usize = 200;
 const BATCH_INSERT_OBS: usize = 200;
 
+fn set_busy_timeout(con: &Connection, db_path: &Path) {
+    if let Err(e) = con.busy_timeout(std::time::Duration::from_secs(5)) {
+        eprintln!(
+            "WARNING: could not set SQLite busy timeout for registry {}: {}",
+            db_path.display(),
+            e
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkItem {
     pub item_id: String,
@@ -73,8 +83,7 @@ pub fn init_registry(db_path: &Path) -> Result<()> {
     let con = Connection::open(db_path)
         .with_context(|| format!("Failed to open registry database at {}", db_path.display()))?;
 
-    con.busy_timeout(std::time::Duration::from_secs(5))
-        .context("Failed to set SQLite busy timeout")?;
+    set_busy_timeout(&con, db_path);
 
     match con.pragma_update(None, "journal_mode", "WAL") {
         Ok(_) => {}
@@ -617,9 +626,7 @@ fn upsert_items_batch(db_path: &Path, parsed_items: &[ParsedArtifact]) -> Result
     let mut con =
         rusqlite::Connection::open(db_path).context("Failed to open registry database")?;
 
-    // Configure connection for concurrency
-    con.execute("PRAGMA busy_timeout=5000", [])
-        .context("Failed to set busy timeout")?;
+    set_busy_timeout(&con, db_path);
 
     let tx = con.transaction()?;
 
@@ -698,8 +705,7 @@ pub fn prior_work(registry: &Path, seed_passage_id: &str, limit: usize) -> Resul
     ensure_registry(registry)?;
 
     let con = Connection::open(registry).context("Failed to open registry database")?;
-    con.execute("PRAGMA busy_timeout=5000", [])
-        .context("Failed to set busy timeout")?;
+    set_busy_timeout(&con, registry);
     let limit = std::cmp::max(1, limit);
 
     let mut stmt = con.prepare(
@@ -751,8 +757,7 @@ pub fn phrase_status(registry: &Path, phrase: &str, limit: usize) -> Result<Valu
 
     let normalized = crate::normalize::normalize_zh(phrase);
     let con = Connection::open(registry).context("Failed to open registry database")?;
-    con.execute("PRAGMA busy_timeout=5000", [])
-        .context("Failed to set busy timeout")?;
+    set_busy_timeout(&con, registry);
     let limit = std::cmp::max(1, limit);
 
     let mut stmt = con.prepare(
@@ -806,8 +811,7 @@ pub fn work_summary(registry: &Path, limit: usize) -> Result<Vec<Value>> {
     ensure_registry(registry)?;
 
     let con = Connection::open(registry).context("Failed to open registry database")?;
-    con.execute("PRAGMA busy_timeout=5000", [])
-        .context("Failed to set busy timeout")?;
+    set_busy_timeout(&con, registry);
     let limit = std::cmp::max(1, limit);
 
     let mut stmt = con.prepare(
