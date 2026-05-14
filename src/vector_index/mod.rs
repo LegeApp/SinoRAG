@@ -2,7 +2,7 @@ use crate::document_table::{match_index_fingerprint, DocumentTable};
 use anyhow::{anyhow, Context, Result};
 use hnsw_rs::prelude::{DistL2, Hnsw};
 use memmap2::Mmap;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -17,9 +17,24 @@ pub struct VectorIndexHeader {
     pub schema: String,
     pub schema_version: u32,
     pub doc_table_fingerprint: String,
-    pub source_fingerprint: String,
+    #[serde(default)]
+    pub embeddings_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<String>,
     pub model_id: String,
     pub model_revision: String,
+    #[serde(default = "default_embedding_text_template")]
+    pub embedding_text_template: String,
+    #[serde(default = "default_input_text_field_policy")]
+    pub input_text_field_policy: String,
+    #[serde(default = "default_truncation_policy")]
+    pub truncation_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_chars: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooling: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
     pub embedding_dim: u32,
     pub distance: String,
     pub normalized: bool,
@@ -67,15 +82,17 @@ pub struct EmbeddingRecord {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct VectorHit {
     pub doc_id: u32,
-    pub vector_score: f32,
+    pub ann_distance: f32,
+    pub ann_score: f32,
 }
 
 pub struct VectorIndex {
     pub header: VectorIndexHeader,
-    doc_ids: Vec<u32>,
-    vectors: Vec<Vec<f32>>,
+    vectors: Vec<f32>,
+    doc_id_to_row: FxHashMap<u32, usize>,
     hnsw: Hnsw<'static, f32, DistL2>,
     _mmap: Mmap,
+    pub hnsw_build_ms: u128,
 }
 
 impl VectorIndex {
@@ -83,13 +100,26 @@ impl VectorIndex {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mmap = unsafe { Mmap::map(&file)? };
         let (header, doc_ids, vectors) = decode_index(&mmap)?;
-        let hnsw = build_hnsw(&vectors, &doc_ids, &header.hnsw);
+        let doc_id_to_row = doc_ids
+            .iter()
+            .enumerate()
+            .map(|(row, doc_id)| (*doc_id, row))
+            .collect();
+        let started = std::time::Instant::now();
+        let hnsw = build_hnsw(
+            &vectors,
+            &doc_ids,
+            header.embedding_dim as usize,
+            &header.hnsw,
+        );
+        let hnsw_build_ms = started.elapsed().as_millis();
         Ok(Self {
             header,
-            doc_ids,
             vectors,
+            doc_id_to_row,
             hnsw,
             _mmap: mmap,
+            hnsw_build_ms,
         })
     }
 
@@ -120,11 +150,14 @@ impl VectorIndex {
         &self.header.doc_table_fingerprint
     }
 
-    pub fn vector_for_doc_id(&self, doc_id: u32) -> Option<Vec<f32>> {
-        self.doc_ids
-            .iter()
-            .position(|d| *d == doc_id)
-            .map(|idx| self.vectors[idx].clone())
+    pub fn vector_for_doc_id(&self, doc_id: u32) -> Option<&[f32]> {
+        let row = *self.doc_id_to_row.get(&doc_id)?;
+        Some(self.row_vector(row))
+    }
+
+    fn row_vector(&self, row: usize) -> &[f32] {
+        let dim = self.header.embedding_dim as usize;
+        &self.vectors[row * dim..(row + 1) * dim]
     }
 
     pub fn search_embedding(
@@ -147,12 +180,13 @@ impl VectorIndex {
             .into_iter()
             .map(|n| VectorHit {
                 doc_id: n.d_id as u32,
-                vector_score: round_f32(1.0 / (1.0 + n.distance), 6),
+                ann_distance: round_f32(n.distance, 6),
+                ann_score: round_f32(1.0 / (1.0 + n.distance), 6),
             })
             .collect();
         hits.sort_by(|a, b| {
-            b.vector_score
-                .partial_cmp(&a.vector_score)
+            b.ann_score
+                .partial_cmp(&a.ann_score)
                 .unwrap_or(Ordering::Equal)
         });
         hits.truncate(k.max(1));
@@ -166,10 +200,11 @@ pub fn build_from_embeddings(
     out_path: &Path,
     model_id: String,
     model_revision: String,
+    metadata: VectorBuildMetadata,
     hnsw: HnswParams,
 ) -> Result<VectorIndexHeader> {
     let doc_table = DocumentTable::load(doc_table_path)?;
-    let (mut rows, source_fingerprint) = read_embedding_rows(embeddings_path, &doc_table)?;
+    let (mut rows, embeddings_fingerprint) = read_embedding_rows(embeddings_path, &doc_table)?;
     rows.sort_unstable_by_key(|r| r.doc_id);
 
     let dim = rows
@@ -181,22 +216,29 @@ pub fn build_from_embeddings(
     }
 
     let mut doc_ids = Vec::with_capacity(rows.len());
-    let mut vectors = Vec::with_capacity(rows.len());
+    let mut vectors = Vec::with_capacity(rows.len() * dim);
     for mut row in rows {
         normalize_l2(&mut row.embedding)?;
         doc_ids.push(row.doc_id);
-        vectors.push(row.embedding);
+        vectors.extend_from_slice(&row.embedding);
     }
 
     let header = VectorIndexHeader {
         schema: "sinorag-vector-index-v1".to_string(),
         schema_version: 1,
         doc_table_fingerprint: doc_table.source_fingerprint.clone(),
-        source_fingerprint,
+        embeddings_fingerprint,
+        source_fingerprint: metadata.source_fingerprint,
         model_id,
         model_revision,
+        embedding_text_template: metadata.embedding_text_template,
+        input_text_field_policy: metadata.input_text_field_policy,
+        truncation_policy: metadata.truncation_policy,
+        max_input_chars: metadata.max_input_chars,
+        pooling: metadata.pooling,
+        instruction: metadata.instruction,
         embedding_dim: dim as u32,
-        distance: "cosine".to_string(),
+        distance: "normalized_l2_cosine_ordering".to_string(),
         normalized: true,
         row_count: doc_ids.len() as u32,
         created_at_unix: std::time::SystemTime::now()
@@ -209,6 +251,31 @@ pub fn build_from_embeddings(
 
     write_index(out_path, &header, &doc_ids, &vectors)?;
     Ok(header)
+}
+
+#[derive(Debug, Clone)]
+pub struct VectorBuildMetadata {
+    pub source_fingerprint: Option<String>,
+    pub embedding_text_template: String,
+    pub input_text_field_policy: String,
+    pub truncation_policy: String,
+    pub max_input_chars: Option<u32>,
+    pub pooling: Option<String>,
+    pub instruction: Option<String>,
+}
+
+impl Default for VectorBuildMetadata {
+    fn default() -> Self {
+        Self {
+            source_fingerprint: None,
+            embedding_text_template: default_embedding_text_template(),
+            input_text_field_policy: default_input_text_field_policy(),
+            truncation_policy: default_truncation_policy(),
+            max_input_chars: None,
+            pooling: None,
+            instruction: None,
+        }
+    }
 }
 
 pub fn ensure_matches_doc_table(
@@ -299,7 +366,7 @@ fn write_index(
     path: &Path,
     header: &VectorIndexHeader,
     doc_ids: &[u32],
-    vectors: &[Vec<f32>],
+    vectors: &[f32],
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -313,10 +380,8 @@ fn write_index(
     for doc_id in doc_ids {
         f.write_all(&doc_id.to_le_bytes())?;
     }
-    for vector in vectors {
-        for value in vector {
-            f.write_all(&value.to_le_bytes())?;
-        }
+    for value in vectors {
+        f.write_all(&value.to_le_bytes())?;
     }
     f.flush()?;
     drop(f);
@@ -324,7 +389,7 @@ fn write_index(
     Ok(())
 }
 
-fn decode_index(bytes: &[u8]) -> Result<(VectorIndexHeader, Vec<u32>, Vec<Vec<f32>>)> {
+fn decode_index(bytes: &[u8]) -> Result<(VectorIndexHeader, Vec<u32>, Vec<f32>)> {
     if bytes.len() < 12 {
         anyhow::bail!("vector index too small");
     }
@@ -356,38 +421,52 @@ fn decode_index(bytes: &[u8]) -> Result<(VectorIndexHeader, Vec<u32>, Vec<Vec<f3
         doc_ids.push(u32::from_le_bytes(bytes[offset..offset + 4].try_into()?));
         offset += 4;
     }
-    let mut vectors = Vec::with_capacity(rows);
-    for _ in 0..rows {
-        let mut v = Vec::with_capacity(dim);
-        for _ in 0..dim {
-            v.push(f32::from_le_bytes(bytes[offset..offset + 4].try_into()?));
-            offset += 4;
-        }
-        vectors.push(v);
+    let mut vectors = Vec::with_capacity(rows * dim);
+    for _ in 0..rows * dim {
+        vectors.push(f32::from_le_bytes(bytes[offset..offset + 4].try_into()?));
+        offset += 4;
     }
     Ok((header, doc_ids, vectors))
 }
 
 fn build_hnsw(
-    vectors: &[Vec<f32>],
+    vectors: &[f32],
     doc_ids: &[u32],
+    dim: usize,
     params: &HnswParams,
 ) -> Hnsw<'static, f32, DistL2> {
     let nb_layer = params.nb_layer.min(16).max(1);
     let hnsw = Hnsw::<f32, DistL2>::new(
         params.max_nb_connection.max(4),
-        vectors.len().max(1),
+        doc_ids.len().max(1),
         nb_layer,
         params.ef_construction.max(8),
         DistL2 {},
     );
-    let data: Vec<(&Vec<f32>, usize)> = vectors
+    let row_vectors: Vec<Vec<f32>> = doc_ids
+        .iter()
+        .enumerate()
+        .map(|(row, _)| vectors[row * dim..(row + 1) * dim].to_vec())
+        .collect();
+    let data: Vec<(&Vec<f32>, usize)> = row_vectors
         .iter()
         .zip(doc_ids.iter())
-        .map(|(v, d)| (v, *d as usize))
+        .map(|(v, doc_id)| (v, *doc_id as usize))
         .collect();
     hnsw.parallel_insert(&data);
     hnsw
+}
+
+fn default_embedding_text_template() -> String {
+    "Work: {main_title}\\nSection: {heading}\\nPeriod: {period}\\nText:\\n{text}".to_string()
+}
+
+fn default_input_text_field_policy() -> String {
+    "vector-export embedding_text field".to_string()
+}
+
+fn default_truncation_policy() -> String {
+    "external_provider_policy".to_string()
 }
 
 fn round_f32(value: f32, places: i32) -> f32 {
@@ -492,6 +571,7 @@ mod tests {
             &out,
             "test-model".to_string(),
             "test".to_string(),
+            VectorBuildMetadata::default(),
             HnswParams::default(),
         )
         .unwrap_err();
@@ -516,6 +596,7 @@ mod tests {
             &out,
             "test-model".to_string(),
             "test".to_string(),
+            VectorBuildMetadata::default(),
             HnswParams::default(),
         )
         .unwrap_err();
@@ -540,6 +621,7 @@ mod tests {
             &out,
             "test-model".to_string(),
             "test".to_string(),
+            VectorBuildMetadata::default(),
             HnswParams::default(),
         )
         .unwrap();

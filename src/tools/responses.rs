@@ -2,6 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
+use crate::tools::errors::ToolErrorBody;
+
 /// Response from the search tool
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SearchResponse {
@@ -34,6 +36,41 @@ pub struct SearchStrategy {
     pub filters: Value,
     pub candidate_count: Option<usize>,
     pub verified_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_phrase_index: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentStatus {
+    Ok,
+    SkippedNotRequested,
+    SkippedUnavailable,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct WorkflowComponent {
+    pub name: String,
+    pub tool: String,
+    pub status: ComponentStatus,
+    pub used: bool,
+    pub elapsed_ms: Option<u128>,
+    pub summary: Option<String>,
+    pub error: Option<ToolErrorBody>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SuggestedToolCall {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub reason: String,
 }
 
 /// Response from the heading-search tool
@@ -475,6 +512,15 @@ pub struct VectorInfoResponse {
     pub index_path: String,
     pub info: serde_json::Value,
     pub doc_table_fingerprint_match: bool,
+    pub coverage: VectorCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct VectorCoverage {
+    pub kind: String,
+    pub covered_docs: u32,
+    pub total_docs: u32,
+    pub coverage_ratio: f64,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -487,7 +533,12 @@ pub struct VectorNeighborsResponse {
     pub embedding_dim: u32,
     pub distance: String,
     pub normalized: bool,
-    pub reranked: bool,
+    pub rerank_requested: bool,
+    pub rerank_applied: bool,
+    pub score_interpretation: String,
+    pub loading_index_ms: Option<u128>,
+    pub hnsw_build_ms: Option<u128>,
+    pub warnings: Vec<String>,
     pub hits: Vec<VectorNeighborHit>,
 }
 
@@ -495,6 +546,8 @@ pub struct VectorNeighborsResponse {
 pub struct VectorNeighborHit {
     pub passage_id: String,
     pub doc_id: u32,
+    pub ann_distance: f32,
+    pub ann_score: f32,
     pub vector_score: f32,
     pub source_work_id: Option<String>,
     pub main_title: Option<String>,
@@ -507,35 +560,58 @@ pub struct VectorNeighborHit {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct EvidenceSearchResponse {
     pub schema: &'static str,
+    pub workflow: &'static str,
     pub phrase: String,
     pub expanded_terms: Vec<String>,
+    pub expanded_terms_used: bool,
+    pub variant_policy: String,
     pub exact: SearchResponse,
+    pub absence_check: Option<AbsenceCheckResponse>,
     pub first_attestation: Option<FirstAttestationResponse>,
     pub phrase_history: Option<PhraseHistoryResponse>,
     pub usage: Option<TraceTermUsageResponse>,
     pub clusters: Option<ClusterHitsResponse>,
+    pub components: Vec<WorkflowComponent>,
+    pub suggested_next_tools: Vec<SuggestedToolCall>,
     pub indexes_used: Vec<String>,
     pub fallbacks: Vec<String>,
+    pub evidence_status: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct HybridDiscoverResponse {
     pub schema: &'static str,
+    pub workflow: &'static str,
     pub seed_passage_id: Option<String>,
     pub vector_neighbors: Option<VectorNeighborsResponse>,
     pub tfidf_similar: Option<SimilarResponse>,
     pub context: Option<ExpandContextAdaptiveResponse>,
+    pub groups: HybridDiscoverGroups,
     pub merged_hits: Vec<HybridDiscoverHit>,
+    pub components: Vec<WorkflowComponent>,
+    pub suggested_next_tools: Vec<SuggestedToolCall>,
     pub indexes_used: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct HybridDiscoverGroups {
+    pub semantic_candidates: Vec<String>,
+    pub lexical_parallels: Vec<String>,
+    pub overlap_candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct HybridDiscoverHit {
     pub passage_id: String,
     pub labels: Vec<String>,
+    pub evidence_status: String,
     pub vector_score: Option<f32>,
+    pub vector_rank: Option<usize>,
     pub tfidf_score: Option<f32>,
+    pub tfidf_rank: Option<usize>,
+    pub merged_rank_reason: String,
     pub title: Option<String>,
     pub snippet: Option<String>,
 }
@@ -543,28 +619,54 @@ pub struct HybridDiscoverHit {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SourceInvestigateResponse {
     pub schema: &'static str,
+    pub workflow: &'static str,
     pub seed_passage_id: String,
     pub seed: PassageResponse,
+    pub summary: SourceInvestigationSummary,
     pub context: Option<ExpandContextAdaptiveResponse>,
     pub frontier: Option<FrontierResponse>,
     pub similar: Option<SimilarResponse>,
     pub vector_neighbors: Option<VectorNeighborsResponse>,
     pub phrase_histories: Vec<PhraseHistoryResponse>,
-    pub suggested_next_searches: Vec<String>,
+    pub components: Vec<WorkflowComponent>,
+    pub suggested_next_tools: Vec<SuggestedToolCall>,
+    pub risk_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceInvestigationSummary {
+    pub seed: String,
+    pub best_next_actions: Vec<SuggestedToolCall>,
+    pub risk_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ScopeProfileResponse {
     pub schema: &'static str,
+    pub workflow: &'static str,
     pub phrase: Option<String>,
     pub comparison: CompareUsageResponse,
     pub term_usage: Option<TraceTermUsageResponse>,
+    pub components: Vec<WorkflowComponent>,
+    pub suggested_next_tools: Vec<SuggestedToolCall>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ReportFromEvidenceResponse {
     pub schema: &'static str,
+    pub workflow: &'static str,
     pub validation: ValidateAdjudicationResponse,
     pub graph: Option<GraphBuildResponse>,
     pub report: Option<ReportBuildResponse>,
+    pub components: Vec<WorkflowComponent>,
+    pub suggested_next_tools: Vec<SuggestedToolCall>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PlanToolsResponse {
+    pub schema: &'static str,
+    pub recommended_workflow: String,
+    pub steps: Vec<SuggestedToolCall>,
+    pub notes: Vec<String>,
 }

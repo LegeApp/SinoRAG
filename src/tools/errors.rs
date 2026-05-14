@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 /// Classified tool error with structured information for agents
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ToolErrorBody {
     pub code: String,
     pub message: String,

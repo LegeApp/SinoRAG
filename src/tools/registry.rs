@@ -849,6 +849,32 @@ pub fn tool_defs() -> Vec<ToolDef> {
         // Evidence-search wrapper
         ToolDef {
             spec: ToolSpec {
+                name: "plan-tools",
+                description: "Recommend an agent workflow and concrete next tool calls for a research task.",
+                input_schema: schema_for::<PlanToolsRequest>(),
+                output_schema: schema_for::<PlanToolsResponse>(),
+                requires: vec![],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Plan exact evidence then discovery",
+                        args: serde_json::json!({
+                            "task": "find earliest usage of 一切有為法 and compare related passages",
+                            "known_phrase": "一切有為法"
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PlanToolsRequest = serde_json::from_value(args)?;
+                let res = engine.plan_tools_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // Evidence-search wrapper
+        ToolDef {
+            spec: ToolSpec {
                 name: "evidence-search",
                 description: "Run exact phrase evidence search plus optional attestation/history/usage/cluster summaries.",
                 input_schema: schema_for::<EvidenceSearchRequest>(),

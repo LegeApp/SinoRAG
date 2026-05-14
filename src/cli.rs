@@ -117,6 +117,23 @@ pub enum IndexCommand {
         model_id: String,
         #[arg(long, default_value = "unknown")]
         model_revision: String,
+        #[arg(long)]
+        source_fingerprint: Option<String>,
+        #[arg(
+            long,
+            default_value = "Work: {main_title}\\nSection: {heading}\\nPeriod: {period}\\nText:\\n{text}"
+        )]
+        embedding_text_template: String,
+        #[arg(long, default_value = "vector-export embedding_text field")]
+        input_text_field_policy: String,
+        #[arg(long, default_value = "external_provider_policy")]
+        truncation_policy: String,
+        #[arg(long)]
+        max_input_chars: Option<u32>,
+        #[arg(long)]
+        pooling: Option<String>,
+        #[arg(long)]
+        instruction: Option<String>,
         #[arg(long, default_value_t = 32)]
         max_nb_connection: usize,
         #[arg(long, default_value_t = 200)]

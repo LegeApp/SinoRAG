@@ -134,6 +134,69 @@ fn char_prefix(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+fn component_ok(
+    name: &str,
+    tool: &str,
+    elapsed_ms: u128,
+    summary: impl Into<String>,
+) -> crate::tools::responses::WorkflowComponent {
+    crate::tools::responses::WorkflowComponent {
+        name: name.to_string(),
+        tool: tool.to_string(),
+        status: crate::tools::responses::ComponentStatus::Ok,
+        used: true,
+        elapsed_ms: Some(elapsed_ms),
+        summary: Some(summary.into()),
+        error: None,
+    }
+}
+
+fn component_skipped(
+    name: &str,
+    tool: &str,
+    status: crate::tools::responses::ComponentStatus,
+    summary: impl Into<String>,
+) -> crate::tools::responses::WorkflowComponent {
+    crate::tools::responses::WorkflowComponent {
+        name: name.to_string(),
+        tool: tool.to_string(),
+        status,
+        used: false,
+        elapsed_ms: None,
+        summary: Some(summary.into()),
+        error: None,
+    }
+}
+
+fn component_failed(
+    name: &str,
+    tool: &str,
+    elapsed_ms: u128,
+    err: &anyhow::Error,
+) -> crate::tools::responses::WorkflowComponent {
+    crate::tools::responses::WorkflowComponent {
+        name: name.to_string(),
+        tool: tool.to_string(),
+        status: crate::tools::responses::ComponentStatus::Failed,
+        used: false,
+        elapsed_ms: Some(elapsed_ms),
+        summary: None,
+        error: Some(crate::tools::errors::classify_tool_error(err)),
+    }
+}
+
+fn suggested_tool(
+    tool: &str,
+    args: serde_json::Value,
+    reason: &str,
+) -> crate::tools::responses::SuggestedToolCall {
+    crate::tools::responses::SuggestedToolCall {
+        tool: tool.to_string(),
+        args,
+        reason: reason.to_string(),
+    }
+}
+
 fn count_unique_ngrams_with_terms(
     text: &str,
     gram_len: usize,
@@ -1188,6 +1251,18 @@ impl ToolEngine {
                 }),
                 candidate_count: None,
                 verified_count: Some(verified_count),
+                candidate_source: Some(if used_phrase_index {
+                    "phrase_index".to_string()
+                } else {
+                    "parquet_scan".to_string()
+                }),
+                verification_source: Some("parquet_text".to_string()),
+                used_phrase_index: Some(used_phrase_index),
+                fallback_reason: if used_phrase_index {
+                    None
+                } else {
+                    Some("phrase_index_unavailable_or_not_applicable".to_string())
+                },
             },
         })
     }
@@ -1280,6 +1355,10 @@ impl ToolEngine {
                 }),
                 candidate_count: Some(rows.len()),
                 verified_count: Some(hit_count),
+                candidate_source: Some("parquet_scan".to_string()),
+                verification_source: Some("parquet_text".to_string()),
+                used_phrase_index: Some(false),
+                fallback_reason: None,
             },
         })
     }
@@ -1390,6 +1469,10 @@ impl ToolEngine {
                 }),
                 candidate_count: None,
                 verified_count: Some(rows.len()),
+                candidate_source: Some("metadata_scan".to_string()),
+                verification_source: Some("parquet_metadata".to_string()),
+                used_phrase_index: Some(false),
+                fallback_reason: None,
             },
         })
     }
@@ -2860,11 +2943,31 @@ impl ToolEngine {
         let doc_table_fingerprint_match =
             crate::document_table::match_index_fingerprint(&doc_table, &doc_table_path, fp)?
                 .is_some();
+        let row_count = info.get("row_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let total_docs = doc_table.passage_ids.len() as u32;
+        let coverage_ratio = if total_docs == 0 {
+            0.0
+        } else {
+            row_count as f64 / total_docs as f64
+        };
+        let coverage_kind = if row_count == 0 {
+            "empty"
+        } else if row_count >= total_docs {
+            "full"
+        } else {
+            "partial"
+        };
         Ok(VectorInfoResponse {
             schema: "sinorag-vector-info-v1",
             index_path: path.display().to_string(),
             info,
             doc_table_fingerprint_match,
+            coverage: crate::tools::responses::VectorCoverage {
+                kind: coverage_kind.to_string(),
+                covered_docs: row_count,
+                total_docs,
+                coverage_ratio,
+            },
         })
     }
 
@@ -2889,7 +2992,9 @@ impl ToolEngine {
             return Err(ToolError::QueryEmbeddingProviderNotConfigured.into_anyhow());
         }
 
+        let load_started = std::time::Instant::now();
         let vector = self.vector().await?;
+        let loading_index_ms = load_started.elapsed().as_millis();
         let doc_table = self.doc_table().await?;
         let (query_mode, seed_passage_id, query) = if let Some(seed) = req.seed_passage_id.clone() {
             let doc_id = doc_table.doc_id(&seed).ok_or_else(|| {
@@ -2898,7 +3003,7 @@ impl ToolEngine {
             let query = vector
                 .vector_for_doc_id(doc_id)
                 .ok_or_else(|| anyhow::anyhow!("Seed doc_id {doc_id} has no vector row"))?;
-            ("seed_passage".to_string(), Some(seed), query)
+            ("seed_passage".to_string(), Some(seed), query.to_vec())
         } else {
             (
                 "query_embedding".to_string(),
@@ -2957,7 +3062,9 @@ impl ToolEngine {
                 Some(VectorNeighborHit {
                     passage_id,
                     doc_id: hit.doc_id,
-                    vector_score: hit.vector_score,
+                    ann_distance: hit.ann_distance,
+                    ann_score: hit.ann_score,
+                    vector_score: hit.ann_score,
                     source_work_id: row.and_then(|r| opt_str(r, "source_work_id")),
                     main_title: row.and_then(|r| opt_str(r, "main_title")),
                     heading: row.and_then(|r| opt_str(r, "heading")),
@@ -2970,6 +3077,10 @@ impl ToolEngine {
             })
             .collect();
 
+        let mut warnings = vec!["semantic-neighbor-not-exact-evidence".to_string()];
+        if req.rerank {
+            warnings.push("rerank_requested_but_not_implemented".to_string());
+        }
         Ok(VectorNeighborsResponse {
             schema: "sinorag-vector-neighbors-v1",
             query_mode,
@@ -2979,7 +3090,14 @@ impl ToolEngine {
             embedding_dim: vector.header.embedding_dim,
             distance: vector.header.distance.clone(),
             normalized: vector.header.normalized,
-            reranked: req.rerank,
+            rerank_requested: req.rerank,
+            rerank_applied: false,
+            score_interpretation:
+                "ann_score is monotonic inverse hnsw_rs DistL2 over normalized embeddings; it is not calibrated cosine similarity"
+                    .to_string(),
+            loading_index_ms: Some(loading_index_ms),
+            hnsw_build_ms: Some(vector.hnsw_build_ms),
+            warnings,
             hits: hit_rows,
         })
     }
@@ -2988,8 +3106,18 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::EvidenceSearchRequest,
     ) -> Result<crate::tools::responses::EvidenceSearchResponse> {
-        use crate::tools::responses::EvidenceSearchResponse;
+        use crate::tools::responses::{ComponentStatus, EvidenceSearchResponse};
 
+        let mut components = Vec::new();
+        let mut warnings = Vec::new();
+        let effective_limit = req.limit.min(req.max_candidates.max(1));
+        if req.max_elapsed_ms.is_some() || req.max_component_ms.is_some() {
+            warnings
+                .push("budget_fields_are_reported_but_not_enforced_in_this_version".to_string());
+        }
+        warnings.push(format!("workflow_quality={}", req.quality));
+
+        let started = std::time::Instant::now();
         let expanded = self
             .query_expand_terms_impl(crate::tools::requests::QueryExpandTermsRequest {
                 phrase: req.phrase.clone(),
@@ -2998,77 +3126,246 @@ impl ToolEngine {
                 max: 20,
             })
             .await?;
+        components.push(component_ok(
+            "query_expansion",
+            "query-expand-terms",
+            started.elapsed().as_millis(),
+            format!("{} expanded/suggested terms", expanded.expanded.len()),
+        ));
+        let expanded_terms_used = req.variant_policy == "search_variants";
+        if !expanded_terms_used && expanded.expanded.len() > 1 {
+            warnings.push("expanded_terms_are_suggestions_not_evidence_inputs".to_string());
+        }
+
+        let started = std::time::Instant::now();
         let exact = self
             .search_impl(crate::tools::requests::SearchRequest {
                 phrase: req.phrase.clone(),
-                limit: req.limit,
+                limit: effective_limit,
                 mode: "hits".to_string(),
                 depth: "exact".to_string(),
                 group_by: "work".to_string(),
                 include_variants: false,
                 limit_per_group: 5,
                 brief: false,
-                canon: None,
-                source_work_id: None,
+                canon: req.scope_canon.clone(),
+                source_work_id: req.scope_source_work_id.clone(),
                 tradition: None,
-                period: None,
+                period: req.scope_period.clone(),
                 origin: None,
-                author: None,
-                title: None,
-                heading_path_prefix: None,
+                author: req.author.clone(),
+                title: req.title.clone(),
+                heading_path_prefix: req.heading_path_prefix.clone(),
             })
             .await?;
+        components.push(component_ok(
+            "exact_search",
+            "search",
+            started.elapsed().as_millis(),
+            format!("{} exact hits", exact.hits.len()),
+        ));
+
+        let absence_check = if req.include_absence_check {
+            let started = std::time::Instant::now();
+            match self
+                .absence_check_impl(crate::tools::requests::AbsenceCheckRequest {
+                    phrase: req.phrase.clone(),
+                    limit: effective_limit,
+                    scope_work_id: req.scope_source_work_id.clone(),
+                    scope_canon: req.scope_canon.clone().into_iter().collect(),
+                    scope_period: req.scope_period.clone(),
+                    scope_node_id: req.scope_node_id,
+                })
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "absence_check",
+                        "absence-check",
+                        started.elapsed().as_millis(),
+                        format!("found={}", v.found),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "absence_check",
+                        "absence-check",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    warnings.push("absence_check_failed".to_string());
+                    None
+                }
+            }
+        } else {
+            components.push(component_skipped(
+                "absence_check",
+                "absence-check",
+                ComponentStatus::SkippedNotRequested,
+                "include_absence_check=false",
+            ));
+            None
+        };
 
         let first_attestation = if req.include_attestation {
-            Some(
-                self.first_attestation_impl(crate::tools::requests::FirstAttestationRequest {
+            let started = std::time::Instant::now();
+            match self
+                .first_attestation_impl(crate::tools::requests::FirstAttestationRequest {
                     phrase: req.phrase.clone(),
-                    scope_canon: Vec::new(),
-                    scope_period: Vec::new(),
-                    scope_source_work_id: None,
-                    limit: req.limit,
+                    scope_canon: req.scope_canon.clone().into_iter().collect(),
+                    scope_period: req.scope_period.clone().into_iter().collect(),
+                    scope_source_work_id: req.scope_source_work_id.clone(),
+                    limit: effective_limit,
                 })
-                .await?,
-            )
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "first_attestation",
+                        "first-attestation",
+                        started.elapsed().as_millis(),
+                        format!("first_found={}", v.first.is_some()),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "first_attestation",
+                        "first-attestation",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    warnings.push("first_attestation_failed".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "first_attestation",
+                "first-attestation",
+                ComponentStatus::SkippedNotRequested,
+                "include_attestation=false",
+            ));
             None
         };
         let phrase_history = if req.include_history {
-            Some(
-                self.phrase_history_impl(crate::tools::requests::PhraseHistoryRequest {
+            let started = std::time::Instant::now();
+            match self
+                .phrase_history_impl(crate::tools::requests::PhraseHistoryRequest {
                     phrase: req.phrase.clone(),
                     include_variants: false,
                     timeline: true,
                 })
-                .await?,
-            )
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "phrase_history",
+                        "phrase-history",
+                        started.elapsed().as_millis(),
+                        "history returned",
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "phrase_history",
+                        "phrase-history",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    warnings.push("phrase_history_failed".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "phrase_history",
+                "phrase-history",
+                ComponentStatus::SkippedNotRequested,
+                "include_history=false",
+            ));
             None
         };
         let usage = if req.include_usage {
-            Some(
-                self.trace_term_usage_impl(crate::tools::requests::TraceTermUsageRequest {
+            let started = std::time::Instant::now();
+            match self
+                .trace_term_usage_impl(crate::tools::requests::TraceTermUsageRequest {
                     phrase: req.phrase.clone(),
                     group_by: "period".to_string(),
-                    limit_total: req.limit.max(200),
+                    limit_total: effective_limit.max(200),
                     limit_per_group: 5,
                 })
-                .await?,
-            )
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "term_usage",
+                        "trace-term-usage",
+                        started.elapsed().as_millis(),
+                        format!("{} groups", v.groups.len()),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "term_usage",
+                        "trace-term-usage",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    warnings.push("trace_term_usage_failed".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "term_usage",
+                "trace-term-usage",
+                ComponentStatus::SkippedNotRequested,
+                "include_usage=false",
+            ));
             None
         };
         let clusters = if req.include_clusters {
-            Some(
-                self.cluster_hits_impl(crate::tools::requests::ClusterHitsRequest {
+            let started = std::time::Instant::now();
+            match self
+                .cluster_hits_impl(crate::tools::requests::ClusterHitsRequest {
                     phrase: req.phrase.clone(),
                     cluster_by: "work".to_string(),
-                    limit_total: req.limit.max(200),
+                    limit_total: effective_limit.max(200),
                     limit_per_cluster: 20,
                 })
-                .await?,
-            )
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "clusters",
+                        "cluster-hits",
+                        started.elapsed().as_millis(),
+                        format!("{} clusters", v.clusters.len()),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "clusters",
+                        "cluster-hits",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    warnings.push("cluster_hits_failed".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "clusters",
+                "cluster-hits",
+                ComponentStatus::SkippedNotRequested,
+                "include_clusters=false",
+            ));
             None
         };
 
@@ -3083,21 +3380,47 @@ impl ToolEngine {
             indexes_used.push("catalog.index".to_string());
         }
         let mut fallbacks = Vec::new();
-        if exact.search_strategy.method.contains("parquet") {
-            fallbacks.push("phrase_index_unavailable_or_not_used".to_string());
+        if exact.search_strategy.used_phrase_index == Some(false) {
+            fallbacks.push(
+                exact
+                    .search_strategy
+                    .fallback_reason
+                    .clone()
+                    .unwrap_or_else(|| "phrase_index_unavailable_or_not_used".to_string()),
+            );
         }
+        let suggested_next_tools = vec![
+            suggested_tool(
+                "hybrid-discover",
+                serde_json::json!({"seed_passage_id": "<choose passage_id from exact.hits>", "limit": effective_limit.min(25)}),
+                "expand exact evidence hits into lexical and semantic discovery candidates",
+            ),
+            suggested_tool(
+                "source-investigate",
+                serde_json::json!({"seed_passage_id": "<choose passage_id from exact.hits>", "phrases": [req.phrase.clone()]}),
+                "inspect context and follow-up leads for a selected evidence hit",
+            ),
+        ];
 
         Ok(EvidenceSearchResponse {
             schema: "sinorag-evidence-search-v1",
+            workflow: "exact_evidence",
             phrase: req.phrase,
             expanded_terms: expanded.expanded,
+            expanded_terms_used,
+            variant_policy: req.variant_policy,
             exact,
+            absence_check,
             first_attestation,
             phrase_history,
             usage,
             clusters,
+            components,
+            suggested_next_tools,
             indexes_used,
             fallbacks,
+            evidence_status: "exact_phrase_evidence".to_string(),
+            warnings,
         })
     }
 
@@ -3105,7 +3428,9 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::HybridDiscoverRequest,
     ) -> Result<crate::tools::responses::HybridDiscoverResponse> {
-        use crate::tools::responses::{HybridDiscoverHit, HybridDiscoverResponse};
+        use crate::tools::responses::{
+            ComponentStatus, HybridDiscoverGroups, HybridDiscoverHit, HybridDiscoverResponse,
+        };
 
         if req.seed_passage_id.is_none() && req.query_embedding.is_none() {
             return Err(ToolError::InvalidArgs(
@@ -3115,13 +3440,21 @@ impl ToolEngine {
         }
 
         let mut warnings = Vec::new();
+        let mut components = Vec::new();
         let mut indexes_used = Vec::new();
+        let effective_limit = req.limit.min(req.max_candidates.max(1));
+        if req.max_elapsed_ms.is_some() || req.max_component_ms.is_some() {
+            warnings
+                .push("budget_fields_are_reported_but_not_enforced_in_this_version".to_string());
+        }
+        warnings.push(format!("workflow_quality={}", req.quality));
+        let vector_started = std::time::Instant::now();
         let vector_neighbors = match self
             .vector_neighbors_impl(crate::tools::requests::VectorNeighborsRequest {
                 seed_passage_id: req.seed_passage_id.clone(),
                 query_embedding: req.query_embedding.clone(),
                 query_text: None,
-                k: req.limit,
+                k: effective_limit,
                 ef_search: 64,
                 include_text: true,
                 rerank: true,
@@ -3130,19 +3463,32 @@ impl ToolEngine {
         {
             Ok(v) => {
                 indexes_used.push("vector.index".to_string());
+                components.push(component_ok(
+                    "vector_neighbors",
+                    "vector-neighbors",
+                    vector_started.elapsed().as_millis(),
+                    format!("{} semantic candidates", v.hits.len()),
+                ));
                 Some(v)
             }
             Err(err) => {
-                warnings.push(format!("vector_neighbors_unavailable: {err}"));
+                components.push(component_failed(
+                    "vector_neighbors",
+                    "vector-neighbors",
+                    vector_started.elapsed().as_millis(),
+                    &err,
+                ));
+                warnings.push("vector_neighbors_unavailable".to_string());
                 None
             }
         };
 
         let tfidf_similar = if let Some(seed) = &req.seed_passage_id {
+            let started = std::time::Instant::now();
             match self
                 .similar_impl(crate::tools::requests::SimilarRequest {
                     seed: seed.clone(),
-                    limit: req.limit,
+                    limit: effective_limit,
                     shared_ngram_limit: 12,
                     shared_phrase_limit: 8,
                     min_shared_phrase_len: 4,
@@ -3151,44 +3497,100 @@ impl ToolEngine {
             {
                 Ok(v) => {
                     indexes_used.push("tfidf.index".to_string());
+                    components.push(component_ok(
+                        "tfidf_similar",
+                        "similar",
+                        started.elapsed().as_millis(),
+                        format!("{} lexical parallels", v.similar_passages.len()),
+                    ));
                     Some(v)
                 }
                 Err(err) => {
-                    warnings.push(format!("tfidf_similar_unavailable: {err}"));
+                    components.push(component_failed(
+                        "tfidf_similar",
+                        "similar",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    warnings.push("tfidf_similar_unavailable".to_string());
                     None
                 }
             }
         } else {
+            components.push(component_skipped(
+                "tfidf_similar",
+                "similar",
+                ComponentStatus::SkippedUnavailable,
+                "TF-IDF similar requires seed_passage_id",
+            ));
             None
         };
 
         let context = if req.include_context {
             if let Some(seed) = &req.seed_passage_id {
-                self.expand_context_adaptive_impl(
-                    crate::tools::requests::ExpandContextAdaptiveRequest {
-                        passage_id: seed.clone(),
-                        max_chars: 5000,
-                    },
-                )
-                .await
-                .ok()
+                let started = std::time::Instant::now();
+                match self
+                    .expand_context_adaptive_impl(
+                        crate::tools::requests::ExpandContextAdaptiveRequest {
+                            passage_id: seed.clone(),
+                            max_chars: 5000,
+                        },
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        components.push(component_ok(
+                            "context",
+                            "expand-context-adaptive",
+                            started.elapsed().as_millis(),
+                            format!("{} context passages", v.passage_count),
+                        ));
+                        Some(v)
+                    }
+                    Err(err) => {
+                        components.push(component_failed(
+                            "context",
+                            "expand-context-adaptive",
+                            started.elapsed().as_millis(),
+                            &err,
+                        ));
+                        warnings.push("context_expansion_failed".to_string());
+                        None
+                    }
+                }
             } else {
+                components.push(component_skipped(
+                    "context",
+                    "expand-context-adaptive",
+                    ComponentStatus::SkippedUnavailable,
+                    "context requires seed_passage_id",
+                ));
                 None
             }
         } else {
+            components.push(component_skipped(
+                "context",
+                "expand-context-adaptive",
+                ComponentStatus::SkippedNotRequested,
+                "include_context=false",
+            ));
             None
         };
 
         let mut merged: FxHashMap<String, HybridDiscoverHit> = FxHashMap::default();
         if let Some(v) = &vector_neighbors {
-            for hit in &v.hits {
+            for (rank, hit) in v.hits.iter().enumerate() {
                 merged.insert(
                     hit.passage_id.clone(),
                     HybridDiscoverHit {
                         passage_id: hit.passage_id.clone(),
                         labels: vec!["semantic_candidate".to_string()],
+                        evidence_status: "not_evidence_until_verified".to_string(),
                         vector_score: Some(hit.vector_score),
+                        vector_rank: Some(rank + 1),
                         tfidf_score: None,
+                        tfidf_rank: None,
+                        merged_rank_reason: "semantic candidate from vector-neighbors".to_string(),
                         title: hit.main_title.clone(),
                         snippet: hit.snippet.clone(),
                     },
@@ -3196,15 +3598,19 @@ impl ToolEngine {
             }
         }
         if let Some(s) = &tfidf_similar {
-            for item in &s.similar_passages {
+            for (rank, item) in s.similar_passages.iter().enumerate() {
                 let Some(pid) = item.get("passage_id").and_then(|v| v.as_str()) else {
                     continue;
                 };
                 let entry = merged.entry(pid.to_string()).or_insert(HybridDiscoverHit {
                     passage_id: pid.to_string(),
                     labels: Vec::new(),
+                    evidence_status: "lexical_candidate_needs_verification".to_string(),
                     vector_score: None,
+                    vector_rank: None,
                     tfidf_score: None,
+                    tfidf_rank: None,
+                    merged_rank_reason: "lexical parallel from TF-IDF similar".to_string(),
                     title: opt_str(item, "main_title"),
                     snippet: opt_str(item, "zh_text_raw").map(|s| char_prefix(&s, 160)),
                 });
@@ -3215,23 +3621,67 @@ impl ToolEngine {
                     .get("tfidf_cosine")
                     .and_then(|v| v.as_f64())
                     .map(|v| v as f32);
+                entry.tfidf_rank = Some(rank + 1);
+                if entry.labels.iter().any(|l| l == "semantic_candidate") {
+                    entry.evidence_status =
+                        "overlap_candidate_needs_exact_verification".to_string();
+                    entry.merged_rank_reason =
+                        "appears in both vector and TF-IDF candidates".to_string();
+                }
             }
         }
         let mut merged_hits: Vec<_> = merged.into_values().collect();
         merged_hits.sort_by(|a, b| {
-            let sa = a.vector_score.unwrap_or(0.0) + a.tfidf_score.unwrap_or(0.0);
-            let sb = b.vector_score.unwrap_or(0.0) + b.tfidf_score.unwrap_or(0.0);
-            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            let a_overlap = a.vector_rank.is_some() && a.tfidf_rank.is_some();
+            let b_overlap = b.vector_rank.is_some() && b.tfidf_rank.is_some();
+            b_overlap
+                .cmp(&a_overlap)
+                .then_with(|| {
+                    a.vector_rank
+                        .unwrap_or(usize::MAX)
+                        .cmp(&b.vector_rank.unwrap_or(usize::MAX))
+                })
+                .then_with(|| {
+                    a.tfidf_rank
+                        .unwrap_or(usize::MAX)
+                        .cmp(&b.tfidf_rank.unwrap_or(usize::MAX))
+                })
         });
-        merged_hits.truncate(req.limit);
+        merged_hits.truncate(effective_limit);
+        let groups = HybridDiscoverGroups {
+            semantic_candidates: merged_hits
+                .iter()
+                .filter(|h| h.labels.iter().any(|l| l == "semantic_candidate"))
+                .map(|h| h.passage_id.clone())
+                .collect(),
+            lexical_parallels: merged_hits
+                .iter()
+                .filter(|h| h.labels.iter().any(|l| l == "lexical_parallel"))
+                .map(|h| h.passage_id.clone())
+                .collect(),
+            overlap_candidates: merged_hits
+                .iter()
+                .filter(|h| h.vector_rank.is_some() && h.tfidf_rank.is_some())
+                .map(|h| h.passage_id.clone())
+                .collect(),
+        };
+        let suggested_next_tools = vec![suggested_tool(
+            "evidence-search",
+            serde_json::json!({"phrase": "<extract exact phrase from candidate>", "include_attestation": true}),
+            "verify discovery candidates with exact phrase evidence before citing them",
+        )];
 
         Ok(HybridDiscoverResponse {
             schema: "sinorag-hybrid-discover-v1",
+            workflow: "semantic_discovery",
             seed_passage_id: req.seed_passage_id,
             vector_neighbors,
             tfidf_similar,
             context,
+            groups,
             merged_hits,
+            components,
+            suggested_next_tools,
             indexes_used,
             warnings,
         })
@@ -3241,67 +3691,201 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::SourceInvestigateRequest,
     ) -> Result<crate::tools::responses::SourceInvestigateResponse> {
-        use crate::tools::responses::SourceInvestigateResponse;
+        use crate::tools::responses::{
+            ComponentStatus, SourceInvestigateResponse, SourceInvestigationSummary,
+        };
 
+        let mut components = Vec::new();
+        let mut risk_notes = vec![
+            "vector neighbors are discovery candidates only".to_string(),
+            "TF-IDF similar passages are lexical candidates until exact evidence is verified"
+                .to_string(),
+        ];
+        if req.max_elapsed_ms.is_some() || req.max_component_ms.is_some() {
+            risk_notes
+                .push("budget fields are reported but not enforced in this version".to_string());
+        }
+        risk_notes.push(format!("workflow_quality={}", req.quality));
+        let started = std::time::Instant::now();
         let seed = self
             .passage_impl(crate::tools::requests::PassageRequest {
                 id: req.seed_passage_id.clone(),
             })
             .await?;
+        components.push(component_ok(
+            "seed_passage",
+            "passage",
+            started.elapsed().as_millis(),
+            "seed passage loaded",
+        ));
         let context = if req.include_context {
-            self.expand_context_adaptive_impl(
-                crate::tools::requests::ExpandContextAdaptiveRequest {
-                    passage_id: req.seed_passage_id.clone(),
-                    max_chars: req.max_context_chars,
-                },
-            )
-            .await
-            .ok()
+            let started = std::time::Instant::now();
+            match self
+                .expand_context_adaptive_impl(
+                    crate::tools::requests::ExpandContextAdaptiveRequest {
+                        passage_id: req.seed_passage_id.clone(),
+                        max_chars: req.max_context_chars,
+                    },
+                )
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "context",
+                        "expand-context-adaptive",
+                        started.elapsed().as_millis(),
+                        format!("{} context passages", v.passage_count),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "context",
+                        "expand-context-adaptive",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    risk_notes.push("context expansion failed".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "context",
+                "expand-context-adaptive",
+                ComponentStatus::SkippedNotRequested,
+                "include_context=false",
+            ));
             None
         };
         let frontier = if req.include_frontier {
-            self.frontier_impl(crate::tools::requests::FrontierRequest {
-                seed: req.seed_passage_id.clone(),
-                limit: req.limit,
-                phrase_limit: 20,
-            })
-            .await
-            .ok()
+            let started = std::time::Instant::now();
+            match self
+                .frontier_impl(crate::tools::requests::FrontierRequest {
+                    seed: req.seed_passage_id.clone(),
+                    limit: req.limit,
+                    phrase_limit: 20,
+                })
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "frontier",
+                        "frontier",
+                        started.elapsed().as_millis(),
+                        "frontier packet returned",
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "frontier",
+                        "frontier",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    risk_notes.push("frontier failed or optional indexes are missing".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "frontier",
+                "frontier",
+                ComponentStatus::SkippedNotRequested,
+                "include_frontier=false",
+            ));
             None
         };
         let similar = if req.include_similar {
-            self.similar_impl(crate::tools::requests::SimilarRequest {
-                seed: req.seed_passage_id.clone(),
-                limit: req.limit,
-                shared_ngram_limit: 12,
-                shared_phrase_limit: 8,
-                min_shared_phrase_len: 4,
-            })
-            .await
-            .ok()
+            let started = std::time::Instant::now();
+            match self
+                .similar_impl(crate::tools::requests::SimilarRequest {
+                    seed: req.seed_passage_id.clone(),
+                    limit: req.limit,
+                    shared_ngram_limit: 12,
+                    shared_phrase_limit: 8,
+                    min_shared_phrase_len: 4,
+                })
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "similar",
+                        "similar",
+                        started.elapsed().as_millis(),
+                        format!("{} similar passages", v.similar_passages.len()),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "similar",
+                        "similar",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    risk_notes.push("TF-IDF similar failed or index is unavailable".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "similar",
+                "similar",
+                ComponentStatus::SkippedNotRequested,
+                "include_similar=false",
+            ));
             None
         };
         let vector_neighbors = if req.include_vector {
-            self.vector_neighbors_impl(crate::tools::requests::VectorNeighborsRequest {
-                seed_passage_id: Some(req.seed_passage_id.clone()),
-                query_embedding: None,
-                query_text: None,
-                k: req.limit,
-                ef_search: 64,
-                include_text: true,
-                rerank: true,
-            })
-            .await
-            .ok()
+            let started = std::time::Instant::now();
+            match self
+                .vector_neighbors_impl(crate::tools::requests::VectorNeighborsRequest {
+                    seed_passage_id: Some(req.seed_passage_id.clone()),
+                    query_embedding: None,
+                    query_text: None,
+                    k: req.limit,
+                    ef_search: 64,
+                    include_text: true,
+                    rerank: true,
+                })
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "vector_neighbors",
+                        "vector-neighbors",
+                        started.elapsed().as_millis(),
+                        format!("{} vector neighbors", v.hits.len()),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "vector_neighbors",
+                        "vector-neighbors",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    risk_notes
+                        .push("vector neighbors failed or vector coverage is missing".to_string());
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "vector_neighbors",
+                "vector-neighbors",
+                ComponentStatus::SkippedNotRequested,
+                "include_vector=false",
+            ));
             None
         };
         let mut phrase_histories = Vec::new();
         for phrase in &req.phrases {
-            if let Ok(history) = self
+            let started = std::time::Instant::now();
+            match self
                 .phrase_history_impl(crate::tools::requests::PhraseHistoryRequest {
                     phrase: phrase.clone(),
                     include_variants: false,
@@ -3309,29 +3893,62 @@ impl ToolEngine {
                 })
                 .await
             {
-                phrase_histories.push(history);
+                Ok(history) => {
+                    components.push(component_ok(
+                        "phrase_history",
+                        "phrase-history",
+                        started.elapsed().as_millis(),
+                        format!("phrase={phrase}"),
+                    ));
+                    phrase_histories.push(history);
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "phrase_history",
+                        "phrase-history",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    risk_notes.push(format!("phrase history failed for {phrase}"));
+                }
             }
         }
-        let suggested_next_searches = req
+        let mut suggested_next_tools: Vec<_> = req
             .phrases
             .iter()
-            .map(|p| format!("evidence-search phrase={p}"))
-            .chain(std::iter::once(format!(
-                "hybrid-discover seed_passage_id={}",
-                req.seed_passage_id
-            )))
+            .map(|p| {
+                suggested_tool(
+                    "evidence-search",
+                    serde_json::json!({"phrase": p, "include_attestation": true, "include_history": true}),
+                    "establish exact phrase evidence and history",
+                )
+            })
             .collect();
+        suggested_next_tools.push(suggested_tool(
+            "hybrid-discover",
+            serde_json::json!({"seed_passage_id": req.seed_passage_id.clone(), "limit": req.limit}),
+            "expand the seed into discovery candidates",
+        ));
+        let summary = SourceInvestigationSummary {
+            seed: req.seed_passage_id.clone(),
+            best_next_actions: suggested_next_tools.clone(),
+            risk_notes: risk_notes.clone(),
+        };
 
         Ok(SourceInvestigateResponse {
             schema: "sinorag-source-investigate-v1",
+            workflow: "source_investigation",
             seed_passage_id: req.seed_passage_id,
             seed,
+            summary,
             context,
             frontier,
             similar,
             vector_neighbors,
             phrase_histories,
-            suggested_next_searches,
+            components,
+            suggested_next_tools,
+            risk_notes,
         })
     }
 
@@ -3339,8 +3956,19 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::ScopeProfileRequest,
     ) -> Result<crate::tools::responses::ScopeProfileResponse> {
-        use crate::tools::responses::ScopeProfileResponse;
+        use crate::tools::responses::{ComponentStatus, ScopeProfileResponse};
 
+        let mut components = Vec::new();
+        components.push(component_ok(
+            "workflow_options",
+            "scope-profile",
+            0,
+            format!(
+                "quality={}, include_examples_per_term={}",
+                req.quality, req.include_examples_per_term
+            ),
+        ));
+        let started = std::time::Instant::now();
         let comparison = self
             .compare_usage_impl(crate::tools::requests::CompareUsageRequest {
                 scope_a_node_id: req.scope_a_node_id,
@@ -3356,24 +3984,68 @@ impl ToolEngine {
                 limit_terms: req.limit_terms,
             })
             .await?;
+        components.push(component_ok(
+            "scope_comparison",
+            "compare-usage",
+            started.elapsed().as_millis(),
+            format!(
+                "{} distinctive A terms, {} distinctive B terms",
+                comparison.distinctive_to_a.len(),
+                comparison.distinctive_to_b.len()
+            ),
+        ));
         let term_usage = if let Some(phrase) = &req.phrase {
-            Some(
-                self.trace_term_usage_impl(crate::tools::requests::TraceTermUsageRequest {
+            let started = std::time::Instant::now();
+            match self
+                .trace_term_usage_impl(crate::tools::requests::TraceTermUsageRequest {
                     phrase: phrase.clone(),
                     group_by: "period".to_string(),
                     limit_total: req.limit_passages,
                     limit_per_group: 5,
                 })
-                .await?,
-            )
+                .await
+            {
+                Ok(v) => {
+                    components.push(component_ok(
+                        "term_usage",
+                        "trace-term-usage",
+                        started.elapsed().as_millis(),
+                        format!("{} groups", v.groups.len()),
+                    ));
+                    Some(v)
+                }
+                Err(err) => {
+                    components.push(component_failed(
+                        "term_usage",
+                        "trace-term-usage",
+                        started.elapsed().as_millis(),
+                        &err,
+                    ));
+                    None
+                }
+            }
         } else {
+            components.push(component_skipped(
+                "term_usage",
+                "trace-term-usage",
+                ComponentStatus::SkippedNotRequested,
+                "phrase not provided",
+            ));
             None
         };
+        let suggested_next_tools = vec![suggested_tool(
+            "evidence-search",
+            serde_json::json!({"phrase": "<distinctive term>", "include_usage": true}),
+            "verify whether a distinctive term has exact evidence in a scope",
+        )];
         Ok(ScopeProfileResponse {
             schema: "sinorag-scope-profile-v1",
+            workflow: "scope_comparison",
             phrase: req.phrase,
             comparison,
             term_usage,
+            components,
+            suggested_next_tools,
         })
     }
 
@@ -3383,19 +4055,38 @@ impl ToolEngine {
     ) -> Result<crate::tools::responses::ReportFromEvidenceResponse> {
         use crate::tools::responses::ReportFromEvidenceResponse;
 
+        let mut components = Vec::new();
+        let mut warnings = Vec::new();
+        let started = std::time::Instant::now();
         let validation = self
             .validate_adjudication_impl(crate::tools::requests::ValidateAdjudicationRequest {
                 path: req.adjudication.clone(),
             })
             .await?;
+        components.push(component_ok(
+            "validation",
+            "validate-adjudication",
+            started.elapsed().as_millis(),
+            format!("valid={}", validation.valid),
+        ));
         if !validation.valid {
+            warnings.push("adjudication_invalid_graph_and_report_skipped".to_string());
             return Ok(ReportFromEvidenceResponse {
                 schema: "sinorag-report-from-evidence-v1",
+                workflow: "report_from_evidence",
                 validation,
                 graph: None,
                 report: None,
+                components,
+                suggested_next_tools: vec![suggested_tool(
+                    "validate-adjudication",
+                    serde_json::json!({"path": "<corrected adjudication path>"}),
+                    "fix validation issues before graph/report build",
+                )],
+                warnings,
             });
         }
+        let started = std::time::Instant::now();
         let graph = self
             .graph_build_impl(crate::tools::requests::GraphBuildRequest {
                 input: req.adjudication.clone(),
@@ -3404,6 +4095,13 @@ impl ToolEngine {
                 out: req.graph_out.clone(),
             })
             .await?;
+        components.push(component_ok(
+            "graph",
+            "graph-build",
+            started.elapsed().as_millis(),
+            "graph artifact built",
+        ));
+        let started = std::time::Instant::now();
         let report = self
             .report_build_impl(crate::tools::requests::ReportBuildRequest {
                 inputs: vec![req.adjudication, req.graph_out],
@@ -3412,11 +4110,120 @@ impl ToolEngine {
                 essay_max_pages: 5,
             })
             .await?;
+        components.push(component_ok(
+            "report",
+            "report-build",
+            started.elapsed().as_millis(),
+            "report artifact built",
+        ));
         Ok(ReportFromEvidenceResponse {
             schema: "sinorag-report-from-evidence-v1",
+            workflow: "report_from_evidence",
             validation,
             graph: Some(graph),
             report: Some(report),
+            components,
+            suggested_next_tools: Vec::new(),
+            warnings,
+        })
+    }
+
+    pub async fn plan_tools_impl(
+        &self,
+        req: crate::tools::requests::PlanToolsRequest,
+    ) -> Result<crate::tools::responses::PlanToolsResponse> {
+        use crate::tools::responses::PlanToolsResponse;
+
+        let task = req.task.to_lowercase();
+        let has_phrase = req.known_phrase.is_some();
+        let has_seed = req.seed_passage_id.is_some();
+        let evidence_words = [
+            "phrase",
+            "occur",
+            "occurrence",
+            "first",
+            "attestation",
+            "absence",
+        ];
+        let scope_words = ["compare", "scope", "canon", "period", "distribution"];
+        let report_words = ["report", "graph", "adjudication", "dossier"];
+
+        let recommended_workflow = if report_words.iter().any(|w| task.contains(w)) {
+            "report_workflow"
+        } else if has_phrase || evidence_words.iter().any(|w| task.contains(w)) {
+            "evidence_then_discovery"
+        } else if has_seed {
+            "source_investigation"
+        } else if scope_words.iter().any(|w| task.contains(w)) {
+            "scope_comparison"
+        } else {
+            "semantic_discovery"
+        }
+        .to_string();
+
+        let mut steps = Vec::new();
+        if let Some(phrase) = &req.known_phrase {
+            steps.push(suggested_tool(
+                "evidence-search",
+                serde_json::json!({
+                    "phrase": phrase,
+                    "include_attestation": true,
+                    "include_history": true,
+                    "include_clusters": true
+                }),
+                "establish exact evidence before broader discovery",
+            ));
+        }
+        if let Some(seed) = &req.seed_passage_id {
+            steps.push(suggested_tool(
+                "source-investigate",
+                serde_json::json!({
+                    "seed_passage_id": seed,
+                    "phrases": req.known_phrase.clone().into_iter().collect::<Vec<_>>()
+                }),
+                "collect context, lexical parallels, semantic neighbors, and follow-up leads",
+            ));
+            steps.push(suggested_tool(
+                "hybrid-discover",
+                serde_json::json!({"seed_passage_id": seed, "limit": 25}),
+                "expand to discovery candidates while preserving evidence labels",
+            ));
+        } else {
+            steps.push(suggested_tool(
+                "hybrid-discover",
+                serde_json::json!({"seed_passage_id": "<choose from evidence-search hit>", "limit": 25}),
+                "use after selecting a seed passage from exact evidence",
+            ));
+        }
+        if scope_words.iter().any(|w| task.contains(w)) {
+            steps.push(suggested_tool(
+                "scope-profile",
+                serde_json::json!({"scope_a_canon": "T", "scope_b_canon": "X", "gram_len": 1}),
+                "compare distributions across canons, periods, works, or catalog scopes",
+            ));
+        }
+        if report_words.iter().any(|w| task.contains(w)) {
+            steps.push(suggested_tool(
+                "report-from-evidence",
+                serde_json::json!({
+                    "adjudication": "<adjudication.json>",
+                    "graph_out": "<graph.json>",
+                    "report_out": "<report.md>"
+                }),
+                "only run after evidence has been adjudicated",
+            ));
+        }
+
+        Ok(PlanToolsResponse {
+            schema: "sinorag-plan-tools-v1",
+            recommended_workflow,
+            steps,
+            notes: vec![
+                "Vector and TF-IDF results are discovery candidates, not citation-grade evidence."
+                    .to_string(),
+                "Use evidence-search to verify exact phrases before making research claims."
+                    .to_string(),
+            ],
         })
     }
 

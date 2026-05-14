@@ -50,11 +50,66 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
         "schema": "sinorag-tools-manifest-v1",
         "generated_by": "sinorag",
         "pack": args.pack.as_ref().map(|p| p.display().to_string()),
+        "workflows": workflow_profiles(args.pack.as_deref()),
         "tools": tools
     });
 
     println!("{}", serde_json::to_string_pretty(&manifest)?);
     Ok(())
+}
+
+fn workflow_profiles(pack_root: Option<&std::path::Path>) -> serde_json::Value {
+    let profile =
+        |name: &str, primary_tool: &str, required: &[&'static str], optional: &[&'static str]| {
+            let missing_required = missing_requirements(pack_root, required);
+            let missing_optional = missing_requirements(pack_root, optional);
+            let available = missing_required.is_empty();
+            let quality = if !available {
+                "unavailable"
+            } else if missing_optional.is_empty() {
+                "full"
+            } else if required.len() == 1 && required[0] == "passages.parquet" {
+                "minimal"
+            } else {
+                "partial"
+            };
+            serde_json::json!({
+                "name": name,
+                "primary_tool": primary_tool,
+                "available": available,
+                "quality": quality,
+                "missing_required": missing_required,
+                "missing_optional": missing_optional,
+            })
+        };
+
+    serde_json::json!([
+        profile(
+            "exact_evidence",
+            "evidence-search",
+            &["passages.parquet"],
+            &["phrase.index", "catalog.index", "doc_table.bin"],
+        ),
+        profile(
+            "semantic_discovery",
+            "hybrid-discover",
+            &["passages.parquet", "doc_table.bin"],
+            &["vector.index", "tfidf.index", "catalog.index"],
+        ),
+        profile(
+            "source_investigation",
+            "source-investigate",
+            &["passages.parquet", "doc_table.bin"],
+            &["catalog.index", "tfidf.index", "vector.index"],
+        ),
+        profile(
+            "scope_comparison",
+            "scope-profile",
+            &["passages.parquet", "catalog.index", "doc_table.bin"],
+            &[],
+        ),
+        profile("report_from_evidence", "report-from-evidence", &[], &[],)
+    ])
 }
 
 fn missing_requirements(

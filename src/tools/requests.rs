@@ -526,6 +526,27 @@ pub struct EvidenceSearchRequest {
     pub limit: usize,
 
     #[serde(default)]
+    pub scope_canon: Option<String>,
+
+    #[serde(default)]
+    pub scope_period: Option<String>,
+
+    #[serde(default)]
+    pub scope_source_work_id: Option<String>,
+
+    #[serde(default)]
+    pub scope_node_id: Option<u32>,
+
+    #[serde(default)]
+    pub author: Option<String>,
+
+    #[serde(default)]
+    pub title: Option<String>,
+
+    #[serde(default)]
+    pub heading_path_prefix: Option<String>,
+
+    #[serde(default)]
     pub include_attestation: bool,
 
     #[serde(default)]
@@ -536,6 +557,24 @@ pub struct EvidenceSearchRequest {
 
     #[serde(default)]
     pub include_clusters: bool,
+
+    #[serde(default)]
+    pub include_absence_check: bool,
+
+    #[serde(default = "default_variant_policy")]
+    pub variant_policy: String,
+
+    #[serde(default = "default_workflow_quality")]
+    pub quality: String,
+
+    #[serde(default)]
+    pub max_elapsed_ms: Option<u64>,
+
+    #[serde(default)]
+    pub max_component_ms: Option<u64>,
+
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -551,6 +590,18 @@ pub struct HybridDiscoverRequest {
 
     #[serde(default)]
     pub include_context: bool,
+
+    #[serde(default = "default_workflow_quality")]
+    pub quality: String,
+
+    #[serde(default)]
+    pub max_elapsed_ms: Option<u64>,
+
+    #[serde(default)]
+    pub max_component_ms: Option<u64>,
+
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -577,6 +628,15 @@ pub struct SourceInvestigateRequest {
 
     #[serde(default = "default_true")]
     pub include_vector: bool,
+
+    #[serde(default = "default_workflow_quality")]
+    pub quality: String,
+
+    #[serde(default)]
+    pub max_elapsed_ms: Option<u64>,
+
+    #[serde(default)]
+    pub max_component_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -616,6 +676,35 @@ pub struct ScopeProfileRequest {
 
     #[serde(default = "default_limit_terms")]
     pub limit_terms: usize,
+
+    #[serde(default)]
+    pub include_examples_per_term: bool,
+
+    #[serde(default = "default_workflow_quality")]
+    pub quality: String,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PlanToolsRequest {
+    pub task: String,
+
+    #[serde(default)]
+    pub known_phrase: Option<String>,
+
+    #[serde(default)]
+    pub seed_passage_id: Option<String>,
+}
+
+fn default_variant_policy() -> String {
+    "suggest_only".to_string()
+}
+
+fn default_workflow_quality() -> String {
+    "balanced".to_string()
+}
+
+fn default_max_candidates() -> usize {
+    200
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]

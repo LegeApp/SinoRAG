@@ -1,4 +1,4 @@
-use crate::vector_index::{self, HnswParams};
+use crate::vector_index::{self, HnswParams, VectorBuildMetadata};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -25,6 +25,13 @@ pub fn build(
     out: PathBuf,
     model_id: String,
     model_revision: String,
+    source_fingerprint: Option<String>,
+    embedding_text_template: String,
+    input_text_field_policy: String,
+    truncation_policy: String,
+    max_input_chars: Option<u32>,
+    pooling: Option<String>,
+    instruction: Option<String>,
     max_nb_connection: usize,
     ef_construction: usize,
     nb_layer: usize,
@@ -35,6 +42,15 @@ pub fn build(
         &out,
         model_id,
         model_revision,
+        VectorBuildMetadata {
+            source_fingerprint,
+            embedding_text_template,
+            input_text_field_policy,
+            truncation_policy,
+            max_input_chars,
+            pooling,
+            instruction,
+        },
         HnswParams {
             max_nb_connection,
             ef_construction,
