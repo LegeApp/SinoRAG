@@ -40,7 +40,7 @@ pub mod validate;
 pub mod vector_embed;
 pub mod vector_index;
 
-use crate::cli::{Cli, Command, IndexCommand};
+use crate::cli::{Cli, Command, IndexCommand, IndexesCommand, LexicalIndexArgs, SemanticIndexArgs};
 use crate::document_table::{match_index_fingerprint, DocumentTable, IndexCoverage};
 use crate::phrase_index::PhraseIndex;
 use crate::tfidf::index::TfidfIndex;
@@ -191,6 +191,41 @@ fn tfidf_params_match(info: &serde_json::Value, params: &crate::tfidf::index::Tf
             .unwrap_or(false)
 }
 
+fn build_lexical_indexes(args: LexicalIndexArgs) -> Result<()> {
+    build_all_indexes(
+        args.parquet,
+        args.doc_table,
+        args.phrase_out,
+        args.tfidf_out,
+        args.phrase_gram_len,
+        args.min_ngram,
+        args.max_ngram,
+        args.min_df,
+        args.max_df_ratio,
+        args.max_features,
+        args.buckets,
+        args.temp_dir,
+    )
+}
+
+async fn build_semantic_index(args: SemanticIndexArgs) -> Result<()> {
+    vector_embed::update(
+        args.parquet,
+        args.doc_table,
+        args.model,
+        args.cache,
+        args.out,
+        args.batch_size,
+        args.model_cache_dir,
+        args.show_download_progress,
+        true, // fail_if_feature_missing - explicit semantic command should error clearly
+        args.max_nb_connection,
+        args.ef_construction,
+        args.nb_layer,
+    )
+    .await
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Status { data } => status::run(data),
@@ -298,59 +333,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .await
             }
         },
-        Command::OptionalIndexes {
-            parquet,
-            doc_table,
-            phrase_out,
-            tfidf_out,
-            phrase_gram_len,
-            min_ngram,
-            max_ngram,
-            min_df,
-            max_df_ratio,
-            max_features,
-            buckets,
-            temp_dir,
-            skip_vector,
-            embedding_model,
-            embedding_cache,
-            vector_out,
-            embedding_batch_size,
-            model_cache_dir,
-        } => {
-            build_all_indexes(
-                parquet.clone(),
-                doc_table.clone(),
-                phrase_out,
-                tfidf_out,
-                phrase_gram_len,
-                min_ngram,
-                max_ngram,
-                min_df,
-                max_df_ratio,
-                max_features,
-                buckets,
-                temp_dir,
-            )?;
-            if !skip_vector {
-                vector_embed::update(
-                    parquet,
-                    doc_table,
-                    embedding_model,
-                    embedding_cache,
-                    vector_out,
-                    embedding_batch_size,
-                    model_cache_dir,
-                    true,  // show_download_progress
-                    false, // fail_if_feature_missing — graceful skip in optional-indexes
-                    32,
-                    200,
-                    16,
-                )
-                .await?;
-            }
-            Ok(())
-        }
+        Command::Indexes { command } => match command {
+            IndexesCommand::Lexical { args } => build_lexical_indexes(args),
+            IndexesCommand::Semantic { args } => build_semantic_index(args).await,
+        },
+        Command::LexicalIndexes { args } => build_lexical_indexes(args),
         Command::Ingest {
             source,
             path,

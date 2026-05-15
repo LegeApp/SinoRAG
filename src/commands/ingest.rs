@@ -592,10 +592,7 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
         println!("  similarity search, or frontier discovery.");
         println!();
         if need_phrase && need_tfidf {
-            println!("  ./sinorag optional-indexes");
-            println!(
-                "  ./sinorag optional-indexes --with-vector --embedding-model bge-small-zh-v1.5"
-            );
+            println!("  ./sinorag indexes lexical");
         } else if need_phrase {
             println!("  ./sinorag index phrase");
         } else if need_tfidf {
@@ -612,7 +609,7 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
         }
         println!("  vector index: semantic discovery");
         println!(
-            "    requires a binary built with --features local-embeddings, or external embeddings"
+            "    build separately with ./sinorag indexes semantic, or external embeddings"
         );
         println!();
     }

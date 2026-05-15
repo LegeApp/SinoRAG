@@ -22,7 +22,7 @@ pub struct VectorUpdateConfig {
     pub show_download_progress: bool,
     pub hnsw: HnswParams,
     /// When true, bail if the binary was built without the local-embeddings feature.
-    /// When false (used by optional-indexes), print a notice and return Ok.
+    /// When false, print a notice and return Ok.
     pub fail_if_feature_missing: bool,
 }
 
@@ -150,7 +150,8 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
                     .unwrap_or_else(|_| ProgressStyle::default_bar()),
             );
 
-            let mut new_cache_records: Vec<CacheRecord> = Vec::new();
+            let mut pending_cache_records: Vec<CacheRecord> = Vec::new();
+            let mut appended_cache_records = 0usize;
             for chunk in pending.chunks(config.batch_size.max(1)) {
                 let embed_rows = provider.embed_documents(chunk)?;
                 for row in embed_rows {
@@ -168,18 +169,26 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
                         embedding: row.vector.clone(),
                     };
                     embedding_cache.records.insert(row.doc_id, rec.clone());
-                    new_cache_records.push(rec);
+                    pending_cache_records.push(rec);
+                }
+                if pending_cache_records.len() >= 4096 {
+                    cache::append_records(&config.cache_path, &pending_cache_records)?;
+                    appended_cache_records += pending_cache_records.len();
+                    pending_cache_records.clear();
                 }
                 bar.inc(chunk.len() as u64);
+            }
+            if !pending_cache_records.is_empty() {
+                cache::append_records(&config.cache_path, &pending_cache_records)?;
+                appended_cache_records += pending_cache_records.len();
             }
             bar.finish_with_message("done");
 
             eprintln!(
-                "       Appending {} new embeddings to cache {}",
-                new_cache_records.len(),
+                "       Appended {} new embeddings to cache {}",
+                appended_cache_records,
                 config.cache_path.display()
             );
-            cache::append_records(&config.cache_path, &new_cache_records)?;
         }
 
         #[cfg(not(feature = "local-embeddings"))]

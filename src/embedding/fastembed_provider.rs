@@ -36,8 +36,43 @@ impl FastEmbedProvider {
         if let Some(dir) = cache_dir {
             opts = opts.with_cache_dir(dir);
         }
+        let dylib_hint = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "onnxruntime.dll (default search)".to_string());
+        eprintln!("       ONNX Runtime dylib: {}", dylib_hint);
 
-        let model = TextEmbedding::try_new(opts)?;
+        #[cfg(feature = "local-embeddings-cuda")]
+        {
+            eprintln!("       Execution provider: CUDA only (CPU fallback disabled)");
+            let cuda_ep = ort::ep::CUDA::default().build().error_on_failure();
+            opts = opts
+                .with_execution_providers(vec![cuda_ep])
+                .with_disable_cpu_fallback(true);
+        }
+        #[cfg(all(windows, not(feature = "local-embeddings-cuda")))]
+        {
+            eprintln!("       Execution provider: DirectML only (CPU fallback disabled)");
+            let dml_ep = ort::ep::DirectML::default().build().error_on_failure();
+            opts = opts
+                .with_execution_providers(vec![dml_ep])
+                .with_disable_cpu_fallback(true);
+        }
+        #[cfg(not(any(windows, feature = "local-embeddings-cuda")))]
+        {
+            eprintln!("       Execution provider: ONNX Runtime default CPU");
+        }
+
+        let model = TextEmbedding::try_new(opts).map_err(|e| {
+            let msg = e.to_string();
+            let mut hint = String::new();
+            if msg.contains("onnxruntime") || msg.contains("ONNX") || msg.contains("dylib") || msg.contains("load") {
+                hint.push_str("\n\nHints:\n");
+                hint.push_str("  - Set ORT_DYLIB_PATH to a working onnxruntime.dll, or place one next to the executable.\n");
+                #[cfg(feature = "local-embeddings-cuda")]
+                hint.push_str("  - For CUDA: use an onnxruntime-gpu build whose bundled cuDNN/CUDA matches the toolkit on PATH. ORT 1.20.x was validated against cuDNN 9.5/9.6; cuDNN 9.7+ has been known to fail DllMain init (Win32 error 1114) on onnxruntime_providers_cuda.dll. Microsoft.ML.OnnxRuntime.Gpu nuget 1.20.1 is a known-good source.\n");
+                #[cfg(all(windows, not(feature = "local-embeddings-cuda")))]
+                hint.push_str("  - For DirectML: use Microsoft.ML.OnnxRuntime.DirectML; ship its onnxruntime.dll plus DirectML.dll alongside the executable.\n");
+            }
+            anyhow::anyhow!("failed to initialize fastembed model {}: {}{}", profile.model_id(), msg, hint)
+        })?;
 
         Ok(Self {
             model_id: profile.model_id().to_string(),

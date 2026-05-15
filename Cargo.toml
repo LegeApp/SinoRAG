@@ -9,13 +9,17 @@ path = "src/main.rs"
 
 [features]
 default = []
-local-embeddings = ["dep:fastembed"]
+local-embeddings = ["dep:fastembed", "dep:ort"]
+local-embeddings-cuda = ["local-embeddings", "ort/cuda"]
 
 [dependencies]
 # fastembed: enabled by --features local-embeddings.
-# On Windows this requires the MSVC toolchain (ort has no prebuilt GNU binaries).
-# On Linux/macOS the default toolchain works.
-fastembed = { git = "https://github.com/Anush008/fastembed-rs", rev = "c34435d99c84a8e907c86cbde281984d810f31fa", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+# ONNX Runtime is loaded dynamically at startup — provide a matching onnxruntime.dll
+# (and its provider DLLs) either next to the executable or via the ORT_DYLIB_PATH env var.
+# This avoids the version lock-in of ort's prebuilt download (whose CUDA EP only matches
+# a narrow CUDA/cuDNN combination).
+# On Windows the MSVC toolchain is still required to build the ort wrapper crate.
+fastembed = { path = "fastembed-rs", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -60,19 +64,35 @@ thiserror = "2"
 futures = "0.3.32"
 indicatif = "0.17"
 hnsw_rs = "0.3.4"
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
-fastembed = { git = "https://github.com/Anush008/fastembed-rs", rev = "c34435d99c84a8e907c86cbde281984d810f31fa", optional = true, features = ["directml"] }
+
+# On Windows we additionally enable the DirectML EP symbols so a non-CUDA build can
+# pick up DirectML at runtime. The CUDA EP symbols are gated by the local-embeddings-cuda
+# feature (ort/cuda). With load-dynamic these features only enable EP bindings — the
+# corresponding provider DLLs (onnxruntime_providers_*.dll) still have to ship alongside
+# onnxruntime.dll. Runtime EP selection is in src/embedding/fastembed_provider.rs.
+[target.'cfg(windows)'.dependencies.ort]
+version = "=2.0.0-rc.12"
+optional = true
+default-features = false
+features = ["load-dynamic", "directml"]
 
 [profile.release]
-lto = "thin"
-codegen-units = 1
+lto = false
+codegen-units = 16
 
 [profile.release-fast]
 inherits = "release"
 lto = false
 codegen-units = 16
+
+[profile.release-lto]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
 
 [dev-dependencies]
 tempfile = "3"

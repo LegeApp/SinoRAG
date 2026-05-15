@@ -75,7 +75,7 @@ pub fn run(data: PathBuf) -> Result<()> {
     let mut shown_any = false;
     if !phrase_index.exists() && !tfidf_index.exists() {
         println!(
-            "  • Build phrase + tf-idf indexes (optional): `sinorag optional-indexes`\n    phrase estimate: {}\n    tf-idf estimate: {}",
+            "  • Build lexical indexes: `sinorag indexes lexical`\n    phrase estimate: {}\n    tf-idf estimate: {}",
             super::estimate::phrase_index_estimate(parquet_bytes),
             super::estimate::tfidf_estimate(parquet_bytes)
         );
@@ -96,7 +96,7 @@ pub fn run(data: PathBuf) -> Result<()> {
     println!("  • Single tool call:  `sinorag tool-call search --json '{{\"phrase\":\"...\"}}'`");
     if !vector_index.exists() {
         println!(
-            "  • Vector discovery: `sinorag index vector-update --model bge-small-zh-v1.5` with a local-embeddings build, or `sinorag index vector-export` + external embeddings + `sinorag index vector-build`"
+            "  • Semantic discovery: `sinorag indexes semantic` with a local-embeddings build, or `sinorag index vector-export` + external embeddings + `sinorag index vector-build`"
         );
     }
     println!(

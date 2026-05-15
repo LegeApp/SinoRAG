@@ -17,8 +17,8 @@ sinorag ingest cbeta /path/to/cbeta/xml-p5
 # 2. Check what's built and what's next
 sinorag status
 
-# 3. Build optional heavy indexes when needed
-sinorag optional-indexes  # phrase + TF-IDF indexes in one indexing run
+# 3. Build lexical indexes when needed
+sinorag indexes lexical  # phrase + TF-IDF indexes in one indexing run
 
 # 4. Discover and call tools from an agent
 sinorag tools-manifest --include-examples
@@ -75,23 +75,21 @@ sinorag status
 
 Reports what's ingested, which indexes are present, estimated cost for the missing optional ones, and suggested next steps.
 
-### Step 3 — Build optional indexes
+### Step 3 — Build indexes
 
 These are not required for basic `search` and `passage` tools. Build them when the tools that depend on them are needed.
 
 ```bash
 # Exact phrase search + similarity / frontier discovery
-sinorag optional-indexes
-
-# Include local semantic vector discovery, when built with local embeddings
-sinorag optional-indexes --with-vector --embedding-model bge-small-zh-v1.5
+sinorag indexes lexical
 
 # Incremental rebuilds remain available
 sinorag index phrase
 sinorag index tfidf
 
-# Optional semantic discovery index: local cached embedding + vector build
-sinorag index vector-update --model bge-small-zh-v1.5
+# Semantic discovery index: local cached embedding + vector build
+# This can take many hours on large corpora.
+sinorag indexes semantic --model bge-small-zh-v1.5
 
 # External embedding flow remains available for provider-managed batches
 sinorag index vector-export --out data/derived/vector_input.jsonl
@@ -99,7 +97,7 @@ sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id
 ```
 
 Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
-Local embedding commands require a binary built with `--features local-embeddings`.
+Local embedding commands require a binary built with `--features local-embeddings` or `--features local-embeddings-cuda`.
 
 ### Step 4 — Use JSON tools
 
@@ -244,7 +242,7 @@ cargo install --path .
 
 ## Status
 
-Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`ingest`, `status`, `optional-indexes`, `tools-manifest`, `tool-call`, and `run-tools`) are stable.
+Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`ingest`, `status`, `indexes lexical`, `indexes semantic`, `tools-manifest`, `tool-call`, and `run-tools`) are stable.
 
 **Note**: MCP server support has been deprecated. Use JSON Batching (`run-tools` command) for all research workflows. JSON Batching provides better reproducibility, debugging capabilities, and is better suited for academic research use cases requiring batch processing and audit trails.
 

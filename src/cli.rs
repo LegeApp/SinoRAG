@@ -1,5 +1,5 @@
 use crate::embedding::models::LocalEmbeddingProfile;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// Source corpus type for `ingest`.
@@ -22,7 +22,7 @@ pub enum IngestSource {
 User flow:\n  \
   1. sinorag ingest <source> <path>   # build the corpus (one-time, slow)\n  \
   2. sinorag status                   # see what's built / what's next\n  \
-  3. sinorag optional-indexes         # optional heavy indexes\n  \
+  3. sinorag indexes lexical          # phrase + TF-IDF indexes\n  \
   4. sinorag tools-manifest           # discover JSON tool schemas\n\n\
 Agents should use `tool-call` for one call or `run-tools` for JSONL batches.\n\
 Run `sinorag tools-manifest --include-examples` for available tools.")]
@@ -193,6 +193,76 @@ pub enum IndexCommand {
     },
 }
 
+#[derive(Debug, Args)]
+pub struct LexicalIndexArgs {
+    #[arg(long, default_value = "data/passages.parquet", hide = true)]
+    pub parquet: PathBuf,
+    #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
+    pub doc_table: PathBuf,
+    #[arg(long, default_value = "data/derived/phrase.index", hide = true)]
+    pub phrase_out: PathBuf,
+    #[arg(long, default_value = "data/derived/tfidf.index", hide = true)]
+    pub tfidf_out: PathBuf,
+    #[arg(long, default_value_t = 4)]
+    pub phrase_gram_len: usize,
+    #[arg(long, default_value_t = 5)]
+    pub min_ngram: usize,
+    #[arg(long, default_value_t = 8)]
+    pub max_ngram: usize,
+    #[arg(long, default_value_t = 5)]
+    pub min_df: u32,
+    #[arg(long, alias = "max-df", default_value_t = 0.05)]
+    pub max_df_ratio: f32,
+    #[arg(long, default_value_t = 200_000)]
+    pub max_features: usize,
+    #[arg(long, default_value_t = 2048)]
+    pub buckets: usize,
+    #[arg(long)]
+    pub temp_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SemanticIndexArgs {
+    #[arg(long, default_value = "data/passages.parquet", hide = true)]
+    pub parquet: PathBuf,
+    #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
+    pub doc_table: PathBuf,
+    #[arg(long, value_enum, default_value = "bge-small-zh-v1.5")]
+    pub model: LocalEmbeddingProfile,
+    #[arg(long)]
+    pub cache: Option<PathBuf>,
+    #[arg(long, default_value = "data/derived/vector.index")]
+    pub out: PathBuf,
+    #[arg(long)]
+    pub batch_size: Option<usize>,
+    #[arg(long)]
+    pub model_cache_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = true)]
+    pub show_download_progress: bool,
+    #[arg(long, default_value_t = 32)]
+    pub max_nb_connection: usize,
+    #[arg(long, default_value_t = 200)]
+    pub ef_construction: usize,
+    #[arg(long, default_value_t = 16)]
+    pub nb_layer: usize,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IndexesCommand {
+    /// Build phrase + TF-IDF lexical indexes.
+    Lexical {
+        #[command(flatten)]
+        args: LexicalIndexArgs,
+    },
+    /// Build the semantic vector index.
+    ///
+    /// This can be much slower than lexical indexing on large corpora.
+    Semantic {
+        #[command(flatten)]
+        args: SemanticIndexArgs,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Show what's been ingested and which indexes are built under the data root.
@@ -205,69 +275,28 @@ pub enum Command {
         data: PathBuf,
     },
 
-    /// Build one optional heavy index family.
+    /// Build one index family.
     ///
-    /// Prefer `optional-indexes` when both phrase and TF-IDF indexes are missing.
+    /// Prefer `indexes lexical` when both phrase and TF-IDF indexes are missing.
     Index {
         #[command(subcommand)]
         command: IndexCommand,
     },
 
-    /// Build all optional heavy indexes: phrase, TF-IDF, and vector.
+    /// Build grouped index sets.
+    Indexes {
+        #[command(subcommand)]
+        command: IndexesCommand,
+    },
+
+    /// Build phrase + TF-IDF lexical indexes.
     ///
-    /// Run once after ingest. Builds all three indexes automatically:
-    ///   • phrase  — exact CJK phrase lookup (canonical-anchor, first-attestation…)
-    ///   • tfidf   — similarity / frontier discovery
-    ///   • vector  — semantic nearest-neighbour search (bge-small-zh-v1.5 by default)
-    ///
-    /// Each index is skipped when already current. Vector indexing embeds only
-    /// new/changed passages and caches results for future runs.
-    ///
-    /// For the multilingual model (better for cross-language queries):
-    ///   sinorag optional-indexes --embedding-model bge-m3
-    OptionalIndexes {
-        #[arg(long, default_value = "data/passages.parquet", hide = true)]
-        parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
-        doc_table: PathBuf,
-        #[arg(long, default_value = "data/derived/phrase.index", hide = true)]
-        phrase_out: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index", hide = true)]
-        tfidf_out: PathBuf,
-        #[arg(long, default_value_t = 4)]
-        phrase_gram_len: usize,
-        #[arg(long, default_value_t = 5)]
-        min_ngram: usize,
-        #[arg(long, default_value_t = 8)]
-        max_ngram: usize,
-        #[arg(long, default_value_t = 5)]
-        min_df: u32,
-        #[arg(long, alias = "max-df", default_value_t = 0.05)]
-        max_df_ratio: f32,
-        #[arg(long, default_value_t = 200_000)]
-        max_features: usize,
-        #[arg(long, default_value_t = 2048)]
-        buckets: usize,
-        #[arg(long)]
-        temp_dir: Option<PathBuf>,
-        /// Skip vector index build (phrase + tfidf only).
-        #[arg(long, default_value_t = false, hide = true)]
-        skip_vector: bool,
-        /// Embedding model for the vector index.
-        #[arg(long, value_enum, default_value = "bge-small-zh-v1.5")]
-        embedding_model: LocalEmbeddingProfile,
-        /// Embedding cache path (default: derived/<model>.jsonl). [advanced]
-        #[arg(long, hide = true)]
-        embedding_cache: Option<PathBuf>,
-        /// Vector index output path. [advanced]
-        #[arg(long, default_value = "data/derived/vector.index", hide = true)]
-        vector_out: PathBuf,
-        /// Embedding batch size override. [advanced]
-        #[arg(long, hide = true)]
-        embedding_batch_size: Option<usize>,
-        /// Directory for fastembed model weight downloads. [advanced]
-        #[arg(long, hide = true)]
-        model_cache_dir: Option<PathBuf>,
+    /// `optional-indexes` is kept as an alias for older scripts, but no longer
+    /// builds the slow semantic vector index.
+    #[command(name = "lexical-indexes", alias = "optional-indexes")]
+    LexicalIndexes {
+        #[command(flatten)]
+        args: LexicalIndexArgs,
     },
 
     /// Ingest a corpus into the passage store (passages.parquet).
