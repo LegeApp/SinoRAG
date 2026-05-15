@@ -21,6 +21,9 @@ pub struct VectorUpdateConfig {
     pub model_cache_dir: Option<PathBuf>,
     pub show_download_progress: bool,
     pub hnsw: HnswParams,
+    /// When true, bail if the binary was built without the local-embeddings feature.
+    /// When false (used by optional-indexes), print a notice and return Ok.
+    pub fail_if_feature_missing: bool,
 }
 
 pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
@@ -181,12 +184,21 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
 
         #[cfg(not(feature = "local-embeddings"))]
         {
-            anyhow::bail!(
-                "{} passages need embedding but this binary was built without the \
-                 `local-embeddings` feature. Rebuild with:\n  \
-                 cargo build --release --features local-embeddings",
-                pending.len()
-            );
+            if config.fail_if_feature_missing {
+                anyhow::bail!(
+                    "{} passages need embedding but this binary was built without the \
+                     `local-embeddings` feature. Rebuild with:\n  \
+                     cargo +stable-x86_64-pc-windows-msvc build --release --features local-embeddings",
+                    pending.len()
+                );
+            } else {
+                eprintln!(
+                    "       Note: vector indexing skipped ({} passages unembedded). \
+                     Binary was not built with --features local-embeddings.",
+                    pending.len()
+                );
+                return Ok(());
+            }
         }
     }
 

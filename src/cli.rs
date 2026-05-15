@@ -213,11 +213,18 @@ pub enum Command {
         command: IndexCommand,
     },
 
-    /// Build the optional phrase, TF-IDF, and (optionally) vector indexes together.
+    /// Build all optional heavy indexes: phrase, TF-IDF, and vector.
     ///
-    /// Run after ingest when you need exact phrase tools, similarity/frontier tools,
-    /// and/or semantic vector search. Pass --with-vector --embedding-model <MODEL> to
-    /// also embed all passages and build the vector index (requires --features local-embeddings).
+    /// Run once after ingest. Builds all three indexes automatically:
+    ///   • phrase  — exact CJK phrase lookup (canonical-anchor, first-attestation…)
+    ///   • tfidf   — similarity / frontier discovery
+    ///   • vector  — semantic nearest-neighbour search (bge-small-zh-v1.5 by default)
+    ///
+    /// Each index is skipped when already current. Vector indexing embeds only
+    /// new/changed passages and caches results for future runs.
+    ///
+    /// For the multilingual model (better for cross-language queries):
+    ///   sinorag optional-indexes --embedding-model bge-m3
     OptionalIndexes {
         #[arg(long, default_value = "data/passages.parquet", hide = true)]
         parquet: PathBuf,
@@ -243,23 +250,23 @@ pub enum Command {
         buckets: usize,
         #[arg(long)]
         temp_dir: Option<PathBuf>,
-        /// Also build the vector index using a local embedding model.
-        #[arg(long, default_value_t = false)]
-        with_vector: bool,
-        /// Embedding model to use when --with-vector is set.
+        /// Skip vector index build (phrase + tfidf only).
+        #[arg(long, default_value_t = false, hide = true)]
+        skip_vector: bool,
+        /// Embedding model for the vector index.
         #[arg(long, value_enum, default_value = "bge-small-zh-v1.5")]
         embedding_model: LocalEmbeddingProfile,
-        /// Embedding cache path (default: derived/<model-slug>.jsonl).
-        #[arg(long)]
+        /// Embedding cache path (default: derived/<model>.jsonl). [advanced]
+        #[arg(long, hide = true)]
         embedding_cache: Option<PathBuf>,
-        /// Vector index output path when --with-vector is set.
+        /// Vector index output path. [advanced]
         #[arg(long, default_value = "data/derived/vector.index", hide = true)]
         vector_out: PathBuf,
-        /// Embedding batch size override.
-        #[arg(long)]
+        /// Embedding batch size override. [advanced]
+        #[arg(long, hide = true)]
         embedding_batch_size: Option<usize>,
-        /// Directory for fastembed model weight downloads.
-        #[arg(long)]
+        /// Directory for fastembed model weight downloads. [advanced]
+        #[arg(long, hide = true)]
         model_cache_dir: Option<PathBuf>,
     },
 

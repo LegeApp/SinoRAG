@@ -290,6 +290,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     batch_size,
                     model_cache_dir,
                     show_download_progress,
+                    true, // fail_if_feature_missing — explicit command should error clearly
                     max_nb_connection,
                     ef_construction,
                     nb_layer,
@@ -310,7 +311,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             max_features,
             buckets,
             temp_dir,
-            with_vector,
+            skip_vector,
             embedding_model,
             embedding_cache,
             vector_out,
@@ -331,7 +332,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 buckets,
                 temp_dir,
             )?;
-            if with_vector {
+            if !skip_vector {
                 vector_embed::update(
                     parquet,
                     doc_table,
@@ -340,7 +341,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     vector_out,
                     embedding_batch_size,
                     model_cache_dir,
-                    true,
+                    true,  // show_download_progress
+                    false, // fail_if_feature_missing — graceful skip in optional-indexes
                     32,
                     200,
                     16,

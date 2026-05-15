@@ -12,6 +12,9 @@ default = []
 local-embeddings = ["dep:fastembed"]
 
 [dependencies]
+# fastembed: enabled by --features local-embeddings.
+# On Windows this requires the MSVC toolchain (ort has no prebuilt GNU binaries).
+# On Linux/macOS the default toolchain works.
 fastembed = { git = "https://github.com/Anush008/fastembed-rs", rev = "c34435d99c84a8e907c86cbde281984d810f31fa", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -60,6 +63,7 @@ hnsw_rs = "0.3.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+fastembed = { git = "https://github.com/Anush008/fastembed-rs", rev = "c34435d99c84a8e907c86cbde281984d810f31fa", optional = true, features = ["directml"] }
 
 [profile.release]
 lto = "thin"

@@ -14,6 +14,7 @@ pub async fn update(
     batch_size: Option<usize>,
     model_cache_dir: Option<PathBuf>,
     show_download_progress: bool,
+    fail_if_feature_missing: bool,
     max_nb_connection: usize,
     ef_construction: usize,
     nb_layer: usize,
@@ -37,6 +38,7 @@ pub async fn update(
         batch_size,
         model_cache_dir,
         show_download_progress,
+        fail_if_feature_missing,
         hnsw: HnswParams {
             max_nb_connection,
             ef_construction,
@@ -46,8 +48,11 @@ pub async fn update(
 
     run_vector_update(config).await?;
 
-    let info = crate::vector_index::VectorIndex::header_info(&out)?;
-    println!("{}", serde_json::to_string_pretty(&info)?);
+    // Only print index info if the output was actually created
+    if out.exists() {
+        let info = crate::vector_index::VectorIndex::header_info(&out)?;
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    }
     Ok(())
 }
 
