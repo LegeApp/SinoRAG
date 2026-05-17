@@ -19,7 +19,7 @@ local-embeddings-cuda = ["local-embeddings", "ort/cuda"]
 # This avoids the version lock-in of ort's prebuilt download (whose CUDA EP only matches
 # a narrow CUDA/cuDNN combination).
 # On Windows the MSVC toolchain is still required to build the ort wrapper crate.
-fastembed = { path = "fastembed-rs", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
+fastembed = { git = "https://github.com/Anush008/fastembed-rs", rev = "c34435d99c84a8e907c86cbde281984d810f31fa", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -65,6 +65,15 @@ futures = "0.3.32"
 indicatif = "0.17"
 hnsw_rs = "0.3.4"
 ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic"] }
+
+# MCP server (stdio). Local path checkout; bumped together with rust-sdk submodule.
+rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-io", "schemars"] }
+
+# Side-by-side EN/ZH PDF renderer used by `sinorag export-pdf`. Sibling crate
+# in this repo. Was previously gated behind a `pdf-export` feature; integration
+# is still evolving (input-shape negotiation with model-authored markdown) but
+# the renderer itself is ready to build into every release.
+cbeta-pdf-creator = { path = "cbeta-pdf-creator" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }

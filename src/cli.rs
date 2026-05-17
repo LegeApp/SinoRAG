@@ -1,4 +1,4 @@
-use crate::embedding::models::LocalEmbeddingProfile;
+use crate::embedding::models::{EmbeddingExecutionProvider, LocalEmbeddingProfile};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -20,16 +20,32 @@ pub enum IngestSource {
 #[command(version)]
 #[command(about = "SinoRAGD — Buddhist corpus research engine.\n\n\
 User flow:\n  \
-  1. sinorag ingest <source> <path>   # build the corpus (one-time, slow)\n  \
-  2. sinorag status                   # see what's built / what's next\n  \
-  3. sinorag indexes lexical          # phrase + TF-IDF indexes\n  \
-  4. sinorag tools-manifest           # discover JSON tool schemas\n\n\
-Agents should use `tool-call` for one call or `run-tools` for JSONL batches.\n\
+  1. sinorag ingest <source> <path>     # build the corpus (one-time, slow)\n  \
+  2. sinorag status                     # see what's built / what's next\n  \
+  3. sinorag indexes lexical            # phrase + TF-IDF indexes\n  \
+  4. sinorag tools-manifest             # discover JSON tool schemas\n  \
+  5. sinorag setup opencode && \\\n     \
+     sinorag agent                      # talk to the corpus from a TUI\n\n\
+Agents talk to SinoRAG one of two ways:\n  \
+  - JSON CLI:  `tool-call` (single call) or `run-tools` (JSONL batch)\n  \
+  - MCP:       `sinorag mcp` (stdio); wrapped by `sinorag agent` for opencode\n\n\
 Run `sinorag tools-manifest --include-examples` for available tools.")]
 #[command(after_help = "Run `sinorag help <COMMAND>` for command details.")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// Which agent to onboard via `sinorag setup`.
+#[derive(Debug, Subcommand)]
+pub enum SetupAgent {
+    /// Verify opencode is installed and remind the user to configure a
+    /// provider. Does not install or modify opencode itself.
+    Opencode {
+        /// Explicit path to opencode (overrides PATH / $OPENCODE_BIN).
+        #[arg(long)]
+        opencode: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -178,6 +194,9 @@ pub enum IndexCommand {
         /// Directory for fastembed model weight downloads.
         #[arg(long)]
         model_cache_dir: Option<PathBuf>,
+        /// ONNX Runtime execution provider for local embeddings.
+        #[arg(long, value_enum, default_value = "auto")]
+        execution_provider: EmbeddingExecutionProvider,
         /// Show download progress bar when fetching model weights.
         #[arg(long, default_value_t = true)]
         show_download_progress: bool,
@@ -237,6 +256,8 @@ pub struct SemanticIndexArgs {
     pub batch_size: Option<usize>,
     #[arg(long)]
     pub model_cache_dir: Option<PathBuf>,
+    #[arg(long, value_enum, default_value = "auto")]
+    pub execution_provider: EmbeddingExecutionProvider,
     #[arg(long, default_value_t = true)]
     pub show_download_progress: bool,
     #[arg(long, default_value_t = 32)]
@@ -347,26 +368,69 @@ pub enum Command {
         out_parquet: PathBuf,
     },
 
-    /// Start the legacy MCP server (currently disabled).
+    /// Start the stdio MCP server exposing the SinoRAG tool registry.
     ///
-    /// Use `tools-manifest`, `tool-call`, and `run-tools` for agent workflows.
-    #[command(hide = true)] // Hidden until rmcp dependency is properly configured
+    /// Designed to be spawned as a child process by an MCP client
+    /// (opencode, Claude Desktop, etc.). All logging goes to stderr;
+    /// stdout is reserved for JSON-RPC framing.
     Mcp {
-        /// Transport protocol: stdio (default) or sse.
-        #[arg(long, default_value = "stdio")]
-        transport: String,
-        #[arg(long, default_value = "data/passages.parquet")]
-        parquet: PathBuf,
-        #[arg(long, default_value = "data/derived/tfidf.index")]
-        tfidf_index: PathBuf,
-        #[arg(long, default_value = "data/derived/catalog.index")]
-        catalog_index: PathBuf,
         #[arg(long)]
-        registry: Option<PathBuf>,
+        pack: Option<PathBuf>,
         #[arg(long, default_value_t = true)]
         readonly: bool,
         #[arg(long)]
         allow_admin_tools: bool,
+        #[arg(long)]
+        passages_parquet: Option<PathBuf>,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long)]
+        tfidf_index: Option<PathBuf>,
+        #[arg(long)]
+        vector_index: Option<PathBuf>,
+        #[arg(long)]
+        catalog_index: Option<PathBuf>,
+        #[arg(long)]
+        doc_table: Option<PathBuf>,
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        #[arg(long)]
+        output_root: Option<PathBuf>,
+    },
+
+    /// One-time onboarding checks for an agent SinoRAG can wrap.
+    ///
+    /// Currently only `opencode` is supported. Future agents (Claude Code,
+    /// other MCP clients) will get their own subcommand here.
+    Setup {
+        #[command(subcommand)]
+        agent: SetupAgent,
+    },
+
+    /// Launch the opencode TUI with the SinoRAG MCP server pre-wired.
+    ///
+    /// Writes `<workdir>/.opencode/opencode.json` pointing opencode at
+    /// `<this exe> mcp ...`, refreshes `<workdir>/AGENTS.md` from the
+    /// embedded doctrine, then execs opencode. A single binary, no
+    /// separate server lifecycle.
+    Agent {
+        /// Path to the opencode executable. Resolution order:
+        /// this flag → `$OPENCODE_BIN` → `opencode` on PATH.
+        #[arg(long)]
+        opencode: Option<PathBuf>,
+
+        /// Pack root passed through to the MCP server.
+        #[arg(long)]
+        pack: Option<PathBuf>,
+
+        /// Pass `--allow-admin-tools` through to the MCP server.
+        #[arg(long)]
+        allow_admin_tools: bool,
+
+        /// Write the launcher artifacts and exit without spawning
+        /// opencode. Useful for inspecting the generated configuration.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Stitch already-built index artifacts into a validated pack with manifest.
@@ -837,13 +901,24 @@ pub enum Command {
         essay_max_pages: usize,
     },
 
-    /// Render a Markdown file to PDF.
-    #[command(hide = true)]
+    /// Render a Markdown file to bilingual PDF (English body, optional
+    /// Chinese sidecars in fenced code blocks).
+    ///
+    /// Intended as a user-side sink for model-authored dossiers: pipe a
+    /// Markdown report through this command to produce a publication-ready
+    /// PDF. The model can include sidecar Chinese passages by wrapping them
+    /// in ```` ``` ```` fences; everything outside fences is treated as
+    /// the English/translation body.
     ExportPdf {
+        /// Markdown file produced by `report-build`, `report-from-evidence`,
+        /// or hand-edited prose.
         #[arg(long)]
         input_markdown: PathBuf,
+        /// Destination PDF path. Parent directories are created if missing.
         #[arg(long)]
         out: PathBuf,
+        /// Render Chinese and English in two columns per page instead of
+        /// stacking them vertically.
         #[arg(long)]
         side_by_side: bool,
     },

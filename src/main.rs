@@ -6,7 +6,10 @@ mod document_table;
 mod embedding;
 mod ingest;
 mod jsonout;
-// mod mcp;  // Commented out - requires rmcp dependency
+mod agent;
+mod mcp;
+mod setup;
+mod which;
 mod catalog_index;
 mod memory;
 mod models;

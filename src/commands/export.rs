@@ -105,7 +105,7 @@ pub fn report_build(
             "short_answer": "answer from evidence with caveats",
             "essay": "up to configured page limit, organized by evidence chronology and source confidence",
             "markdown": "export-markdown",
-            "pdf": "export-pdf --features pdf-export",
+            "pdf": "export-pdf",
             "readzen_collection": "export-readzen",
             "graphs": ["graph-build --kind evidence", "graph-build --kind timeline", "graph-build --kind lineage"]
         },
@@ -136,7 +136,15 @@ pub fn report_build(
 // PDF pipeline (separate concern from templates; kept here as a CLI sink)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "pdf-export")]
+/// Render the model-authored Markdown to a side-by-side or stacked
+/// bilingual PDF. The expected shape is plain English paragraphs in
+/// running text, with Chinese sidecars inside fenced code blocks
+/// (```...```). See `markdown_to_pdf_sections` for the exact split rule.
+///
+/// This is intentionally tolerant: a markdown file with no CJK code
+/// fences still produces a single-column English PDF. The input shape is
+/// still evolving alongside the research-packet contract, so we accept
+/// whatever the model emits and let the formatter do the best it can.
 fn pdf_from_markdown(markdown: &str, out: PathBuf, side_by_side: bool) -> Result<()> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -156,12 +164,6 @@ fn pdf_from_markdown(markdown: &str, out: PathBuf, side_by_side: bool) -> Result
     Ok(())
 }
 
-#[cfg(not(feature = "pdf-export"))]
-fn pdf_from_markdown(_markdown: &str, _out: PathBuf, _side_by_side: bool) -> Result<()> {
-    anyhow::bail!("PDF export is integrated but not enabled in this build. Rebuild with `--features pdf-export`.")
-}
-
-#[cfg(feature = "pdf-export")]
 fn markdown_to_pdf_sections(markdown: &str) -> (Vec<String>, Vec<String>) {
     let mut zh = Vec::new();
     let mut en = Vec::new();
@@ -202,7 +204,6 @@ fn markdown_to_pdf_sections(markdown: &str) -> (Vec<String>, Vec<String>) {
     (zh, en)
 }
 
-#[cfg(feature = "pdf-export")]
 fn strip_markdown(line: &str) -> String {
     line.trim_start_matches('#')
         .trim_start_matches("- ")

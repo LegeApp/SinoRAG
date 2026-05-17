@@ -1,7 +1,7 @@
 #[cfg(feature = "local-embeddings")]
 use super::cache::{self, CacheRecord, CACHE_SCHEMA};
 use super::cache::{EmbeddingCache, DOCUMENT_TEMPLATE_ID};
-use super::models::LocalEmbeddingProfile;
+use super::models::{EmbeddingExecutionProvider, LocalEmbeddingProfile};
 use crate::datafusion_store::DataFusionStore;
 use crate::document_table::DocumentTable;
 use crate::vector_index::{self, EmbeddingRecord, HnswParams, VectorBuildMetadata};
@@ -19,6 +19,7 @@ pub struct VectorUpdateConfig {
     pub profile: LocalEmbeddingProfile,
     pub batch_size: usize,
     pub model_cache_dir: Option<PathBuf>,
+    pub execution_provider: EmbeddingExecutionProvider,
     pub show_download_progress: bool,
     pub hnsw: HnswParams,
     /// When true, bail if the binary was built without the local-embeddings feature.
@@ -138,6 +139,7 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
                 config.profile,
                 config.model_cache_dir.clone(),
                 config.batch_size,
+                config.execution_provider,
                 config.show_download_progress,
             )?;
 

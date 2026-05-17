@@ -1,4 +1,6 @@
 #[cfg(feature = "local-embeddings")]
+use super::models::EmbeddingExecutionProvider;
+#[cfg(feature = "local-embeddings")]
 use super::models::LocalEmbeddingProfile;
 #[cfg(feature = "local-embeddings")]
 use super::provider::{EmbeddingInput, EmbeddingProvider, EmbeddingRow};
@@ -22,6 +24,7 @@ impl FastEmbedProvider {
         profile: LocalEmbeddingProfile,
         cache_dir: Option<std::path::PathBuf>,
         batch_size: usize,
+        execution_provider: EmbeddingExecutionProvider,
         show_download_progress: bool,
     ) -> Result<Self> {
         use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
@@ -36,28 +39,19 @@ impl FastEmbedProvider {
         if let Some(dir) = cache_dir {
             opts = opts.with_cache_dir(dir);
         }
-        let dylib_hint = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "onnxruntime.dll (default search)".to_string());
+        let dylib_hint = std::env::var("ORT_DYLIB_PATH")
+            .unwrap_or_else(|_| "onnxruntime.dll (default search)".to_string());
         eprintln!("       ONNX Runtime dylib: {}", dylib_hint);
 
-        #[cfg(feature = "local-embeddings-cuda")]
-        {
-            eprintln!("       Execution provider: CUDA only (CPU fallback disabled)");
-            let cuda_ep = ort::ep::CUDA::default().build().error_on_failure();
-            opts = opts
-                .with_execution_providers(vec![cuda_ep])
-                .with_disable_cpu_fallback(true);
-        }
-        #[cfg(all(windows, not(feature = "local-embeddings-cuda")))]
-        {
-            eprintln!("       Execution provider: DirectML only (CPU fallback disabled)");
-            let dml_ep = ort::ep::DirectML::default().build().error_on_failure();
-            opts = opts
-                .with_execution_providers(vec![dml_ep])
-                .with_disable_cpu_fallback(true);
-        }
-        #[cfg(not(any(windows, feature = "local-embeddings-cuda")))]
-        {
-            eprintln!("       Execution provider: ONNX Runtime default CPU");
+        let providers = execution_providers(execution_provider)?;
+        if providers.is_empty() {
+            eprintln!("       Execution provider: CPU");
+        } else {
+            eprintln!(
+                "       Execution provider: {:?} (ONNX Runtime CPU fallback enabled)",
+                execution_provider
+            );
+            opts = opts.with_execution_providers(providers);
         }
 
         let model = TextEmbedding::try_new(opts).map_err(|e| {
@@ -66,8 +60,11 @@ impl FastEmbedProvider {
             if msg.contains("onnxruntime") || msg.contains("ONNX") || msg.contains("dylib") || msg.contains("load") {
                 hint.push_str("\n\nHints:\n");
                 hint.push_str("  - Set ORT_DYLIB_PATH to a working onnxruntime.dll, or place one next to the executable.\n");
+                hint.push_str("  - Retry with `--execution-provider cpu` to continue indexing without GPU provider DLLs.\n");
+                #[cfg(windows)]
+                hint.push_str("  - On Windows, `--execution-provider directml` is usually easier than CUDA and uses the GPU through DirectML.\n");
                 #[cfg(feature = "local-embeddings-cuda")]
-                hint.push_str("  - For CUDA: use an onnxruntime-gpu build whose bundled cuDNN/CUDA matches the toolkit on PATH. ORT 1.20.x was validated against cuDNN 9.5/9.6; cuDNN 9.7+ has been known to fail DllMain init (Win32 error 1114) on onnxruntime_providers_cuda.dll. Microsoft.ML.OnnxRuntime.Gpu nuget 1.20.1 is a known-good source.\n");
+                hint.push_str("  - For CUDA: ONNX Runtime's official GPU packages are CUDA-major specific. A CUDA 12.x ORT build needs CUDA 12.x/cuDNN 9.x runtime DLLs; CUDA 13.x does not satisfy that contract.\n");
                 #[cfg(all(windows, not(feature = "local-embeddings-cuda")))]
                 hint.push_str("  - For DirectML: use Microsoft.ML.OnnxRuntime.DirectML; ship its onnxruntime.dll plus DirectML.dll alongside the executable.\n");
             }
@@ -84,6 +81,45 @@ impl FastEmbedProvider {
             batch_size,
         })
     }
+}
+
+#[cfg(feature = "local-embeddings")]
+fn execution_providers(
+    execution_provider: EmbeddingExecutionProvider,
+) -> Result<Vec<fastembed::ExecutionProviderDispatch>> {
+    let mut providers = Vec::new();
+    match execution_provider {
+        EmbeddingExecutionProvider::Cpu => {}
+        EmbeddingExecutionProvider::Auto => {
+            #[cfg(feature = "local-embeddings-cuda")]
+            providers.push(ort::ep::CUDA::default().build());
+            #[cfg(windows)]
+            providers.push(ort::ep::DirectML::default().build());
+        }
+        EmbeddingExecutionProvider::Cuda => {
+            #[cfg(feature = "local-embeddings-cuda")]
+            {
+                providers.push(ort::ep::CUDA::default().build().error_on_failure());
+            }
+            #[cfg(not(feature = "local-embeddings-cuda"))]
+            {
+                anyhow::bail!(
+                    "CUDA execution provider requested, but this binary was not built with --features local-embeddings-cuda"
+                );
+            }
+        }
+        EmbeddingExecutionProvider::Directml => {
+            #[cfg(windows)]
+            {
+                providers.push(ort::ep::DirectML::default().build().error_on_failure());
+            }
+            #[cfg(not(windows))]
+            {
+                anyhow::bail!("DirectML execution provider is only available on Windows");
+            }
+        }
+    }
+    Ok(providers)
 }
 
 #[cfg(feature = "local-embeddings")]

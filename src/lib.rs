@@ -7,7 +7,10 @@ pub mod document_table;
 pub mod embedding;
 pub mod ingest;
 pub mod jsonout;
-// pub mod mcp;  // Commented out - requires rmcp dependency
+pub mod agent;
+pub mod mcp;
+pub mod setup;
+pub mod which;
 pub mod memory;
 pub mod models;
 pub mod normalize;

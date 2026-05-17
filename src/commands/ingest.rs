@@ -608,9 +608,7 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
             println!("    estimate: {}", phrase_index_estimate(parquet_bytes));
         }
         println!("  vector index: semantic discovery");
-        println!(
-            "    build separately with ./sinorag indexes semantic, or external embeddings"
-        );
+        println!("    build separately with ./sinorag indexes semantic, or external embeddings");
         println!();
     }
     println!("Check what's built:");

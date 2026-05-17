@@ -217,6 +217,7 @@ async fn build_semantic_index(args: SemanticIndexArgs) -> Result<()> {
         args.out,
         args.batch_size,
         args.model_cache_dir,
+        args.execution_provider,
         args.show_download_progress,
         true, // fail_if_feature_missing - explicit semantic command should error clearly
         args.max_nb_connection,
@@ -311,6 +312,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 out,
                 batch_size,
                 model_cache_dir,
+                execution_provider,
                 show_download_progress,
                 max_nb_connection,
                 ef_construction,
@@ -324,6 +326,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     out,
                     batch_size,
                     model_cache_dir,
+                    execution_provider,
                     show_download_progress,
                     true, // fail_if_feature_missing — explicit command should error clearly
                     max_nb_connection,
@@ -1384,19 +1387,54 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Mcp {
-            transport: _,
-            parquet: _,
-            tfidf_index: _,
-            catalog_index: _,
-            registry: _,
-            readonly: _,
-            allow_admin_tools: _,
+            pack,
+            readonly,
+            allow_admin_tools,
+            passages_parquet,
+            phrase_index,
+            tfidf_index,
+            vector_index,
+            catalog_index,
+            doc_table,
+            registry,
+            output_root,
         } => {
-            // MCP server requires rmcp dependency - commented out for now
-            Err(anyhow::anyhow!(
-                "MCP server requires rmcp dependency - not currently enabled"
-            ))
+            use crate::tools::EngineConfig;
+            let config = EngineConfig {
+                pack,
+                readonly,
+                allow_admin_tools,
+                // Heavy tools (parquet scans, TF-IDF, vector search) are
+                // memory-hungry. A small cap keeps a long-lived MCP process
+                // honest under bursty parallel tool calls from the client.
+                max_heavy_concurrency: 4,
+                passages_parquet,
+                phrase_index,
+                tfidf_index,
+                vector_index,
+                catalog_index,
+                doc_table,
+                registry,
+                output_root,
+            };
+            crate::mcp::server::run(config).await
         }
+        Command::Setup { agent } => match agent {
+            crate::cli::SetupAgent::Opencode { opencode } => {
+                crate::setup::opencode::run(crate::setup::opencode::SetupOpencodeArgs { opencode })
+            }
+        },
+        Command::Agent {
+            opencode,
+            pack,
+            allow_admin_tools,
+            dry_run,
+        } => crate::agent::run(crate::agent::AgentArgs {
+            opencode,
+            pack,
+            allow_admin_tools,
+            dry_run,
+        }),
         Command::ToolsManifest {
             pack,
             format,

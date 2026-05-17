@@ -1,5 +1,5 @@
 use crate::embedding::build::{run_vector_update, VectorUpdateConfig};
-use crate::embedding::models::LocalEmbeddingProfile;
+use crate::embedding::models::{EmbeddingExecutionProvider, LocalEmbeddingProfile};
 use crate::vector_index::HnswParams;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ pub async fn update(
     out: PathBuf,
     batch_size: Option<usize>,
     model_cache_dir: Option<PathBuf>,
+    execution_provider: EmbeddingExecutionProvider,
     show_download_progress: bool,
     fail_if_feature_missing: bool,
     max_nb_connection: usize,
@@ -26,6 +27,7 @@ pub async fn update(
     eprintln!("Model:      {}", profile.model_id());
     eprintln!("Dim:        {}", profile.dim());
     eprintln!("Batch size: {}", batch_size);
+    eprintln!("Provider:   {:?}", execution_provider);
     eprintln!("Cache:      {}", cache_path.display());
     eprintln!("Out:        {}", out.display());
 
@@ -37,6 +39,7 @@ pub async fn update(
         profile,
         batch_size,
         model_cache_dir,
+        execution_provider,
         show_download_progress,
         fail_if_feature_missing,
         hnsw: HnswParams {

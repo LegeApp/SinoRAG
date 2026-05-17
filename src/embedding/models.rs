@@ -10,6 +10,18 @@ pub enum LocalEmbeddingProfile {
     BgeM3,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EmbeddingExecutionProvider {
+    /// Prefer available GPU providers but fall back to CPU if provider loading fails.
+    Auto,
+    /// ONNX Runtime CPU execution provider.
+    Cpu,
+    /// ONNX Runtime DirectML execution provider on Windows.
+    Directml,
+    /// ONNX Runtime CUDA execution provider.
+    Cuda,
+}
+
 impl LocalEmbeddingProfile {
     pub fn model_id(self) -> &'static str {
         match self {
