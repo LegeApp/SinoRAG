@@ -20,12 +20,16 @@ sinorag status
 # 3. Build lexical indexes when needed
 sinorag indexes lexical  # phrase + TF-IDF indexes in one indexing run
 
-# 4. Discover and call tools from an agent
+# 4. Use the research tools
 sinorag tools-manifest --include-examples
 sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
+
+# 5. Optional interactive agent session through opencode
+sinorag setup opencode
+sinorag agent
 ```
 
-`sinorag --help` shows the full flow. Agents use `tools-manifest` to discover schemas, `tool-call` for one request, and `run-tools` for reproducible JSONL batches.
+`sinorag --help` shows the full flow. SinoRAG exposes the same tool registry through two supported front doors: JSON CLI commands (`tools-manifest`, `tool-call`, `run-tools`) for scripts and reproducible batches, and MCP (`sinorag mcp`) for interactive agents. The recommended MCP path for opencode is `sinorag agent`, which generates the opencode MCP config and `AGENTS.md` guidance for you.
 
 ---
 
@@ -38,7 +42,7 @@ sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
 - Builds catalog indexes for corpus/work/section navigation
 - Builds TF-IDF indexes for similarity and textual reuse discovery
 - Builds optional vector indexes from external embedding JSONL or local FastEmbed models for semantic discovery
-- Exposes research tools through JSON schemas for LLM agents
+- Exposes research tools through JSON schemas and MCP for LLM agents
 - Produces structured JSON output for reports, graph generation, and downstream apps
 
 ---
@@ -103,16 +107,23 @@ and use `--execution-provider tensorrt`. TensorRT engine/timing caches are
 stored beside the embedding cache by default so subsequent runs can resume
 without rebuilding optimized engines.
 
-### Step 4 — Use JSON tools
+### Step 4 — Use the tools
 
 ```bash
+# Scriptable / batchable JSON CLI
 sinorag tools-manifest --include-examples
 sinorag tool-call evidence-search --json '{"phrase":"金剛經","limit":5}'
 sinorag tool-call hybrid-discover --json '{"seed_passage_id":"B/B13/B13n0079.xml#pB13p0047a0417","limit":10}'
 sinorag run-tools --input jobs.jsonl --output results.jsonl
+
+# Interactive opencode session over MCP
+sinorag setup opencode
+sinorag agent
 ```
 
-Agents should inspect the manifest, then submit schema-valid JSON tool calls. Batch mode writes one response envelope per input line for auditability and retry.
+JSON CLI is the best fit for scripts, tests, repeatable batches, and audit trails. MCP is the supported interactive transport for MCP-capable agents. `sinorag agent` wraps `sinorag mcp` for opencode by regenerating `<workdir>/.opencode/opencode.json` and the sinorag-managed block in `<workdir>/AGENTS.md`, then launching opencode. If you use another MCP client, point it at `sinorag mcp`.
+
+Agents should inspect the manifest or MCP tool list, then submit schema-valid tool calls. Batch mode writes one response envelope per input line for auditability and retry.
 
 ---
 
@@ -165,6 +176,8 @@ Which artifacts each tool needs:
 
 ## Agent tool workflow
 
+### JSON CLI
+
 ```bash
 sinorag tools-manifest --include-examples
 sinorag tool-call passage --json '{"id":"B/B13/B13n0079.xml#pB13p0047a0417"}'
@@ -182,6 +195,15 @@ agent receives user question
 ```
 
 Research tools that require indexes not yet built will return a clear error rather than silently failing. The `status` command tells you what's missing before you start.
+
+### MCP / opencode
+
+```bash
+sinorag setup opencode   # verifies opencode and prints provider setup steps
+sinorag agent            # launches opencode with SinoRAG MCP pre-wired
+```
+
+MCP is the first-class interactive-agent interface, while the JSON CLI remains the first-class automation interface. For opencode, prefer `sinorag agent` instead of hand-editing MCP config. Direct `sinorag mcp` remains supported for other MCP clients and for debugging transport-level issues.
 
 ---
 
@@ -246,9 +268,9 @@ cargo install --path .
 
 ## Status
 
-Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`ingest`, `status`, `indexes lexical`, `indexes semantic`, `tools-manifest`, `tool-call`, and `run-tools`) are stable.
+Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`ingest`, `status`, `indexes lexical`, `indexes semantic`, `tools-manifest`, `tool-call`, `run-tools`, `setup opencode`, `agent`, and `mcp`) are supported.
 
-**Note**: MCP server support has been deprecated. Use JSON Batching (`run-tools` command) for all research workflows. JSON Batching provides better reproducibility, debugging capabilities, and is better suited for academic research use cases requiring batch processing and audit trails.
+SinoRAG supports both JSON CLI and MCP against the same tool registry: use JSON CLI for reproducible command-line workflows, and use MCP for live agent sessions. `sinorag agent` is the maintained opencode wrapper around `sinorag mcp`.
 
 ---
 

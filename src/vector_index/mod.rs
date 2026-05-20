@@ -1,6 +1,6 @@
 use crate::document_table::{match_index_fingerprint, DocumentTable};
 use anyhow::{anyhow, Context, Result};
-use hnsw_rs::prelude::{DistL2, Hnsw};
+use hnsw_rs::prelude::{AnnT, DistL2, Hnsw, HnswIo};
 use memmap2::Mmap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,15 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 8] = b"SINVEC1\0";
+// v2: HNSW graph is persisted on disk via hnsw_rs::file_dump and loaded back at
+// open time, so VectorIndex::open is O(file read) rather than O(graph rebuild).
+const MAGIC: &[u8; 8] = b"SINVEC2\0";
+
+// Filename suffixes used by hnsw_rs::file_dump. The graph dump is written next
+// to the .index file with basename = file_name(index_path) (e.g.
+// `vector.index.hnsw.graph` and `vector.index.hnsw.data`).
+const HNSW_GRAPH_SUFFIX: &str = ".hnsw.graph";
+const HNSW_DATA_SUFFIX: &str = ".hnsw.data";
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorIndexHeader {
@@ -105,13 +113,39 @@ impl VectorIndex {
             .enumerate()
             .map(|(row, doc_id)| (*doc_id, row))
             .collect();
+
+        // Load the persisted HNSW graph from disk. The graph was written by
+        // hnsw_rs::file_dump at build time as two files next to the index file:
+        //   <index_filename>.hnsw.graph
+        //   <index_filename>.hnsw.data
+        // If they're missing, the index needs to be rebuilt.
+        let (dump_dir, dump_basename) = hnsw_dump_location(path)?;
+        let graph_path = dump_dir.join(format!("{dump_basename}{HNSW_GRAPH_SUFFIX}"));
+        let data_path = dump_dir.join(format!("{dump_basename}{HNSW_DATA_SUFFIX}"));
+        if !graph_path.is_file() || !data_path.is_file() {
+            anyhow::bail!(
+                "vector index HNSW dump missing (expected {} and {}); rebuild required",
+                graph_path.display(),
+                data_path.display(),
+            );
+        }
         let started = std::time::Instant::now();
-        let hnsw = build_hnsw(
-            &vectors,
-            &doc_ids,
-            header.embedding_dim as usize,
-            &header.hnsw,
-        );
+        // HnswIo's API ties the returned Hnsw's lifetime to the reloader, even
+        // when mmap is not used. The reloader itself is cheap (file readers +
+        // metadata) and we want the loaded Hnsw to outlive any borrowing of
+        // this index. Box::leak makes the reloader live for the rest of the
+        // process — a single-use cost per index open, not per query.
+        let reloader: &'static mut HnswIo =
+            Box::leak(Box::new(HnswIo::new(&dump_dir, &dump_basename)));
+        let hnsw: Hnsw<'static, f32, DistL2> = reloader
+            .load_hnsw::<f32, DistL2>()
+            .with_context(|| {
+                format!(
+                    "load HNSW graph dump from {} / {}",
+                    graph_path.display(),
+                    data_path.display(),
+                )
+            })?;
         let hnsw_build_ms = started.elapsed().as_millis();
         Ok(Self {
             header,
@@ -224,8 +258,8 @@ pub fn build_from_embeddings(
     }
 
     let header = VectorIndexHeader {
-        schema: "sinorag-vector-index-v1".to_string(),
-        schema_version: 1,
+        schema: "sinorag-vector-index-v2".to_string(),
+        schema_version: 2,
         doc_table_fingerprint: doc_table.source_fingerprint.clone(),
         embeddings_fingerprint,
         source_fingerprint: metadata.source_fingerprint,
@@ -246,10 +280,11 @@ pub fn build_from_embeddings(
             .unwrap_or_default()
             .as_secs(),
         backend: "hnsw_rs".to_string(),
-        hnsw,
+        hnsw: hnsw.clone(),
     };
 
     write_index(out_path, &header, &doc_ids, &vectors)?;
+    build_and_dump_hnsw(out_path, &vectors, &doc_ids, dim, &hnsw)?;
     Ok(header)
 }
 
@@ -351,8 +386,8 @@ pub fn build_from_rows(
     }
 
     let header = VectorIndexHeader {
-        schema: "sinorag-vector-index-v1".to_string(),
-        schema_version: 1,
+        schema: "sinorag-vector-index-v2".to_string(),
+        schema_version: 2,
         doc_table_fingerprint: doc_table.source_fingerprint.clone(),
         embeddings_fingerprint,
         source_fingerprint: metadata.source_fingerprint,
@@ -373,10 +408,11 @@ pub fn build_from_rows(
             .unwrap_or_default()
             .as_secs(),
         backend: "hnsw_rs".to_string(),
-        hnsw,
+        hnsw: hnsw.clone(),
     };
 
     write_index(out_path, &header, &doc_ids, &vectors)?;
+    build_and_dump_hnsw(out_path, &vectors, &doc_ids, dim, &hnsw)?;
     Ok(header)
 }
 
@@ -531,12 +567,33 @@ fn decode_index(bytes: &[u8]) -> Result<(VectorIndexHeader, Vec<u32>, Vec<f32>)>
     Ok((header, doc_ids, vectors))
 }
 
-fn build_hnsw(
+/// Resolve the directory + basename used by hnsw_rs::file_dump for the dump
+/// files associated with `index_path`. The dump files live next to the
+/// .index file with basename equal to the .index filename, so the on-disk
+/// files are e.g. `vector.index.hnsw.graph` and `vector.index.hnsw.data`.
+fn hnsw_dump_location(index_path: &Path) -> Result<(PathBuf, String)> {
+    let dir = index_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let basename = index_path
+        .file_name()
+        .ok_or_else(|| anyhow!("index path {} has no file name", index_path.display()))?
+        .to_string_lossy()
+        .into_owned();
+    Ok((dir, basename))
+}
+
+/// Build the HNSW graph from normalised vectors and persist it next to the
+/// index file via hnsw_rs::file_dump. Removes any stale dump files first so
+/// the dump is always the one paired with the current index file.
+fn build_and_dump_hnsw(
+    index_path: &Path,
     vectors: &[f32],
     doc_ids: &[u32],
     dim: usize,
     params: &HnswParams,
-) -> Hnsw<'static, f32, DistL2> {
+) -> Result<()> {
     let nb_layer = params.nb_layer.min(16).max(1);
     let hnsw = Hnsw::<f32, DistL2>::new(
         params.max_nb_connection.max(4),
@@ -556,7 +613,20 @@ fn build_hnsw(
         .map(|(v, doc_id)| (v, *doc_id as usize))
         .collect();
     hnsw.parallel_insert(&data);
-    hnsw
+
+    let (dump_dir, basename) = hnsw_dump_location(index_path)?;
+    // Remove stale dumps so file_dump (which uses overwrite-style unique-name
+    // logic when the file exists) always writes to the canonical basename.
+    for suffix in [HNSW_GRAPH_SUFFIX, HNSW_DATA_SUFFIX] {
+        let p = dump_dir.join(format!("{basename}{suffix}"));
+        if p.exists() {
+            fs::remove_file(&p)
+                .with_context(|| format!("remove stale HNSW dump {}", p.display()))?;
+        }
+    }
+    hnsw.file_dump(&dump_dir, &basename)
+        .map_err(|e| anyhow!("HNSW file_dump failed: {e}"))?;
+    Ok(())
 }
 
 fn default_embedding_text_template() -> String {
