@@ -54,11 +54,7 @@ pub fn locate_on_path(name: &str) -> Option<PathBuf> {
 /// Resolve a binary using the standard precedence: explicit flag → env var →
 /// PATH lookup. `default_name` is the bare program name (no extension on
 /// Windows — `PATHEXT` handles that).
-pub fn resolve_binary(
-    flag: Option<&Path>,
-    env_var: &str,
-    default_name: &str,
-) -> Option<PathBuf> {
+pub fn resolve_binary(flag: Option<&Path>, env_var: &str, default_name: &str) -> Option<PathBuf> {
     if let Some(p) = flag {
         return p.is_file().then(|| p.to_path_buf());
     }

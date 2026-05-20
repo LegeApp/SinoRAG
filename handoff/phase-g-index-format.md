@@ -1,7 +1,7 @@
-# Phase G — v3 index format (production target)
+# Phase G — index format (production target)
 
 **Status:** deferred. Captured here so it can be picked up cleanly when production rebuild is convenient.
-**Risk on adoption:** forces a one-time rebuild of `phrase_*.index` and `tfidf*.index`. Magic bytes change; v2 files are not readable by v3 code and vice versa. Plan the rebuild against a cloud VM or a quiet local window.
+**Risk on adoption:** forces a one-time rebuild of `phrase_*.index` and `tfidf*.index`. Magic bytes change; older files are not readable by current code . Plan the rebuild against a cloud VM or a quiet local window.
 **Order in plan:** after Phase E (streaming intersection lands first on v2 so the gains land independently). The same rebuild absorbs the doc_table alignment repair and terebess ingest.
 
 The two wins drive everything in this phase:
@@ -14,7 +14,7 @@ Everything else (mmap-first layout, sorted vocab, external-sort builder, doc_tab
 
 ## What changes vs v2
 
-### TF-IDF v3 — quantize weights to u8
+### TF-IDF current format — quantize weights to u8
 
 Header magic: `b"SRTF3VAA"` (v2 was `MAGIC_TFIDF_V2`). `version: u16 = 3`. All other header fields unchanged.
 
@@ -35,9 +35,9 @@ Query path: dequantize on read using `w_max`. Final top-K reranked with the dequ
 
 **Size estimate** for your 40 M-doc CBETA corpus:
 - v2 expected: row blob ≈ 40M × avg-50 features × 8 B = 16 GB; postings ≈ similar.
-- v3 expected: ~5–7 GB row blob + ~5–7 GB postings blob → **TF-IDF index ~30–40 GB → 10–15 GB**.
+- Current format expected: ~5–7 GB row blob + ~5–7 GB postings blob → **TF-IDF index ~30–40 GB → 10–15 GB**.
 
-### Phrase v3 — hybrid roaring/varint postings
+### Phrase current format — hybrid roaring/varint postings
 
 Header magic: `b"SRPH3VAA"` (v2 was `b"SRPHV2AA"` or whatever the constant is). `version: u16 = 3`.
 
@@ -69,7 +69,7 @@ While we're at it, consider adding `min_doc_id_per_work: Vec<u32>` to the doc_ta
 - Mmap layout.
 - External-sort builder pipeline.
 - doc_table fingerprint discipline.
-- CLI surface (`tfidf-build`, `phrase-index-build` keep the same flags; they emit v3 silently).
+- CLI surface (`tfidf-build`, `phrase-index-build` keep the same flags; they emit the current format silently).
 
 ---
 
@@ -85,7 +85,7 @@ pub fn dequantize_log_u8(q: u8, w_max: f32) -> f32;
 #[cfg(test)] // round-trip + monotonicity tests
 ```
 
-### G2. TF-IDF builder emits v3 (~150 LOC change in `tfidf/index.rs`)
+### G2. TF-IDF builder emits the current format (~150 LOC change in `tfidf/index.rs`)
 
 - During Phase 3 (term grouping), compute `w_max` for each term while writing the postings blob.
 - Pack `w_max` into vocab entries.
@@ -94,12 +94,12 @@ pub fn dequantize_log_u8(q: u8, w_max: f32) -> f32;
 
 ### G3. TF-IDF reader emits f32 (~80 LOC, `tfidf/index.rs::open` + scoring)
 
-- Validate `v3` magic.
+- Validate current magic.
 - Load `w_max` per term into a parallel `Vec<f32>`.
 - On posting-list scan, dequantize on-the-fly into accumulator.
 - Final top-K rerank: optional; for most queries 8-bit precision suffices.
 
-### G4. Phrase builder emits v3 hybrid (~200 LOC, `phrase_index.rs::build`)
+### G4. Phrase builder emits the current format hybrid (~200 LOC, `phrase_index.rs::build`)
 
 - After Phase 2 (DF aggregation), compute `density_threshold` from `num_docs`.
 - During Phase 3 (per-gram posting write), decide encoding per gram. If dense, write Roaring serialization; else varint as today.
@@ -113,8 +113,8 @@ pub fn dequantize_log_u8(q: u8, w_max: f32) -> f32;
 
 ### G6. CLI + `*-info` output updates (~30 LOC)
 
-- `tfidf-info`, `phrase-index-info` report v3 metadata: quantization scheme, encoding mix.
-- Reject v2 files with clear "rebuild required" message (cheap; v3 is forward-only).
+- `tfidf-info`, `phrase-index-info` report current index metadata: quantization scheme, encoding mix.
+- Reject v2 files with clear "rebuild required" message (cheap; the current format is forward-only).
 
 ### G7. Cargo dependencies
 
@@ -122,41 +122,41 @@ pub fn dequantize_log_u8(q: u8, w_max: f32) -> f32;
 
 ---
 
-## Rebuild workflow on v3 day
+## Rebuild workflow on index refresh day
 
 ```bash
 cd /mnt/Samsung980_1TB/Rust-projects/SinoRAG
 
 # 1. Ingest terebess if not already done.
-./target/release/sinoragd ingest-terebess --input terebess_zen_text_images
+./target/release/sinorag ingest-terebess --input terebess_zen_text_images
 
 # 2. Rebuild doc_table from scratch (also fixes alignment per Phase A4).
-./target/release/sinoragd doc-table-build \
+./target/release/sinorag doc-table-build \
   --parquet data/passages.parquet \
   --out     data/derived/doc_table.bin
 #    ≈ 30–60 min for 40M passages.
 
 # 3. Build the indexes against the fresh doc_table.
-./target/release/sinoragd phrase-index-build  # → phrase_v3.index
-./target/release/sinoragd tfidf-build          # → tfidf_v3.index
-./target/release/sinoragd catalog-index-build \
+./target/release/sinorag phrase-index-build  # → phrase.index
+./target/release/sinorag tfidf-build          # → tfidf.index
+./target/release/sinorag catalog-index-build \
   --doc-table data/derived/doc_table.bin
 
 # 4. Pack.
-./target/release/sinoragd build-pack --pack data
+./target/release/sinorag build-pack --pack data
 ```
 
-Note: paths in default CLI may be `phrase_v2.index` / `tfidf.index`. On v3 day either rename the defaults to `phrase_v3.index` / `tfidf_v3.index` in `cli.rs` *or* keep the names and rely on magic bytes to disambiguate. Renaming is cleaner; old v2 files stay on disk under their original names.
+Note: paths in default CLI may be `phrase_v2.index` / `tfidf.index`. On index refresh day either rename the defaults to `phrase.index` / `tfidf.index` in `cli.rs` *or* keep the names and rely on magic bytes to disambiguate. Renaming is cleaner; old v2 files stay on disk under their original names.
 
 ---
 
-## Validation checklist (when v3 lands)
+## Validation checklist (when the format lands)
 
 - `cargo build --release` clean.
 - Quantizer unit tests pass (round-trip + monotonicity within ε).
-- `tfidf-info` and `phrase-index-info` report v3 + encoding stats.
+- `tfidf-info` and `phrase-index-info` report current format + encoding stats.
 - A known top-K similarity query result differs from v2 in at most ~5% of positions beyond top-50.
-- `build-pack` accepts only v3-magic indexes; rejects v2 with a "rebuild against v3 magic" message.
+- `build-pack` accepts only current index indexes; rejects v2 with a "rebuild against the current format" message.
 - File sizes: TF-IDF index ≥ 2.5× smaller than the v2 equivalent for the same corpus.
 - A common-gram phrase query (e.g. `如是我聞` or any 2-char prefix that hits >10M docs) returns in ≤100 ms wall-time vs current v2 minutes-scale.
 
@@ -167,6 +167,6 @@ Note: paths in default CLI may be `phrase_v2.index` / `tfidf.index`. On v3 day e
 Suggested triggers:
 - Production deploy (cloud VM with ≥256 GB RAM + fast NVMe is the right environment for the rebuild).
 - After Phase E lands so streaming intersection wins are decoupled and measured separately.
-- When you're already going to rebuild the indexes for a corpus refresh (quarterly CBETA snapshot, etc.) — fold v3 into that same rebuild.
+- When you're already going to rebuild the indexes for a corpus refresh (quarterly CBETA snapshot, etc.) — fold the format update into that same rebuild.
 
 Until then, current v2 files stay valid and queryable. Phase C/D/E will keep emitting and reading v2.

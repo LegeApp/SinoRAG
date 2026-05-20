@@ -53,21 +53,13 @@ pub fn run(args: SetupOpencodeArgs) -> Result<()> {
     //    at the one command they need to run.
     println!();
     println!("Next steps:");
-    println!(
-        "  1. Configure an LLM provider for opencode (one-time):  opencode auth login"
-    );
-    println!(
-        "     Anthropic Claude is recommended; OpenAI and others also work."
-    );
+    println!("  1. Configure an LLM provider for opencode (one-time):  opencode auth login");
+    println!("     Anthropic Claude is recommended; OpenAI and others also work.");
     println!("  2. Build (or copy) a SinoRAG corpus pack — see `sinorag status`.");
     println!("  3. Launch the wrapped session:  sinorag agent");
     println!();
-    println!(
-        "`sinorag agent` regenerates `<workdir>/.opencode/opencode.json` and the"
-    );
-    println!(
-        "sinorag-managed slice of `<workdir>/AGENTS.md`, then execs opencode."
-    );
+    println!("`sinorag agent` regenerates `<workdir>/.opencode/opencode.json` and the");
+    println!("sinorag-managed slice of `<workdir>/AGENTS.md`, then execs opencode.");
 
     Ok(())
 }
@@ -85,7 +77,5 @@ fn print_install_hint() {
         println!("  curl -fsSL https://opencode.ai/install | bash");
         println!("  # or:  npm install -g opencode-ai");
     }
-    println!(
-        "Once installed, ensure it is on PATH or set $OPENCODE_BIN to the full path."
-    );
+    println!("Once installed, ensure it is on PATH or set $OPENCODE_BIN to the full path.");
 }

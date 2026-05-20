@@ -6,6 +6,7 @@
 pub mod evidence_graph;
 pub mod lineage_graph;
 pub mod markdown_report;
+pub mod pdf_report;
 pub mod readzen_collection;
 pub mod research_packet;
 pub mod timeline_graph;

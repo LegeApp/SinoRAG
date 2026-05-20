@@ -15,14 +15,23 @@ pub struct ToolsManifestArgs {
 
     #[arg(long, default_value_t = false)]
     pub include_schemas: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub include_internal: bool,
 }
 
 pub async fn run(args: ToolsManifestArgs) -> Result<()> {
     use crate::tools::tool_defs;
     let tools: Vec<_> = tool_defs()
         .into_iter()
+        .filter(|d| {
+            args.include_internal
+                || crate::tools::audience_for_tool(d.spec.name)
+                    != crate::tools::ToolAudience::InternalDebug
+        })
         .map(|d| {
             let requires = d.spec.requires.clone();
+            let audience = crate::tools::audience_for_tool(d.spec.name);
             let mut spec = serde_json::to_value(d.spec).unwrap();
 
             if !args.include_examples {
@@ -45,6 +54,7 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
                     serde_json::json!(missing.is_empty()),
                 );
                 obj.insert("missing".to_string(), serde_json::json!(missing));
+                obj.insert("audience".to_string(), serde_json::json!(audience));
                 if let Some(docs) = crate::tools::docs::doc_for_tool(
                     obj.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
                 ) {
@@ -99,6 +109,12 @@ fn workflow_profiles(pack_root: Option<&std::path::Path>) -> serde_json::Value {
             "evidence-search",
             &["passages.parquet"],
             &["phrase.index", "catalog.index", "doc_table.bin"],
+        ),
+        profile(
+            "pair_appearance",
+            "pair-appearance",
+            &["passages.parquet", "doc_table.bin"],
+            &["phrase.index", "catalog.index"],
         ),
         profile(
             "semantic_discovery",

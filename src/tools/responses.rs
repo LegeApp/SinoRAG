@@ -231,6 +231,16 @@ pub struct ReportBuildResponse {
     pub section_count: usize,
 }
 
+/// Response from the pdf-build tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PdfBuildResponse {
+    pub schema: &'static str,
+    pub out: PathBuf,
+    pub source_format: String,
+    pub section_count: usize,
+    pub side_by_side: bool,
+}
+
 /// Response from the works tool
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WorksResponse {
@@ -474,6 +484,54 @@ pub struct CollocationSearchStrategy {
     pub phrase: serde_json::Value,
     pub limit_total: usize,
     pub limit_collocates: usize,
+}
+
+/// Response from the pair-appearance tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PairAppearanceResponse {
+    pub schema: &'static str,
+    pub term1: String,
+    pub term2: String,
+    pub unit: String,
+    pub window_chars: usize,
+    pub ordered: bool,
+    pub total_term1_hits: usize,
+    pub total_term2_hits: usize,
+    pub pair_hit_count: usize,
+    pub hits: Vec<PairAppearanceHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_summary: Option<PairAppearanceNegativeSummary>,
+    pub search_strategy: PairAppearanceSearchStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PairAppearanceHit {
+    pub passage_id: String,
+    pub source_work_id: Option<String>,
+    pub main_title: Option<String>,
+    pub heading: Option<String>,
+    pub distance_chars: Option<usize>,
+    pub term1_offsets: Vec<usize>,
+    pub term2_offsets: Vec<usize>,
+    pub zh_quote: String,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PairAppearanceNegativeSummary {
+    pub term1_only_count: usize,
+    pub term2_only_count: usize,
+    pub sample_term1_only_passage_ids: Vec<String>,
+    pub sample_term2_only_passage_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PairAppearanceSearchStrategy {
+    pub term1: serde_json::Value,
+    pub term2: serde_json::Value,
+    pub unit: String,
+    pub supported_units: Vec<&'static str>,
+    pub used_variant_expansion: bool,
+    pub max_candidates_per_term: usize,
 }
 
 /// Response from the outline-search tool
@@ -752,4 +810,89 @@ pub struct BatchEvidenceSearchResult {
     pub hit_count: usize,
     pub sample_passage_ids: Vec<String>,
     pub error: Option<String>,
+}
+
+/// Response from the pair-profile tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PairProfileResponse {
+    pub schema: &'static str,
+    pub term1: String,
+    pub term2: String,
+    pub unit: String,
+    pub group_by: String,
+    pub total_term1_hits: usize,
+    pub total_term2_hits: usize,
+    pub total_pair_hits: usize,
+    pub groups: Vec<PairProfileGroup>,
+    pub search_strategy: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PairProfileGroup {
+    pub group_label: String,
+    pub term1_count: usize,
+    pub term2_count: usize,
+    pub pair_count: usize,
+    /// pair_count / term1_count (0 if no term1 hits in group)
+    pub pair_rate_given_term1: f64,
+    /// pair_count / term2_count (0 if no term2 hits in group)
+    pub pair_rate_given_term2: f64,
+    pub representative_hits: Vec<PairAppearanceHit>,
+}
+
+/// Response from the person-resolve tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PersonResolveResponse {
+    pub schema: &'static str,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub canonical_candidate: String,
+    pub name_forms: Vec<serde_json::Value>,
+    pub ambiguity_notes: Vec<String>,
+    pub evidence: Vec<serde_json::Value>,
+    pub caveats: Vec<String>,
+    pub suggested_next: Vec<String>,
+}
+
+/// Response from the person-history tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PersonHistoryResponse {
+    pub schema: &'static str,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub canonical_candidate: String,
+    pub total_mentions: usize,
+    pub limit: usize,
+    pub mentions: Vec<serde_json::Value>,
+    pub earliest_unambiguous: serde_json::Value,
+    pub ambiguous_earlier_hits: Vec<serde_json::Value>,
+    pub evidence: Vec<serde_json::Value>,
+    pub caveats: Vec<String>,
+    pub suggested_next: Vec<String>,
+}
+
+/// Response from the citation-verify tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CitationVerifyResponse {
+    pub schema: &'static str,
+    pub quote: String,
+    pub claimed_attribution: Option<String>,
+    pub scope_source_work_id: Option<String>,
+    pub scope_canon: Option<String>,
+    pub verified: bool,
+    pub exact_hit_count: usize,
+    pub exact_hits: Vec<serde_json::Value>,
+    pub near_matches: Vec<CitationNearMatch>,
+    pub verdict: String,
+    pub search_strategy: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CitationNearMatch {
+    pub passage_id: String,
+    pub source_work_id: Option<String>,
+    pub main_title: Option<String>,
+    pub heading: Option<String>,
+    pub overlap_score: f64,
+    pub zh_quote: String,
 }

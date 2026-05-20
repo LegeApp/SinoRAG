@@ -37,7 +37,7 @@ Auto mode picks the smallest coherent container that fits the budget by walking 
 Output:
 ```json
 {
-  "schema": "sinoragd-expand-context-adaptive-v1",
+  "schema": "sinorag-expand-context-adaptive-v1",
   "seed_passage_id": "...",
   "selected_node_id": 1234,
   "selected_node_kind": "Division",
@@ -64,7 +64,7 @@ Algorithm:
 Output:
 ```json
 {
-  "schema": "sinoragd-first-mention-v1",
+  "schema": "sinorag-first-mention-v1",
   "phrase": "如是我聞",
   "variants_searched": ["如是我聞", "我聞如是"],
   "first": { "passage_id":..., "period":..., "period_rank":..., "source_work_id":..., "main_title":..., "from_lb":..., "zh_quote":... },
@@ -87,7 +87,7 @@ Algorithm:
 Output:
 ```json
 {
-  "schema": "sinoragd-term-usage-trace-v1",
+  "schema": "sinorag-term-usage-trace-v1",
   "phrase": "...",
   "group_by": "period",
   "groups": [
@@ -112,7 +112,7 @@ Algorithm (pragmatic, no LLM needed for the initial implementation):
 Output:
 ```json
 {
-  "schema": "sinoragd-query-expand-terms-v1",
+  "schema": "sinorag-query-expand-terms-v1",
   "input": "Amitabha",
   "expanded": ["阿彌陀", "阿弥陀", "無量壽", "無量光", "Amitābha"],
   "by_source": {
@@ -143,10 +143,10 @@ src/templates/mod.rs                         (declare variants mod)
 
 ## Validation checklist
 
-- `sinoragd expand-context-adaptive --passage-id <T48n2005-something> --max-chars 4000` returns a Division-level node when the budget can't fit the whole work.
-- `sinoragd find-first-mention --phrase "如是我聞"` returns a Tang-era or earlier hit with `period_rank` populated correctly.
-- `sinoragd trace-term-usage --phrase "頓悟" --group-by period` shows non-zero hit counts in at least 3 distinct periods.
-- `sinoragd query-expand-terms --phrase "Amitabha"` returns at least 3 variants.
+- `sinorag expand-context-adaptive --passage-id <T48n2005-something> --max-chars 4000` returns a Division-level node when the budget can't fit the whole work.
+- `sinorag find-first-mention --phrase "如是我聞"` returns a Tang-era or earlier hit with `period_rank` populated correctly.
+- `sinorag trace-term-usage --phrase "頓悟" --group-by period` shows non-zero hit counts in at least 3 distinct periods.
+- `sinorag query-expand-terms --phrase "Amitabha"` returns at least 3 variants.
 
 ## Out of scope (Phase F2)
 

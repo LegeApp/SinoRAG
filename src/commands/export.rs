@@ -4,7 +4,8 @@
 
 use crate::jsonout::write_or_print;
 use crate::templates::{
-    self, evidence_graph, lineage_graph, markdown_report, readzen_collection, timeline_graph,
+    self, evidence_graph, lineage_graph, markdown_report, pdf_report as pdf_report_template,
+    readzen_collection, timeline_graph,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -49,6 +50,18 @@ pub fn graph(
 pub fn pdf(input_markdown: PathBuf, out: PathBuf, side_by_side: bool) -> Result<()> {
     let markdown = std::fs::read_to_string(&input_markdown)?;
     pdf_from_markdown(&markdown, out, side_by_side)
+}
+
+pub fn pdf_report(
+    input: PathBuf,
+    out: PathBuf,
+    side_by_side: bool,
+    title: Option<String>,
+    essay_max_pages: usize,
+) -> Result<()> {
+    let payload = templates::read_json(&input)?;
+    let sections = pdf_report_template::render(&payload, title.as_deref(), essay_max_pages);
+    pdf_from_sections(&sections.chinese, &sections.english, out, side_by_side)
 }
 
 pub fn report_build(
@@ -146,19 +159,23 @@ pub fn report_build(
 /// still evolving alongside the research-packet contract, so we accept
 /// whatever the model emits and let the formatter do the best it can.
 fn pdf_from_markdown(markdown: &str, out: PathBuf, side_by_side: bool) -> Result<()> {
+    let (zh, en) = markdown_to_pdf_sections(markdown);
+    pdf_from_sections(&zh, &en, out, side_by_side)
+}
+
+fn pdf_from_sections(zh: &[String], en: &[String], out: PathBuf, side_by_side: bool) -> Result<()> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let (zh, en) = markdown_to_pdf_sections(markdown);
     let mut context = cbeta_pdf_creator::FontContext::initialize_fonts()?;
     context.set_options(595.0, 842.0, 72.0, 12.5, 11.5, 1.35, 8.0, 6.0, 0.45);
     let output = out.to_string_lossy().to_string();
     if side_by_side {
         cbeta_pdf_creator::create_bilingual_pdf_side_by_side_with_context(
-            &zh, &en, &output, &context,
+            zh, en, &output, &context,
         )?;
     } else {
-        cbeta_pdf_creator::create_bilingual_pdf_with_context(&zh, &en, &output, &context)?;
+        cbeta_pdf_creator::create_bilingual_pdf_with_context(zh, en, &output, &context)?;
     }
     println!("wrote {}", out.display());
     Ok(())
@@ -210,4 +227,35 @@ fn strip_markdown(line: &str) -> String {
         .trim_start_matches("> ")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pdf_report;
+    use serde_json::json;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn pdf_report_writes_basic_pdf_from_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("report.json");
+        let out = dir.path().join("report.pdf");
+        let payload = json!({
+            "schema": "test-report-v1",
+            "title": "PDF Smoke Test",
+            "query": {"raw": "佛性"},
+            "evidence": [{
+                "passage_id": "T01#1",
+                "main_title": "Test Sutra",
+                "zh_quote": "佛性常住"
+            }]
+        });
+        std::fs::write(&input, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+        pdf_report(input, out.clone(), false, None, 1).expect("pdf generation");
+
+        let bytes = std::fs::read(out).expect("pdf bytes");
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(bytes.len() > 1024);
+    }
 }

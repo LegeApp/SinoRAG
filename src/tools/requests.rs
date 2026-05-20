@@ -206,6 +206,27 @@ fn default_essay_max_pages() -> usize {
     5
 }
 
+/// Request for the pdf-build tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PdfBuildRequest {
+    #[serde(default)]
+    pub input_markdown: Option<PathBuf>,
+
+    #[serde(default)]
+    pub input_json: Option<PathBuf>,
+
+    pub out: PathBuf,
+
+    #[serde(default)]
+    pub side_by_side: bool,
+
+    #[serde(default)]
+    pub title: Option<String>,
+
+    #[serde(default = "default_essay_max_pages")]
+    pub essay_max_pages: usize,
+}
+
 /// Request for the works tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct WorksRequest {
@@ -507,6 +528,77 @@ pub struct CollocationSearchRequest {
 
     #[serde(default = "default_limit_collocates")]
     pub limit_collocates: usize,
+
+    /// Restrict search to a specific canon (e.g. "T" for Taishō).
+    #[serde(default)]
+    pub scope_canon: Option<String>,
+
+    /// Restrict search to a specific period (e.g. "Song", "Tang").
+    #[serde(default)]
+    pub scope_period: Option<String>,
+
+    /// Restrict search to a specific work by source_work_id.
+    #[serde(default)]
+    pub scope_source_work_id: Option<String>,
+
+    /// Restrict search to passages under a catalog node_id.
+    #[serde(default)]
+    pub scope_node_id: Option<u32>,
+}
+
+/// Request for the pair-appearance tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PairAppearanceRequest {
+    pub term1: String,
+    pub term2: String,
+
+    #[serde(default = "default_pair_unit")]
+    pub unit: String,
+
+    #[serde(default = "default_pair_window_chars")]
+    pub window_chars: usize,
+
+    #[serde(default)]
+    pub ordered: bool,
+
+    #[serde(default)]
+    pub allow_variants: bool,
+
+    #[serde(default)]
+    pub scope_canon: Option<String>,
+
+    #[serde(default)]
+    pub scope_period: Option<String>,
+
+    #[serde(default)]
+    pub scope_source_work_id: Option<String>,
+
+    #[serde(default)]
+    pub scope_node_id: Option<u32>,
+
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    #[serde(default = "default_pair_candidate_limit")]
+    pub max_candidates_per_term: usize,
+
+    #[serde(default = "default_true")]
+    pub include_snippets: bool,
+
+    #[serde(default)]
+    pub include_negative_summary: bool,
+}
+
+fn default_pair_unit() -> String {
+    "passage".to_string()
+}
+
+fn default_pair_window_chars() -> usize {
+    80
+}
+
+fn default_pair_candidate_limit() -> usize {
+    10_000
 }
 
 fn default_window_chars() -> usize {
@@ -794,4 +886,127 @@ fn default_report_kind() -> String {
 
 fn default_report_name() -> String {
     "evidence-report".to_string()
+}
+
+/// Request for the pair-profile tool: co-occurrence statistics grouped by period/canon/work.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PairProfileRequest {
+    pub term1: String,
+    pub term2: String,
+
+    /// Dimension to group by: "period", "canon", "work", or "author".
+    #[serde(default = "default_pair_profile_group_by")]
+    pub group_by: String,
+
+    /// Co-occurrence unit: "passage", "window", or "sentence".
+    #[serde(default = "default_pair_unit")]
+    pub unit: String,
+
+    #[serde(default = "default_pair_window_chars")]
+    pub window_chars: usize,
+
+    #[serde(default)]
+    pub allow_variants: bool,
+
+    #[serde(default)]
+    pub scope_canon: Option<String>,
+
+    #[serde(default)]
+    pub scope_period: Option<String>,
+
+    #[serde(default)]
+    pub scope_source_work_id: Option<String>,
+
+    /// Maximum passages to scan per term (caps memory/time).
+    #[serde(default = "default_pair_candidate_limit")]
+    pub max_candidates_per_term: usize,
+
+    /// Maximum number of groups returned.
+    #[serde(default = "default_pair_profile_limit_groups")]
+    pub limit_groups: usize,
+
+    /// Number of representative pair hits to include per group.
+    #[serde(default = "default_pair_profile_sample_hits")]
+    pub sample_hits_per_group: usize,
+}
+
+fn default_pair_profile_group_by() -> String {
+    "period".to_string()
+}
+
+fn default_pair_profile_limit_groups() -> usize {
+    20
+}
+
+fn default_pair_profile_sample_hits() -> usize {
+    3
+}
+
+/// Request for the person-resolve tool.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PersonResolveRequest {
+    /// Primary name form to resolve.
+    pub name: String,
+
+    /// Additional alias forms to search alongside the primary name.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// Request for the person-history tool.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PersonHistoryRequest {
+    /// Primary name form to search for.
+    pub name: String,
+
+    /// Additional alias forms to search alongside the primary name.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+
+    /// Maximum number of mentions to return.
+    #[serde(default = "default_person_history_limit")]
+    pub limit: usize,
+}
+
+fn default_person_history_limit() -> usize {
+    200
+}
+
+/// Request for the citation-verify tool.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct CitationVerifyRequest {
+    /// The claimed quotation text to verify.
+    pub quote: String,
+
+    /// Scope to a specific work by source_work_id (recommended when known).
+    #[serde(default)]
+    pub scope_source_work_id: Option<String>,
+
+    /// Scope to a specific catalog node_id.
+    #[serde(default)]
+    pub scope_node_id: Option<u32>,
+
+    /// Scope to a canon (e.g. "T" for Taishō).
+    #[serde(default)]
+    pub scope_canon: Option<String>,
+
+    /// Claimed author or work title (informational; used in the response summary).
+    #[serde(default)]
+    pub claimed_attribution: Option<String>,
+
+    /// Maximum exact hits to return.
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    /// Try variant-expanded near-matches when exact search finds nothing.
+    #[serde(default = "default_true")]
+    pub include_near_matches: bool,
+
+    /// Maximum near-match candidates to consider (TF-IDF based).
+    #[serde(default = "default_citation_near_limit")]
+    pub near_match_limit: usize,
+}
+
+fn default_citation_near_limit() -> usize {
+    10
 }

@@ -144,6 +144,126 @@ fn char_slice(value: &str, start: usize, end: usize) -> String {
         .collect()
 }
 
+fn find_char_offsets(haystack: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut offsets = Vec::new();
+    let mut search_start = 0usize;
+    while search_start <= haystack.len() {
+        let Some(rel_pos) = haystack[search_start..].find(needle) else {
+            break;
+        };
+        let byte_pos = search_start + rel_pos;
+        offsets.push(haystack[..byte_pos].chars().count());
+        search_start = byte_pos + needle.len();
+    }
+    offsets
+}
+
+fn find_offsets_for_terms(haystack: &str, terms: &[String]) -> Vec<usize> {
+    let mut offsets = terms
+        .iter()
+        .flat_map(|term| find_char_offsets(haystack, term))
+        .collect::<Vec<_>>();
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+fn min_pair_distance(a_offsets: &[usize], b_offsets: &[usize], ordered: bool) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for &a in a_offsets {
+        for &b in b_offsets {
+            if ordered && b < a {
+                continue;
+            }
+            let distance = a.abs_diff(b);
+            best = Some(best.map_or(distance, |current| current.min(distance)));
+        }
+    }
+    best
+}
+
+fn has_sentence_pair(text: &str, a_offsets: &[usize], b_offsets: &[usize], ordered: bool) -> bool {
+    let sentence_break =
+        |ch: char| matches!(ch, '。' | '！' | '？' | '；' | '\n' | '.' | '!' | '?' | ';');
+    let mut start = 0usize;
+    let mut current = 0usize;
+    for ch in text.chars() {
+        current += 1;
+        if sentence_break(ch) {
+            if span_has_pair(start, current, a_offsets, b_offsets, ordered) {
+                return true;
+            }
+            start = current;
+        }
+    }
+    span_has_pair(start, current, a_offsets, b_offsets, ordered)
+}
+
+fn span_has_pair(
+    start: usize,
+    end: usize,
+    a_offsets: &[usize],
+    b_offsets: &[usize],
+    ordered: bool,
+) -> bool {
+    a_offsets.iter().any(|&a| {
+        a >= start
+            && a < end
+            && b_offsets
+                .iter()
+                .any(|&b| b >= start && b < end && (!ordered || b >= a))
+    })
+}
+
+fn pair_snippet(
+    text: &str,
+    a_offsets: &[usize],
+    b_offsets: &[usize],
+    context_chars: usize,
+) -> String {
+    let Some(first) = a_offsets.iter().chain(b_offsets.iter()).min().copied() else {
+        return char_prefix(text, context_chars.saturating_mul(2));
+    };
+    let last = a_offsets
+        .iter()
+        .chain(b_offsets.iter())
+        .max()
+        .copied()
+        .unwrap_or(first);
+    let start = first.saturating_sub(context_chars);
+    let end = (last + context_chars).min(char_len(text));
+    char_slice(text, start, end)
+}
+
+fn pair_term_variants(term: &str, allow_variants: bool) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    let mut terms = Vec::new();
+    let normalized = crate::normalize::normalize_zh(term);
+    if !normalized.is_empty() && seen.insert(normalized.clone()) {
+        terms.push(normalized);
+    }
+    if allow_variants {
+        let tables = crate::templates::variants::VariantTables::load();
+        for variant in tables.term_variants(term) {
+            let normalized = crate::normalize::normalize_zh(&variant);
+            if !normalized.is_empty() && seen.insert(normalized.clone()) {
+                terms.push(normalized);
+            }
+        }
+        for variant in tables.orthographic_flips(term, 20) {
+            let normalized = crate::normalize::normalize_zh(&variant);
+            if !normalized.is_empty() && seen.insert(normalized.clone()) {
+                terms.push(normalized);
+            }
+        }
+    }
+    terms.truncate(20);
+    terms
+}
+
 fn split_heading_path(value: Option<&str>) -> Vec<String> {
     value
         .unwrap_or("")
@@ -2144,6 +2264,58 @@ impl ToolEngine {
         })
     }
 
+    /// Implement the pdf-build tool
+    pub async fn pdf_build_impl(
+        &self,
+        req: crate::tools::requests::PdfBuildRequest,
+    ) -> Result<crate::tools::responses::PdfBuildResponse> {
+        use crate::commands::export;
+        use crate::templates;
+        use crate::tools::responses::PdfBuildResponse;
+
+        self.ensure_write_allowed("pdf-build", &req.out)?;
+
+        let source_count =
+            usize::from(req.input_markdown.is_some()) + usize::from(req.input_json.is_some());
+        if source_count != 1 {
+            anyhow::bail!("pdf-build expects exactly one of input_markdown or input_json");
+        }
+
+        let (source_format, section_count) = if let Some(input) = req.input_markdown {
+            let markdown = std::fs::read_to_string(&input)?;
+            let section_count = markdown
+                .lines()
+                .filter(|line| line.trim_start().starts_with('#'))
+                .count()
+                .max(1);
+            export::pdf(input, req.out.clone(), req.side_by_side)?;
+            ("markdown".to_string(), section_count)
+        } else if let Some(input) = req.input_json {
+            let payload = templates::read_json(&input)?;
+            let sections =
+                templates::pdf_report::render(&payload, req.title.as_deref(), req.essay_max_pages);
+            let section_count = sections.english.len();
+            export::pdf_report(
+                input,
+                req.out.clone(),
+                req.side_by_side,
+                req.title,
+                req.essay_max_pages,
+            )?;
+            ("json_basic_report".to_string(), section_count)
+        } else {
+            unreachable!("source_count validation ensures one input is present");
+        };
+
+        Ok(PdfBuildResponse {
+            schema: "sinorag-pdf-build-v1",
+            out: req.out,
+            source_format,
+            section_count,
+            side_by_side: req.side_by_side,
+        })
+    }
+
     /// Implement the works tool
     pub async fn works_impl(
         &self,
@@ -3017,6 +3189,16 @@ impl ToolEngine {
         let doc_table = self.doc_table().await?;
         let passages = self.passages().await?;
         let phrase_index_path = self.optional_phrase_path().await?;
+        let catalog = self.catalog().await.ok();
+        let canon = expand_optional_filter(req.scope_canon.as_deref());
+        let period = expand_period_filter(req.scope_period.as_deref());
+        let doc_range = if let Some(catalog) = catalog.as_deref() {
+            self.resolve_doc_range(catalog, req.scope_node_id, req.scope_source_work_id.as_deref())?
+        } else {
+            None
+        };
+        let canon_for_index = if canon.is_empty() { None } else { Some(canon.as_slice()) };
+        let period_for_index = if period.len() == 1 { Some(period[0].as_str()) } else { None };
 
         let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
@@ -3024,9 +3206,9 @@ impl ToolEngine {
             phrase_index_path.as_deref(),
             &req.phrase,
             req.limit_total,
-            None,
-            None,
-            None,
+            doc_range,
+            canon_for_index,
+            period_for_index,
         )
         .await?;
 
@@ -3107,6 +3289,203 @@ impl ToolEngine {
                 phrase: phrase_strategy,
                 limit_total: req.limit_total,
                 limit_collocates: req.limit_collocates,
+            },
+        })
+    }
+
+    /// Implement the pair-appearance tool
+    pub async fn pair_appearance_impl(
+        &self,
+        req: crate::tools::requests::PairAppearanceRequest,
+    ) -> Result<crate::tools::responses::PairAppearanceResponse> {
+        use crate::tools::responses::{
+            PairAppearanceHit, PairAppearanceNegativeSummary, PairAppearanceResponse,
+            PairAppearanceSearchStrategy,
+        };
+
+        let unit = match req.unit.as_str() {
+            "passage" | "window" | "sentence" => req.unit.clone(),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unsupported pair-appearance unit '{other}'; supported units are passage, window, sentence"
+                ));
+            }
+        };
+
+        let doc_table = self.doc_table().await?;
+        let passages = self.passages().await?;
+        let phrase_index_path = self.optional_phrase_path().await?;
+        let catalog = self.catalog().await.ok();
+        let canon = expand_optional_filter(req.scope_canon.as_deref());
+        let period = expand_period_filter(req.scope_period.as_deref());
+        let doc_range = if let Some(catalog) = catalog.as_deref() {
+            self.resolve_doc_range(
+                catalog,
+                req.scope_node_id,
+                req.scope_source_work_id.as_deref(),
+            )?
+        } else {
+            None
+        };
+        let canon_for_index = if canon.is_empty() {
+            None
+        } else {
+            Some(canon.as_slice())
+        };
+        let period_for_index = if period.len() == 1 {
+            Some(period[0].as_str())
+        } else {
+            None
+        };
+
+        let term1_variants = pair_term_variants(&req.term1, req.allow_variants);
+        let term2_variants = pair_term_variants(&req.term2, req.allow_variants);
+        let candidate_limit = req.max_candidates_per_term.max(req.limit.max(1));
+
+        let (term1_rows, term1_strategy) = self
+            .pair_candidate_rows(
+                &passages,
+                &doc_table,
+                phrase_index_path.as_deref(),
+                &term1_variants,
+                candidate_limit,
+                doc_range,
+                canon_for_index,
+                period_for_index,
+                req.scope_source_work_id.as_deref(),
+            )
+            .await?;
+        let (term2_rows, term2_strategy) = self
+            .pair_candidate_rows(
+                &passages,
+                &doc_table,
+                phrase_index_path.as_deref(),
+                &term2_variants,
+                candidate_limit,
+                doc_range,
+                canon_for_index,
+                period_for_index,
+                req.scope_source_work_id.as_deref(),
+            )
+            .await?;
+
+        let term2_by_pid = term2_rows
+            .iter()
+            .filter_map(|row| {
+                row.get("passage_id")
+                    .and_then(|v| v.as_str())
+                    .map(|pid| (pid.to_string(), row))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let mut hits = Vec::new();
+        for row in &term1_rows {
+            let Some(pid) = row.get("passage_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !term2_by_pid.contains_key(pid) {
+                continue;
+            }
+            let norm = row
+                .get("zh_text_normalized")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let term1_offsets = find_offsets_for_terms(norm, &term1_variants);
+            let term2_offsets = find_offsets_for_terms(norm, &term2_variants);
+            if term1_offsets.is_empty() || term2_offsets.is_empty() {
+                continue;
+            }
+            let distance = min_pair_distance(&term1_offsets, &term2_offsets, req.ordered);
+            let keep = match unit.as_str() {
+                "passage" => distance.is_some(),
+                "window" => distance.map(|d| d <= req.window_chars).unwrap_or(false),
+                "sentence" => has_sentence_pair(norm, &term1_offsets, &term2_offsets, req.ordered),
+                _ => false,
+            };
+            if !keep {
+                continue;
+            }
+            let quote = if req.include_snippets {
+                pair_snippet(
+                    norm,
+                    &term1_offsets,
+                    &term2_offsets,
+                    req.window_chars.max(40),
+                )
+            } else {
+                String::new()
+            };
+            hits.push(PairAppearanceHit {
+                passage_id: pid.to_string(),
+                source_work_id: opt_str(row, "source_work_id"),
+                main_title: opt_str(row, "main_title"),
+                heading: opt_str(row, "heading"),
+                distance_chars: distance,
+                term1_offsets,
+                term2_offsets,
+                zh_quote: quote,
+            });
+        }
+
+        let pair_hit_count = hits.len();
+        hits.truncate(req.limit.max(1));
+
+        let negative_summary = if req.include_negative_summary {
+            let term2_ids = term2_rows
+                .iter()
+                .filter_map(|row| row.get("passage_id").and_then(|v| v.as_str()))
+                .collect::<std::collections::BTreeSet<_>>();
+            let term1_ids = term1_rows
+                .iter()
+                .filter_map(|row| row.get("passage_id").and_then(|v| v.as_str()))
+                .collect::<std::collections::BTreeSet<_>>();
+            let term1_only = term1_ids
+                .iter()
+                .filter(|pid| !term2_ids.contains(**pid))
+                .copied()
+                .collect::<Vec<_>>();
+            let term2_only = term2_ids
+                .iter()
+                .filter(|pid| !term1_ids.contains(**pid))
+                .copied()
+                .collect::<Vec<_>>();
+            Some(PairAppearanceNegativeSummary {
+                term1_only_count: term1_only.len(),
+                term2_only_count: term2_only.len(),
+                sample_term1_only_passage_ids: term1_only
+                    .iter()
+                    .take(10)
+                    .map(|pid| (*pid).to_string())
+                    .collect(),
+                sample_term2_only_passage_ids: term2_only
+                    .iter()
+                    .take(10)
+                    .map(|pid| (*pid).to_string())
+                    .collect(),
+            })
+        } else {
+            None
+        };
+
+        Ok(PairAppearanceResponse {
+            schema: "sinorag-pair-appearance-v1",
+            term1: req.term1,
+            term2: req.term2,
+            unit: unit.clone(),
+            window_chars: req.window_chars,
+            ordered: req.ordered,
+            total_term1_hits: term1_rows.len(),
+            total_term2_hits: term2_rows.len(),
+            pair_hit_count,
+            hits,
+            negative_summary,
+            search_strategy: PairAppearanceSearchStrategy {
+                term1: term1_strategy,
+                term2: term2_strategy,
+                unit,
+                supported_units: vec!["passage", "window", "sentence"],
+                used_variant_expansion: req.allow_variants,
+                max_candidates_per_term: candidate_limit,
             },
         })
     }
@@ -4846,6 +5225,81 @@ impl ToolEngine {
         })
     }
 
+    async fn pair_candidate_rows(
+        &self,
+        passages: &DataFusionStore,
+        doc_table: &DocumentTable,
+        phrase_index_path: Option<&std::path::Path>,
+        variants: &[String],
+        limit: usize,
+        doc_range: Option<(u32, u32)>,
+        canon: Option<&[String]>,
+        period: Option<&str>,
+        source_work_id: Option<&str>,
+    ) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
+        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+
+        let mut rows = Vec::<serde_json::Value>::new();
+        let mut strategies = Vec::new();
+        for variant in variants {
+            let (variant_rows, strategy) = phrase_rows_with_explicit_doc_table(
+                passages,
+                doc_table,
+                phrase_index_path,
+                variant,
+                limit,
+                doc_range,
+                canon,
+                period,
+            )
+            .await?;
+            strategies.push(serde_json::json!({
+                "variant": variant,
+                "strategy": strategy,
+            }));
+            rows.extend(variant_rows);
+        }
+        rows.retain(|row| {
+            if let Some(work_id) = source_work_id {
+                if row
+                    .get("source_work_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    != work_id
+                {
+                    return false;
+                }
+            }
+            true
+        });
+        let mut seen = std::collections::BTreeSet::<String>::new();
+        rows.retain(|row| {
+            let pid = row
+                .get("passage_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            !pid.is_empty() && seen.insert(pid)
+        });
+        rows.sort_by_key(|row| {
+            row.get("passage_id")
+                .and_then(|v| v.as_str())
+                .and_then(|pid| doc_table.doc_id(pid))
+                .unwrap_or(u32::MAX)
+        });
+        rows.truncate(limit);
+
+        Ok((
+            rows,
+            serde_json::json!({
+                "variants": variants,
+                "strategies": strategies,
+                "deduped_count": seen.len(),
+                "limit": limit,
+            }),
+        ))
+    }
+
     /// Helper: resolve doc range from catalog
     fn resolve_doc_range(
         &self,
@@ -4942,4 +5396,486 @@ impl ToolEngine {
         }
         Ok((terms, term_display, passage_count))
     }
+
+    /// Implement the pair-profile tool: grouped co-occurrence statistics.
+    pub async fn pair_profile_impl(
+        &self,
+        req: crate::tools::requests::PairProfileRequest,
+    ) -> Result<crate::tools::responses::PairProfileResponse> {
+        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+        use crate::tools::responses::{PairAppearanceHit, PairProfileGroup, PairProfileResponse};
+
+        let unit = match req.unit.as_str() {
+            "passage" | "window" | "sentence" => req.unit.clone(),
+            other => anyhow::bail!(
+                "unsupported pair-profile unit '{other}'; use passage, window, or sentence"
+            ),
+        };
+
+        let doc_table = self.doc_table().await?;
+        let passages = self.passages().await?;
+        let phrase_index_path = self.optional_phrase_path().await?;
+        let catalog = self.catalog().await.ok();
+        let canon = expand_optional_filter(req.scope_canon.as_deref());
+        let period = expand_period_filter(req.scope_period.as_deref());
+        let doc_range = if let Some(cat) = catalog.as_deref() {
+            self.resolve_doc_range(cat, None, req.scope_source_work_id.as_deref())?
+        } else {
+            None
+        };
+        let canon_for_index = if canon.is_empty() { None } else { Some(canon.as_slice()) };
+        let period_for_index = if period.len() == 1 { Some(period[0].as_str()) } else { None };
+
+        let term1_variants = pair_term_variants(&req.term1, req.allow_variants);
+        let term2_variants = pair_term_variants(&req.term2, req.allow_variants);
+        let candidate_limit = req.max_candidates_per_term.max(1);
+
+        let (term1_rows, term1_strategy) = self
+            .pair_candidate_rows(
+                &passages,
+                &doc_table,
+                phrase_index_path.as_deref(),
+                &term1_variants,
+                candidate_limit,
+                doc_range,
+                canon_for_index,
+                period_for_index,
+                req.scope_source_work_id.as_deref(),
+            )
+            .await?;
+        let (term2_rows, term2_strategy) = self
+            .pair_candidate_rows(
+                &passages,
+                &doc_table,
+                phrase_index_path.as_deref(),
+                &term2_variants,
+                candidate_limit,
+                doc_range,
+                canon_for_index,
+                period_for_index,
+                req.scope_source_work_id.as_deref(),
+            )
+            .await?;
+
+        let term2_by_pid: std::collections::BTreeMap<String, &serde_json::Value> = term2_rows
+            .iter()
+            .filter_map(|row| {
+                row.get("passage_id")
+                    .and_then(|v| v.as_str())
+                    .map(|pid| (pid.to_string(), row))
+            })
+            .collect();
+
+        // Collect pair hits with group label
+        let group_field = match req.group_by.as_str() {
+            "period" => "period",
+            "canon" => "canon",
+            "work" => "main_title",
+            "author" => "author",
+            other => anyhow::bail!("unknown group_by '{other}'; use period, canon, work, or author"),
+        };
+
+        let mut group_term1: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut group_term2: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut group_pairs: std::collections::BTreeMap<String, Vec<PairAppearanceHit>> = Default::default();
+
+        for row in &term1_rows {
+            let label = opt_str(row, group_field).unwrap_or_default();
+            *group_term1.entry(label).or_insert(0) += 1;
+        }
+        for row in &term2_rows {
+            let label = opt_str(row, group_field).unwrap_or_default();
+            *group_term2.entry(label).or_insert(0) += 1;
+        }
+
+        let mut total_pair_hits = 0usize;
+        for row in &term1_rows {
+            let Some(pid) = row.get("passage_id").and_then(|v| v.as_str()) else { continue };
+            if !term2_by_pid.contains_key(pid) {
+                continue;
+            }
+            let norm = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
+            let t1_off = find_offsets_for_terms(norm, &term1_variants);
+            let t2_off = find_offsets_for_terms(norm, &term2_variants);
+            if t1_off.is_empty() || t2_off.is_empty() { continue; }
+            let distance = min_pair_distance(&t1_off, &t2_off, false);
+            let keep = match unit.as_str() {
+                "passage" => distance.is_some(),
+                "window" => distance.map(|d| d <= req.window_chars).unwrap_or(false),
+                "sentence" => has_sentence_pair(norm, &t1_off, &t2_off, false),
+                _ => false,
+            };
+            if !keep { continue; }
+            let label = opt_str(row, group_field).unwrap_or_default();
+            let hit = PairAppearanceHit {
+                passage_id: pid.to_string(),
+                source_work_id: opt_str(row, "source_work_id"),
+                main_title: opt_str(row, "main_title"),
+                heading: opt_str(row, "heading"),
+                distance_chars: distance,
+                term1_offsets: t1_off,
+                term2_offsets: t2_off,
+                zh_quote: pair_snippet(norm, &[], &[], req.window_chars.max(40)),
+            };
+            group_pairs.entry(label).or_default().push(hit);
+            total_pair_hits += 1;
+        }
+
+        // Build groups, sorted by pair_count descending
+        let mut all_labels: std::collections::BTreeSet<String> = Default::default();
+        all_labels.extend(group_term1.keys().cloned());
+        all_labels.extend(group_term2.keys().cloned());
+        all_labels.extend(group_pairs.keys().cloned());
+
+        let mut groups: Vec<PairProfileGroup> = all_labels
+            .into_iter()
+            .map(|label| {
+                let t1 = *group_term1.get(&label).unwrap_or(&0);
+                let t2 = *group_term2.get(&label).unwrap_or(&0);
+                let pairs = group_pairs.get(&label).cloned().unwrap_or_default();
+                let pc = pairs.len();
+                let r1 = if t1 > 0 { pc as f64 / t1 as f64 } else { 0.0 };
+                let r2 = if t2 > 0 { pc as f64 / t2 as f64 } else { 0.0 };
+                let sample = pairs.into_iter().take(req.sample_hits_per_group).collect();
+                PairProfileGroup {
+                    group_label: label,
+                    term1_count: t1,
+                    term2_count: t2,
+                    pair_count: pc,
+                    pair_rate_given_term1: r1,
+                    pair_rate_given_term2: r2,
+                    representative_hits: sample,
+                }
+            })
+            .collect();
+        groups.sort_by(|a, b| b.pair_count.cmp(&a.pair_count));
+        groups.truncate(req.limit_groups.max(1));
+
+        Ok(PairProfileResponse {
+            schema: "sinorag-pair-profile-v1",
+            term1: req.term1,
+            term2: req.term2,
+            unit,
+            group_by: req.group_by,
+            total_term1_hits: term1_rows.len(),
+            total_term2_hits: term2_rows.len(),
+            total_pair_hits,
+            groups,
+            search_strategy: serde_json::json!({
+                "term1": term1_strategy,
+                "term2": term2_strategy,
+                "max_candidates_per_term": candidate_limit,
+            }),
+        })
+    }
+
+    /// Implement the person-resolve tool.
+    pub async fn person_resolve_impl(
+        &self,
+        req: crate::tools::requests::PersonResolveRequest,
+    ) -> Result<crate::tools::responses::PersonResolveResponse> {
+        use crate::research::{evidence_from_row, exact_phrase_rows, SearchSpec};
+        use crate::tools::responses::PersonResolveResponse;
+
+        let passages = self.passages().await?;
+        let mut forms = vec![req.name.clone()];
+        for alias in &req.aliases {
+            if !forms.iter().any(|v| v == alias) {
+                forms.push(alias.clone());
+            }
+        }
+
+        let mut name_forms = Vec::new();
+        let mut evidence = Vec::new();
+        for form in &forms {
+            let spec = SearchSpec::exact_phrase(form.clone(), 50);
+            let rows = exact_phrase_rows(&passages, &spec).await?;
+            if let Some(first) = rows.first() {
+                evidence.push(evidence_from_row(first, form, "name_form_sample"));
+            }
+            name_forms.push(serde_json::json!({
+                "form": form,
+                "normalized": spec.normalized,
+                "hit_count_sample": rows.len(),
+                "first_hit": rows.first().cloned().unwrap_or(serde_json::Value::Null),
+                "ambiguity": if form.chars().count() <= 1 { "high" } else { "unknown" }
+            }));
+        }
+
+        Ok(PersonResolveResponse {
+            schema: "sinorag-person-resolve-v1",
+            name: req.name.clone(),
+            aliases: req.aliases,
+            canonical_candidate: forms.first().cloned().unwrap_or_default(),
+            name_forms,
+            ambiguity_notes: vec![
+                "Short aliases and honorific titles may refer to more than one person.".to_string(),
+                "Use person-history to inspect earliest and contextualised mentions.".to_string(),
+            ],
+            evidence,
+            caveats: vec![
+                "This is a corpus-local resolver; no external authority file is consulted.".to_string(),
+                "Supply all known aliases explicitly.".to_string(),
+            ],
+            suggested_next: vec![
+                "Run person-history with the same aliases to classify mention contexts.".to_string(),
+            ],
+        })
+    }
+
+    /// Implement the person-history tool.
+    pub async fn person_history_impl(
+        &self,
+        req: crate::tools::requests::PersonHistoryRequest,
+    ) -> Result<crate::tools::responses::PersonHistoryResponse> {
+        use crate::research::{evidence_from_row, exact_phrase_rows, field_str, SearchSpec};
+        use crate::tools::responses::PersonHistoryResponse;
+        use std::collections::btree_map::Entry;
+        use std::collections::BTreeMap;
+
+        let passages = self.passages().await?;
+        let limit = req.limit.max(1);
+        let mut forms = vec![req.name.clone()];
+        for alias in &req.aliases {
+            if !forms.iter().any(|v| v == alias) {
+                forms.push(alias.clone());
+            }
+        }
+
+        let mut by_passage: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        for (idx, form) in forms.iter().enumerate() {
+            let rows =
+                exact_phrase_rows(&passages, &SearchSpec::exact_phrase(form.clone(), limit)).await?;
+            for mut row in rows {
+                let passage_id = field_str(&row, "passage_id");
+                let mention_class = classify_person_mention(&row, form);
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("matched_name_form".to_string(), serde_json::json!(form));
+                    obj.insert("matched_name_forms".to_string(), serde_json::json!([form]));
+                    obj.insert("is_primary_name".to_string(), serde_json::json!(idx == 0));
+                    obj.insert("mention_class".to_string(), serde_json::json!(mention_class));
+                    obj.insert(
+                        "ambiguity".to_string(),
+                        serde_json::json!(if idx == 0 { "unambiguous_candidate" } else { "alias_candidate" }),
+                    );
+                }
+                match by_passage.entry(passage_id) {
+                    Entry::Vacant(e) => { e.insert(row); }
+                    Entry::Occupied(mut e) => { merge_person_mention(e.get_mut(), form, idx == 0); }
+                }
+            }
+        }
+
+        let mut mentions: Vec<serde_json::Value> = by_passage.into_values().collect();
+        mentions.sort_by_key(|row| {
+            (
+                row.get("period_rank").and_then(|v| v.as_i64()).unwrap_or(99),
+                field_str(row, "source_rel_path"),
+                field_str(row, "from_lb"),
+                field_str(row, "xml_id"),
+            )
+        });
+        mentions.truncate(limit);
+
+        let earliest_unambiguous = mentions
+            .iter()
+            .find(|row| row.get("is_primary_name").and_then(|v| v.as_bool()) == Some(true))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let ambiguous_earlier_hits = mentions
+            .iter()
+            .filter(|row| row.get("is_primary_name").and_then(|v| v.as_bool()) != Some(true))
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>();
+        let evidence = mentions
+            .iter()
+            .take(12)
+            .map(|row| {
+                let form = row.get("matched_name_form").and_then(|v| v.as_str()).unwrap_or(&req.name);
+                evidence_from_row(row, form, "person_mention")
+            })
+            .collect::<Vec<_>>();
+
+        let total_mentions = mentions.len();
+        Ok(PersonHistoryResponse {
+            schema: "sinorag-person-history-v1",
+            name: req.name,
+            aliases: req.aliases,
+            canonical_candidate: forms.first().cloned().unwrap_or_default(),
+            total_mentions,
+            limit,
+            mentions,
+            earliest_unambiguous,
+            ambiguous_earlier_hits,
+            evidence,
+            caveats: vec![
+                "Rule-based mention classes are triage labels, not accepted historical claims.".to_string(),
+                "Alias hits may refer to more than one person.".to_string(),
+            ],
+            suggested_next: vec![
+                "Review earliest hits with source-read before asserting a first mention.".to_string(),
+                "Use pair-appearance to check if this person is mentioned with another figure.".to_string(),
+            ],
+        })
+    }
+
+    /// Implement the citation-verify tool.
+    pub async fn citation_verify_impl(
+        &self,
+        req: crate::tools::requests::CitationVerifyRequest,
+    ) -> Result<crate::tools::responses::CitationVerifyResponse> {
+        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+        use crate::tools::responses::{CitationNearMatch, CitationVerifyResponse};
+
+        let doc_table = self.doc_table().await?;
+        let passages = self.passages().await?;
+        let phrase_index_path = self.optional_phrase_path().await?;
+        let catalog = self.catalog().await.ok();
+        let canon = expand_optional_filter(req.scope_canon.as_deref());
+        let doc_range = if let Some(cat) = catalog.as_deref() {
+            self.resolve_doc_range(cat, req.scope_node_id, req.scope_source_work_id.as_deref())?
+        } else {
+            None
+        };
+        let canon_for_index = if canon.is_empty() { None } else { Some(canon.as_slice()) };
+
+        let (exact_hits, strategy) = phrase_rows_with_explicit_doc_table(
+            &passages,
+            &doc_table,
+            phrase_index_path.as_deref(),
+            &req.quote,
+            req.limit,
+            doc_range,
+            canon_for_index,
+            None,
+        )
+        .await?;
+
+        let verified = !exact_hits.is_empty();
+        let exact_hit_count = exact_hits.len();
+
+        // Near-match: search for the most distinctive 4-gram substring of the quote
+        let mut near_matches: Vec<CitationNearMatch> = Vec::new();
+        if !verified && req.include_near_matches {
+            use crate::normalize::normalize_zh;
+            let normalized = normalize_zh(&req.quote);
+            // Extract 4-char substrings as candidate search terms
+            let chars: Vec<char> = normalized.chars().collect();
+            let gram_len = 4usize;
+            let mut candidates: std::collections::BTreeMap<String, Vec<serde_json::Value>> = Default::default();
+            for start in (0..chars.len()).step_by(gram_len).take(5) {
+                let end = (start + gram_len).min(chars.len());
+                if end - start < 2 { break; }
+                let sub: String = chars[start..end].iter().collect();
+                let (sub_hits, _) = phrase_rows_with_explicit_doc_table(
+                    &passages,
+                    &doc_table,
+                    phrase_index_path.as_deref(),
+                    &sub,
+                    req.near_match_limit * 3,
+                    doc_range,
+                    canon_for_index,
+                    None,
+                )
+                .await
+                .unwrap_or_default();
+                for row in sub_hits {
+                    let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !pid.is_empty() {
+                        candidates.entry(pid).or_default().push(row);
+                    }
+                }
+            }
+            // Score by how many sub-phrase windows matched + character overlap
+            let mut scored: Vec<(f64, String, serde_json::Value)> = candidates
+                .into_iter()
+                .filter_map(|(pid, rows)| {
+                    let row = rows.into_iter().next()?;
+                    let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
+                    let overlap = character_overlap_score(&normalized, text);
+                    Some((overlap, pid, row))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            for (overlap, pid, row) in scored.into_iter().take(req.near_match_limit) {
+                let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
+                near_matches.push(CitationNearMatch {
+                    passage_id: pid,
+                    source_work_id: opt_str(&row, "source_work_id"),
+                    main_title: opt_str(&row, "main_title"),
+                    heading: opt_str(&row, "heading"),
+                    overlap_score: overlap,
+                    zh_quote: text.chars().take(200).collect(),
+                });
+            }
+        }
+
+        let verdict = if verified {
+            format!("VERIFIED — found {} exact occurrence(s) in the corpus", exact_hit_count)
+        } else if !near_matches.is_empty() {
+            format!(
+                "NOT VERIFIED — quote not found exactly in the scoped corpus; {} near-match(es) found",
+                near_matches.len()
+            )
+        } else {
+            "NOT VERIFIED — no exact or near matches found in the scoped corpus".to_string()
+        };
+
+        let exact_hits_json: Vec<serde_json::Value> = exact_hits.into_iter().take(req.limit).collect();
+
+        Ok(CitationVerifyResponse {
+            schema: "sinorag-citation-verify-v1",
+            quote: req.quote,
+            claimed_attribution: req.claimed_attribution,
+            scope_source_work_id: req.scope_source_work_id,
+            scope_canon: req.scope_canon,
+            verified,
+            exact_hit_count,
+            exact_hits: exact_hits_json,
+            near_matches,
+            verdict,
+            search_strategy: strategy,
+        })
+    }
+}
+
+fn classify_person_mention(row: &serde_json::Value, form: &str) -> &'static str {
+    let text = row.get("zh_text_raw").and_then(|v| v.as_str()).unwrap_or("");
+    if text.contains("嗣") || text.contains("法嗣") || text.contains("傳法") || text.contains("弟子") {
+        "lineage_relation"
+    } else if text.contains(form) && (text.contains("云") || text.contains("曰") || text.contains("示")) {
+        "attributed_saying"
+    } else if row.get("text_type").and_then(|v| v.as_str()) == Some("dialogue") {
+        "case_appearance"
+    } else if text.contains("頌") || text.contains("評") || text.contains("拈") {
+        "commentarial_reference"
+    } else {
+        "name_mention"
+    }
+}
+
+fn merge_person_mention(row: &mut serde_json::Value, form: &str, is_primary: bool) {
+    let Some(obj) = row.as_object_mut() else { return };
+    if is_primary {
+        obj.insert("is_primary_name".to_string(), serde_json::json!(true));
+        obj.insert("matched_name_form".to_string(), serde_json::json!(form));
+        obj.insert("ambiguity".to_string(), serde_json::json!("unambiguous_candidate"));
+    }
+    let entry = obj.entry("matched_name_forms".to_string()).or_insert_with(|| serde_json::json!([]));
+    if let Some(forms) = entry.as_array_mut() {
+        if !forms.iter().any(|v| v.as_str() == Some(form)) {
+            forms.push(serde_json::json!(form));
+        }
+    }
+}
+
+fn character_overlap_score(query: &str, text: &str) -> f64 {
+    if query.is_empty() || text.is_empty() {
+        return 0.0;
+    }
+    let query_chars: std::collections::BTreeSet<char> = query.chars().collect();
+    let text_chars: std::collections::BTreeSet<char> = text.chars().collect();
+    let intersection = query_chars.intersection(&text_chars).count();
+    intersection as f64 / query_chars.len() as f64
 }

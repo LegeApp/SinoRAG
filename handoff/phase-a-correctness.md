@@ -47,7 +47,7 @@ My doc-table refactor in commit `4a7d206` builds all aligned arrays from a singl
 
 **Action (after the in-flight TF-IDF finishes):**
 ```
-sinoragd doc-table-build \
+sinorag doc-table-build \
   --parquet data/passages.parquet \
   --out     data/derived/doc_table.bin
 ```
@@ -92,10 +92,10 @@ src/memory.rs            (A6 helper)
 ## Validation checklist
 
 - `cargo build --release` clean.
-- `sinoragd ingest --help` shows `out_jsonl`, `out_parquet`, `zen_only` flags.
-- Invoking `sinoragd ingest` with a stale `.ingest_checkpoint.json` aborts with the error message.
-- `sinoragd tfidf-build --out /tmp/test.index` (no `--temp-dir`) writes work files under `/tmp/test.index.work/`.
-- `sinoragd ingest --phrase-max-memory 4G ...` produces an eprintln line showing the chosen bucket count.
+- `sinorag ingest --help` shows `out_jsonl`, `out_parquet`, `zen_only` flags.
+- Invoking `sinorag ingest` with a stale `.ingest_checkpoint.json` aborts with the error message.
+- `sinorag tfidf-build --out /tmp/test.index` (no `--temp-dir`) writes work files under `/tmp/test.index.work/`.
+- `sinorag ingest --phrase-max-memory 4G ...` produces an eprintln line showing the chosen bucket count.
 
 ## Out of scope for Phase A
 

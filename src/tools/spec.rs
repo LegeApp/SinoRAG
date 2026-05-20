@@ -17,6 +17,18 @@ pub enum ToolSafety {
     Admin,
 }
 
+/// Intended audience for a tool in agent-facing manifests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAudience {
+    /// Preferred task-level tools for ordinary agent workflows.
+    DefaultAgent,
+    /// Public lower-level tools for focused or specialist calls.
+    Specialist,
+    /// Debug or forced-path tools hidden from normal manifests.
+    InternalDebug,
+}
+
 /// Example usage of a tool for documentation
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolExample {

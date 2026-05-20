@@ -36,7 +36,7 @@ The checkpoint records:
 
 ```json
 {
-  "schema": "sinoragd-ingest-checkpoint-v1",
+  "schema": "sinorag-ingest-checkpoint-v1",
   "run_id": "ingest-2026-05-12T03-15-00Z",
   "started_utc": "2026-05-12T03:15:00Z",
   "processed_files": ["..."],
@@ -81,7 +81,7 @@ pub async fn run(
 ## Validation checklist
 
 - Fresh ingest: produces `data/passages.parquet/source_corpus=...` partitions; staging dir is gone after success.
-- Kill mid-ingest, then `sinoragd ingest --resume data/.staging/ingest-<id>`: continues from the last checkpoint, part indices advance from saved values, no partition file overwrites.
+- Kill mid-ingest, then `sinorag ingest --resume data/.staging/ingest-<id>`: continues from the last checkpoint, part indices advance from saved values, no partition file overwrites.
 - Try to ingest into an output that already has `source_corpus=cbeta`: fails with the clear error before doing any work.
 - On exception inside the run, staging dir is left intact for diagnosis.
 

@@ -5,7 +5,7 @@ use crate::tools::engine::ToolEngine;
 use crate::tools::errors::{classify_tool_error, ToolError};
 use crate::tools::requests::*;
 use crate::tools::responses::*;
-use crate::tools::spec::{schema_for, ToolDef, ToolExample, ToolSafety, ToolSpec};
+use crate::tools::spec::{schema_for, ToolAudience, ToolDef, ToolExample, ToolSafety, ToolSpec};
 
 /// Standard response envelope for tool calls
 #[derive(Debug, serde::Serialize)]
@@ -110,6 +110,27 @@ pub async fn call_tool_enveloped(
                 finished_utc: None,
             },
         },
+    }
+}
+
+pub fn audience_for_tool(name: &str) -> ToolAudience {
+    match name {
+        "status"
+        | "plan-tools"
+        | "evidence-search"
+        | "source-investigate"
+        | "hybrid-discover"
+        | "source-read"
+        | "scope-profile"
+        | "pair-appearance"
+        | "pair-profile"
+        | "citation-verify"
+        | "person-resolve"
+        | "person-history"
+        | "report-from-evidence"
+        | "pdf-build" => ToolAudience::DefaultAgent,
+        "phrase-index-search" | "catalog-index-info" | "vector-info" => ToolAudience::InternalDebug,
+        _ => ToolAudience::Specialist,
     }
 }
 
@@ -393,6 +414,40 @@ pub fn tool_defs() -> Vec<ToolDef> {
             call: |engine, args| Box::pin(async move {
                 let req: ReportBuildRequest = serde_json::from_value(args)?;
                 let res = engine.report_build_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+        // PDF-build tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "pdf-build",
+                description: "Build a PDF with the built-in Lopdf renderer from either Markdown or structured report/evidence JSON. Use input_json for the basic report template; no external PDF tools are required.",
+                input_schema: schema_for::<PdfBuildRequest>(),
+                output_schema: schema_for::<PdfBuildResponse>(),
+                requires: vec![],
+                safety: ToolSafety::WritesOutput,
+                examples: vec![
+                    ToolExample {
+                        title: "Build PDF from structured report JSON",
+                        args: serde_json::json!({
+                            "input_json": "GraphDiscovery/Runs/text-reuse-discovery/dossiers/test3.report.json",
+                            "out": "GraphDiscovery/Runs/text-reuse-discovery/dossiers/test3.report.pdf",
+                            "title": "Canonical Dependence Test 3"
+                        }),
+                    },
+                    ToolExample {
+                        title: "Build PDF from model-authored Markdown",
+                        args: serde_json::json!({
+                            "input_markdown": "GraphDiscovery/Runs/text-reuse-discovery/dossiers/test3.report.md",
+                            "out": "GraphDiscovery/Runs/text-reuse-discovery/dossiers/test3.report.pdf",
+                            "side_by_side": true
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PdfBuildRequest = serde_json::from_value(args)?;
+                let res = engine.pdf_build_impl(req).await?;
                 Ok(serde_json::to_value(res)?)
             }),
         },
@@ -798,6 +853,44 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
 
+        // Pair-appearance tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "pair-appearance",
+                description: "Find passages where two specified terms both appear, optionally constrained to a character window or sentence.",
+                input_schema: schema_for::<PairAppearanceRequest>(),
+                output_schema: schema_for::<PairAppearanceResponse>(),
+                requires: vec!["passages.parquet", "doc_table.bin"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Find co-mentions in the same passage",
+                        args: serde_json::json!({
+                            "term1": "念佛",
+                            "term2": "禪",
+                            "unit": "passage",
+                            "limit": 10
+                        }),
+                    },
+                    ToolExample {
+                        title: "Find local co-occurrence within a window",
+                        args: serde_json::json!({
+                            "term1": "念佛",
+                            "term2": "禪",
+                            "unit": "window",
+                            "window_chars": 80,
+                            "limit": 10
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PairAppearanceRequest = serde_json::from_value(args)?;
+                let res = engine.pair_appearance_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // Outline-search tool
         ToolDef {
             spec: ToolSpec {
@@ -1039,6 +1132,138 @@ pub fn tool_defs() -> Vec<ToolDef> {
             call: |engine, args| Box::pin(async move {
                 let req: BatchEvidenceSearchRequest = serde_json::from_value(args)?;
                 let res = engine.batch_evidence_search_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // pair-profile tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "pair-profile",
+                description: "Summarise how often two terms appear together versus separately, grouped by period, canon, work, or author. Use for analytical questions like 'does term A appear with term B more in Song than Tang sources?'",
+                input_schema: schema_for::<PairProfileRequest>(),
+                output_schema: schema_for::<PairProfileResponse>(),
+                requires: vec!["passages.parquet", "doc_table.bin"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Compare 念佛+禪 co-occurrence rates by period",
+                        args: serde_json::json!({
+                            "term1": "念佛",
+                            "term2": "禪",
+                            "group_by": "period",
+                            "unit": "passage",
+                            "limit_groups": 10
+                        }),
+                    },
+                    ToolExample {
+                        title: "Compare by canon, scoped to Taishō",
+                        args: serde_json::json!({
+                            "term1": "如來",
+                            "term2": "法身",
+                            "group_by": "work",
+                            "unit": "passage",
+                            "scope_canon": "T",
+                            "limit_groups": 15,
+                            "sample_hits_per_group": 2
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PairProfileRequest = serde_json::from_value(args)?;
+                let res = engine.pair_profile_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // person-resolve tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "person-resolve",
+                description: "Resolve a person's name to candidate forms and show corpus presence. Use before person-history to confirm spelling and aliases are present in the corpus.",
+                input_schema: schema_for::<PersonResolveRequest>(),
+                output_schema: schema_for::<PersonResolveResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Resolve with primary name and alias",
+                        args: serde_json::json!({
+                            "name": "雪峰義存",
+                            "aliases": ["雪峰", "義存"]
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PersonResolveRequest = serde_json::from_value(args)?;
+                let res = engine.person_resolve_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // person-history tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "person-history",
+                description: "Retrieve passages mentioning a person, ordered by period. Returns mention-class labels (lineage_relation, attributed_saying, case_appearance, commentarial_reference, name_mention). Run person-resolve first to confirm name forms.",
+                input_schema: schema_for::<PersonHistoryRequest>(),
+                output_schema: schema_for::<PersonHistoryResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Person history for 雪峰 with aliases",
+                        args: serde_json::json!({
+                            "name": "雪峰義存",
+                            "aliases": ["雪峰", "義存"],
+                            "limit": 200
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PersonHistoryRequest = serde_json::from_value(args)?;
+                let res = engine.person_history_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // citation-verify tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "citation-verify",
+                description: "Verify whether a claimed quotation appears in the corpus, optionally scoped to a specific work, canon, or node. Returns exact hits and near-matches when the exact quote is not found. Use for provenance questions like 'is this saying really from the Diamond Sutra?'",
+                input_schema: schema_for::<CitationVerifyRequest>(),
+                output_schema: schema_for::<CitationVerifyResponse>(),
+                requires: vec!["passages.parquet", "doc_table.bin"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Verify a quote in the Taishō canon",
+                        args: serde_json::json!({
+                            "quote": "一切有為法如夢幻泡影",
+                            "scope_canon": "T",
+                            "claimed_attribution": "金剛般若波羅蜜經",
+                            "limit": 5,
+                            "include_near_matches": true
+                        }),
+                    },
+                    ToolExample {
+                        title: "Verify scoped to a single work",
+                        args: serde_json::json!({
+                            "quote": "直指人心見性成佛",
+                            "scope_source_work_id": "B/B13/B13n0079.xml",
+                            "include_near_matches": true,
+                            "near_match_limit": 5
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: CitationVerifyRequest = serde_json::from_value(args)?;
+                let res = engine.citation_verify_impl(req).await?;
                 Ok(serde_json::to_value(res)?)
             }),
         },

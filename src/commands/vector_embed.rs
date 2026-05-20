@@ -1,5 +1,5 @@
 use crate::embedding::build::{run_vector_update, VectorUpdateConfig};
-use crate::embedding::models::{EmbeddingExecutionProvider, LocalEmbeddingProfile};
+use crate::embedding::models::LocalEmbeddingProfile;
 use crate::vector_index::HnswParams;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,8 @@ pub async fn update(
     out: PathBuf,
     batch_size: Option<usize>,
     model_cache_dir: Option<PathBuf>,
-    execution_provider: EmbeddingExecutionProvider,
+    tensorrt_root: Option<PathBuf>,
+    tensorrt_cache_dir: Option<PathBuf>,
     show_download_progress: bool,
     fail_if_feature_missing: bool,
     max_nb_connection: usize,
@@ -22,13 +23,23 @@ pub async fn update(
 ) -> Result<()> {
     let cache_path = cache.unwrap_or_else(|| default_cache_path(&parquet, profile));
     let batch_size = batch_size.unwrap_or_else(|| profile.default_batch_size());
+    let tensorrt_cache_dir =
+        tensorrt_cache_dir.or_else(|| default_tensorrt_cache_dir(&cache_path, profile));
 
     eprintln!("=== vector-update ===");
     eprintln!("Model:      {}", profile.model_id());
     eprintln!("Dim:        {}", profile.dim());
     eprintln!("Batch size: {}", batch_size);
-    eprintln!("Provider:   {:?}", execution_provider);
+    eprintln!("Provider:   TensorRT (required)");
     eprintln!("Cache:      {}", cache_path.display());
+    if let Some(root) = &tensorrt_root {
+        eprintln!("TensorRT:   {}", root.display());
+    } else {
+        eprintln!("TensorRT:   auto (SINORAG_TENSORRT_ROOT / PATH)");
+    }
+    if let Some(cache_dir) = &tensorrt_cache_dir {
+        eprintln!("TRT cache:  {}", cache_dir.display());
+    }
     eprintln!("Out:        {}", out.display());
 
     let config = VectorUpdateConfig {
@@ -39,7 +50,8 @@ pub async fn update(
         profile,
         batch_size,
         model_cache_dir,
-        execution_provider,
+        tensorrt_root,
+        tensorrt_cache_dir,
         show_download_progress,
         fail_if_feature_missing,
         hnsw: HnswParams {
@@ -63,4 +75,12 @@ fn default_cache_path(parquet: &Path, profile: LocalEmbeddingProfile) -> PathBuf
     // parquet is typically "data/passages.parquet" (a directory); parent is "data/"
     let data_dir = parquet.parent().unwrap_or(Path::new("data"));
     data_dir.join("derived").join(profile.cache_filename())
+}
+
+fn default_tensorrt_cache_dir(
+    cache_path: &Path,
+    profile: LocalEmbeddingProfile,
+) -> Option<PathBuf> {
+    let base = cache_path.parent()?;
+    Some(base.join("tensorrt").join(profile.cache_slug()))
 }

@@ -217,7 +217,8 @@ async fn build_semantic_index(args: SemanticIndexArgs) -> Result<()> {
         args.out,
         args.batch_size,
         args.model_cache_dir,
-        args.execution_provider,
+        args.tensorrt_root,
+        args.tensorrt_cache_dir,
         args.show_download_progress,
         true, // fail_if_feature_missing - explicit semantic command should error clearly
         args.max_nb_connection,
@@ -312,7 +313,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 out,
                 batch_size,
                 model_cache_dir,
-                execution_provider,
+                tensorrt_root,
+                tensorrt_cache_dir,
                 show_download_progress,
                 max_nb_connection,
                 ef_construction,
@@ -326,7 +328,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     out,
                     batch_size,
                     model_cache_dir,
-                    execution_provider,
+                    tensorrt_root,
+                    tensorrt_cache_dir,
                     show_download_progress,
                     true, // fail_if_feature_missing — explicit command should error clearly
                     max_nb_connection,
@@ -889,9 +892,20 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => export::report_build(input, out, title, essay_max_pages),
         Command::ExportPdf {
             input_markdown,
+            input_json,
+            title,
+            essay_max_pages,
             out,
             side_by_side,
-        } => export::pdf(input_markdown, out, side_by_side),
+        } => {
+            if let Some(input) = input_json {
+                export::pdf_report(input, out, side_by_side, title, essay_max_pages)
+            } else if let Some(input) = input_markdown {
+                export::pdf(input, out, side_by_side)
+            } else {
+                anyhow::bail!("expected --input-markdown or --input-json")
+            }
+        }
         Command::Similar {
             parquet,
             index,
@@ -1440,12 +1454,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             format,
             include_examples,
             include_schemas,
+            include_internal,
         } => {
             tools_manifest::run(tools_manifest::ToolsManifestArgs {
                 pack,
                 format,
                 include_examples,
                 include_schemas,
+                include_internal,
             })
             .await
         }

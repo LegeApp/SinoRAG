@@ -46,7 +46,7 @@ The catalog also writes a fully-populated `doc_parent: FxHashMap<DocId, NodeId>`
 
 - `PassageRow`: a flattened parquet row carrying the columns the builder needs.
 - `build_catalog_from_passages`: the new entry point. Single sorted walk; emits nested nodes.
-- A schema bump: `"readzen-corpus-catalog-v2"` → `"readzen-corpus-catalog-v3"`. The existing on-disk `catalog.index` won't load with the new code (cheap rebuild).
+- A schema update: the corpus catalog schema changed. The existing on-disk `catalog.index` won't load with the new code (cheap rebuild).
 
 ### Preserved
 
@@ -65,7 +65,7 @@ catalog-index-info --index data/derived/catalog.index
 
 should report:
 
-- `schema == "readzen-corpus-catalog-v3"`
+- `schema == "readzen-corpus-catalog"`
 - `nodes > works × 5` (every work has at least a few divisions and a passage range)
 - `doc_parent.len() == doc_table.passage_ids.len()` (every doc has a parent)
 

@@ -10,16 +10,10 @@ pub enum LocalEmbeddingProfile {
     BgeM3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingExecutionProvider {
-    /// Prefer available GPU providers but fall back to CPU if provider loading fails.
-    Auto,
-    /// ONNX Runtime CPU execution provider.
-    Cpu,
-    /// ONNX Runtime DirectML execution provider on Windows.
-    Directml,
-    /// ONNX Runtime CUDA execution provider.
-    Cuda,
+    /// ONNX Runtime TensorRT execution provider (required; CPU and DirectML are not supported).
+    Tensorrt,
 }
 
 impl LocalEmbeddingProfile {
@@ -56,6 +50,13 @@ impl LocalEmbeddingProfile {
         match self {
             Self::BgeSmallZhV15 => "vector_embeddings.bge-small-zh-v1.5.jsonl",
             Self::BgeM3 => "vector_embeddings.bge-m3.jsonl",
+        }
+    }
+
+    pub fn cache_slug(self) -> &'static str {
+        match self {
+            Self::BgeSmallZhV15 => "bge-small-zh-v1.5",
+            Self::BgeM3 => "bge-m3",
         }
     }
 }

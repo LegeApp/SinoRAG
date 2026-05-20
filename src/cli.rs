@@ -1,4 +1,4 @@
-use crate::embedding::models::{EmbeddingExecutionProvider, LocalEmbeddingProfile};
+use crate::embedding::models::LocalEmbeddingProfile;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -194,9 +194,14 @@ pub enum IndexCommand {
         /// Directory for fastembed model weight downloads.
         #[arg(long)]
         model_cache_dir: Option<PathBuf>,
-        /// ONNX Runtime execution provider for local embeddings.
-        #[arg(long, value_enum, default_value = "auto")]
-        execution_provider: EmbeddingExecutionProvider,
+        /// TensorRT install root. Defaults to SINORAG_TENSORRT_ROOT, TENSORRT_ROOT,
+        /// TRT_ROOT, or D:\TensorRT on Windows when it exists.
+        #[arg(long)]
+        tensorrt_root: Option<PathBuf>,
+        /// TensorRT engine/timing cache directory. Defaults beside the embedding
+        /// cache so optimized engines are reused across runs.
+        #[arg(long)]
+        tensorrt_cache_dir: Option<PathBuf>,
         /// Show download progress bar when fetching model weights.
         #[arg(long, default_value_t = true)]
         show_download_progress: bool,
@@ -256,8 +261,10 @@ pub struct SemanticIndexArgs {
     pub batch_size: Option<usize>,
     #[arg(long)]
     pub model_cache_dir: Option<PathBuf>,
-    #[arg(long, value_enum, default_value = "auto")]
-    pub execution_provider: EmbeddingExecutionProvider,
+    #[arg(long)]
+    pub tensorrt_root: Option<PathBuf>,
+    #[arg(long)]
+    pub tensorrt_cache_dir: Option<PathBuf>,
     #[arg(long, default_value_t = true)]
     pub show_download_progress: bool,
     #[arg(long, default_value_t = 32)]
@@ -901,8 +908,7 @@ pub enum Command {
         essay_max_pages: usize,
     },
 
-    /// Render a Markdown file to bilingual PDF (English body, optional
-    /// Chinese sidecars in fenced code blocks).
+    /// Render a Markdown file or structured report JSON to bilingual PDF.
     ///
     /// Intended as a user-side sink for model-authored dossiers: pipe a
     /// Markdown report through this command to produce a publication-ready
@@ -912,8 +918,22 @@ pub enum Command {
     ExportPdf {
         /// Markdown file produced by `report-build`, `report-from-evidence`,
         /// or hand-edited prose.
+        #[arg(
+            long,
+            conflicts_with = "input_json",
+            required_unless_present = "input_json"
+        )]
+        input_markdown: Option<PathBuf>,
+        /// Structured JSON report/evidence artifact rendered through the
+        /// built-in basic PDF template before Lopdf generation.
+        #[arg(long, conflicts_with = "input_markdown")]
+        input_json: Option<PathBuf>,
+        /// Optional report title override for `--input-json`.
         #[arg(long)]
-        input_markdown: PathBuf,
+        title: Option<String>,
+        /// Maximum essay length hint used by the basic report template.
+        #[arg(long, default_value_t = 3)]
+        essay_max_pages: usize,
         /// Destination PDF path. Parent directories are created if missing.
         #[arg(long)]
         out: PathBuf,
@@ -1346,6 +1366,9 @@ pub enum Command {
         /// Include full JSON input/output schemas. Omitted by default to keep the manifest agent-readable.
         #[arg(long, default_value_t = false)]
         include_schemas: bool,
+        /// Include internal debug/forced-path tools in the manifest.
+        #[arg(long, default_value_t = false)]
+        include_internal: bool,
     },
 
     /// Print compiled-in documentation for tools.

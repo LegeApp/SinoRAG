@@ -156,7 +156,7 @@ impl PhraseIndexV2 {
 
 ```bash
 # Convert v1 to v2
-./sinoragd phrase-index-migrate \
+./sinorag phrase-index-migrate \
   --input runs/rust/phrase_index.bin \
   --output runs/rust/phrase_index_v2.bin \
   --doc-table runs/rust/doc_table.bin

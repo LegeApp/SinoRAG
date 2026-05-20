@@ -67,8 +67,8 @@
 
 Three usage points all go through `similar_passages_with_index()` in `commands/tfidf.rs`:
 
-1. `sinoragd tfidf similar` — direct CLI
-2. `sinoragd tfidf similar-batch` — batch JSONL output
+1. `sinorag tfidf similar` — direct CLI
+2. `sinorag tfidf similar-batch` — batch JSONL output
 3. MCP server — called in 3 tool handlers (frontier, seed expansion, first-attestation follow-up)
 
 ### Scoring rules applied on top of cosine

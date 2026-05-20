@@ -97,7 +97,11 @@ sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id
 ```
 
 Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
-Local embedding commands require a binary built with `--features local-embeddings` or `--features local-embeddings-cuda`.
+Local embedding commands require a binary built with `--features local-embeddings`.
+For TensorRT acceleration, build with `--features local-embeddings-tensorrt`
+and use `--execution-provider tensorrt`. TensorRT engine/timing caches are
+stored beside the embedding cache by default so subsequent runs can resume
+without rebuilding optimized engines.
 
 ### Step 4 — Use JSON tools
 
