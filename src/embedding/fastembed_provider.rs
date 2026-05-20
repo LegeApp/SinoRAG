@@ -13,6 +13,13 @@ use std::sync::OnceLock;
 static TENSORRT_PLUGIN_REGISTRATION: OnceLock<std::result::Result<std::path::PathBuf, String>> =
     OnceLock::new();
 
+// DLL bytes embedded at build time. When SINORAG_TENSORRT_EP_DLL is set during
+// the build, the real DLL is baked in; otherwise this is a zero-byte placeholder
+// and the runtime path resolution in resolve_tensorrt_plugin_dll() is the fallback.
+#[cfg(feature = "local-embeddings-tensorrt")]
+static EMBEDDED_TENSORRT_EP_DLL: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/ORTTensorRTEp.dll"));
+
 #[cfg(feature = "local-embeddings")]
 pub struct FastEmbedProvider {
     model_id: String,
@@ -202,7 +209,34 @@ fn register_tensorrt_plugin_library() -> Result<std::path::PathBuf> {
 }
 
 #[cfg(feature = "local-embeddings-tensorrt")]
+fn extract_embedded_dll() -> Option<std::path::PathBuf> {
+    if EMBEDDED_TENSORRT_EP_DLL.is_empty() {
+        return None;
+    }
+    // Write to a per-version temp path so stale extractions don't linger.
+    let hash: u64 = {
+        let mut h = 0xcbf29ce484222325u64;
+        for &b in EMBEDDED_TENSORRT_EP_DLL.iter().take(4096) {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    };
+    let name = format!("sinorag_ORTTensorRTEp_{:016x}.dll", hash);
+    let path = std::env::temp_dir().join(name);
+    if !path.exists() {
+        std::fs::write(&path, EMBEDDED_TENSORRT_EP_DLL).ok()?;
+    }
+    path.is_file().then_some(path)
+}
+
+#[cfg(feature = "local-embeddings-tensorrt")]
 fn resolve_tensorrt_plugin_dll() -> Option<std::path::PathBuf> {
+    // Embedded DLL (baked in at build time when SINORAG_TENSORRT_EP_DLL was set).
+    if let Some(path) = extract_embedded_dll() {
+        return Some(path);
+    }
+
     let mut candidates = Vec::new();
     for var in ["SINORAG_TENSORRT_EP_DLL", "ORT_TENSORRT_EP_DLL"] {
         if let Some(path) = std::env::var_os(var).map(std::path::PathBuf::from) {

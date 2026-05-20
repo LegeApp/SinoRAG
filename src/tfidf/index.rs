@@ -83,6 +83,10 @@ const HDR_ROW_BLOB_OFF: std::ops::Range<usize> = 130..138;
 const HDR_ROW_BLOB_LEN: std::ops::Range<usize> = 138..146;
 const HDR_POST_BLOB_OFF: std::ops::Range<usize> = 146..154;
 const HDR_POST_BLOB_LEN: std::ops::Range<usize> = 154..162;
+const HDR_QUERY_OFF: std::ops::Range<usize> = 162..170;
+const HDR_QUERY_COUNT: std::ops::Range<usize> = 170..178;
+
+const QUERY_ENTRY_SIZE: usize = 12; // term_hash u64 + term_id u32
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -136,6 +140,7 @@ pub struct SharedNgram {
 pub struct TfidfIndex {
     params: TfidfParams,
     doc_table_fingerprint: String,
+    version: u16,
     vocab_count: usize,
     doc_count: usize,
     vocab_off: usize,
@@ -146,6 +151,8 @@ pub struct TfidfIndex {
     row_blob_len: usize,
     postings_blob_off: usize,
     postings_blob_len: usize,
+    query_table_off: usize,
+    query_table_count: usize,
     mmap: Arc<Mmap>,
 }
 
@@ -172,8 +179,8 @@ impl TfidfIndex {
             anyhow::bail!("invalid TF-IDF magic; rebuild required");
         }
         let version = u16::from_le_bytes([mmap[8], mmap[9]]);
-        if version != 3 {
-            anyhow::bail!("unsupported TF-IDF format; rebuild required");
+        if version != 3 && version != 4 {
+            anyhow::bail!("unsupported TF-IDF format version {}; rebuild required", version);
         }
 
         let vocab_count = u32::from_le_bytes(mmap[HDR_VOCAB_COUNT].try_into()?) as usize;
@@ -203,6 +210,17 @@ impl TfidfIndex {
             anyhow::bail!("TF-IDF sections exceed file length");
         }
 
+        let (query_table_off, query_table_count) = if version >= 4 {
+            let off = u64::from_le_bytes(mmap[HDR_QUERY_OFF].try_into()?) as usize;
+            let count = u64::from_le_bytes(mmap[HDR_QUERY_COUNT].try_into()?) as usize;
+            if off + count * QUERY_ENTRY_SIZE > mmap.len() {
+                anyhow::bail!("TF-IDF query table exceeds file length");
+            }
+            (off, count)
+        } else {
+            (0, 0)
+        };
+
         let params = TfidfParams {
             min_ngram,
             max_ngram,
@@ -216,6 +234,7 @@ impl TfidfIndex {
         Ok(Self {
             params,
             doc_table_fingerprint,
+            version,
             vocab_count,
             doc_count,
             vocab_off,
@@ -226,6 +245,8 @@ impl TfidfIndex {
             row_blob_len,
             postings_blob_off,
             postings_blob_len,
+            query_table_off,
+            query_table_count,
             mmap: Arc::new(mmap),
         })
     }
@@ -428,6 +449,82 @@ impl TfidfIndex {
         count
     }
 
+    /// Binary search in the query table (v4+ only). Returns `None` for v3 indexes.
+    fn query_lookup(&self, hash: u64) -> Option<TermId> {
+        if self.query_table_count == 0 {
+            return None;
+        }
+        let mut lo = 0usize;
+        let mut hi = self.query_table_count;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let off = self.query_table_off + mid * QUERY_ENTRY_SIZE;
+            let h = u64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap());
+            match h.cmp(&hash) {
+                std::cmp::Ordering::Equal => {
+                    let tid =
+                        u32::from_le_bytes(self.mmap[off + 8..off + 12].try_into().unwrap());
+                    return Some(tid);
+                }
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        None
+    }
+
+    /// Score documents against a raw text query using TF-IDF dot product.
+    /// Requires a v4 index (query table); returns empty for v3.
+    pub fn query_top_k(&self, text: &str, k: usize) -> Vec<(DocId, f32)> {
+        if self.query_table_count == 0 || k == 0 {
+            return Vec::new();
+        }
+        let mut term_counts: FxHashMap<TermId, u32> = FxHashMap::default();
+        let mut total = 0u32;
+        for n in self.params.min_ngram..=self.params.max_ngram {
+            for h in char_ngram_hashes(text, n, n) {
+                total += 1;
+                if let Some(tid) = self.query_lookup(h) {
+                    *term_counts.entry(tid).or_insert(0) += 1;
+                }
+            }
+        }
+        if term_counts.is_empty() || total == 0 {
+            return Vec::new();
+        }
+        let tf_total = total as f32;
+        let mut query_vec: Vec<(TermId, f32)> = term_counts
+            .iter()
+            .map(|(&tid, &count)| (tid, (count as f32 / tf_total) * self.idf_at(tid)))
+            .collect();
+        let norm = query_vec.iter().map(|(_, w)| w * w).sum::<f32>().sqrt();
+        if norm == 0.0 {
+            return Vec::new();
+        }
+        for (_, w) in query_vec.iter_mut() {
+            *w /= norm;
+        }
+        let mut scores: FxHashMap<DocId, f32> = FxHashMap::default();
+        for (tid, qw) in query_vec {
+            let ve = self.vocab_entry(tid);
+            let p_base = self.postings_blob_off + ve.postings_offset as usize;
+            let p_count = ve.postings_count as usize;
+            let w_max = ve.w_max;
+            for j in 0..p_count {
+                let p = p_base + j * POSTING_ENTRY_SIZE;
+                let doc_id = u32::from_le_bytes(self.mmap[p..p + 4].try_into().unwrap());
+                let q = self.mmap[p + 4];
+                let dw = dequantize_log_u8(q, w_max);
+                *scores.entry(doc_id).or_insert(0.0) += qw * dw;
+            }
+        }
+        let mut ranked: Vec<(DocId, f32)> =
+            scores.into_iter().filter(|(_, s)| *s > 0.0).collect();
+        ranked.sort_by_key(|&(_, s)| Reverse(OrderedFloat(s)));
+        ranked.truncate(k.max(1));
+        ranked
+    }
+
     pub fn info_payload(&self) -> serde_json::Value {
         let postings_nnz = self.postings_blob_len / POSTING_ENTRY_SIZE;
         let row_nnz = self.row_blob_len / ROW_ENTRY_SIZE;
@@ -440,7 +537,7 @@ impl TfidfIndex {
         };
         serde_json::json!({
             "schema": "sinorag-tfidf",
-            "version": 3,
+            "version": self.version,
             "quantization": "u8-log",
             "documents": docs,
             "matrix_shape": [docs, cols],
@@ -471,8 +568,8 @@ impl TfidfIndex {
             anyhow::bail!("invalid TF-IDF magic; rebuild required");
         }
         let version = u16::from_le_bytes([hdr[8], hdr[9]]);
-        if version != 3 {
-            anyhow::bail!("unsupported TF-IDF format; rebuild required");
+        if version != 3 && version != 4 {
+            anyhow::bail!("unsupported TF-IDF format version {}; rebuild required", version);
         }
         let vocab_count = u32::from_le_bytes(hdr[HDR_VOCAB_COUNT].try_into()?) as usize;
         let doc_count = u32::from_le_bytes(hdr[HDR_DOC_COUNT].try_into()?) as usize;
@@ -1365,10 +1462,12 @@ fn write_index_file(
     let row_len_off = row_off_off + doc_count as u64 * 8;
     let row_blob_off = row_len_off + doc_count as u64 * 4;
     let post_blob_off = row_blob_off + row_blob_len;
+    let query_table_off = post_blob_off + postings_blob_len;
+    let query_table_count = vocab_count as u64;
 
     let mut hdr = vec![0u8; HEADER_SIZE];
     hdr[0..8].copy_from_slice(MAGIC_TFIDF);
-    hdr[8..10].copy_from_slice(&3u16.to_le_bytes());
+    hdr[8..10].copy_from_slice(&4u16.to_le_bytes());
     hdr[HDR_VOCAB_COUNT].copy_from_slice(&vocab_count.to_le_bytes());
     hdr[HDR_DOC_COUNT].copy_from_slice(&doc_count_u32.to_le_bytes());
     hdr[HDR_MIN_NGRAM].copy_from_slice(&(params.min_ngram as u16).to_le_bytes());
@@ -1389,6 +1488,8 @@ fn write_index_file(
     hdr[HDR_ROW_BLOB_LEN].copy_from_slice(&row_blob_len.to_le_bytes());
     hdr[HDR_POST_BLOB_OFF].copy_from_slice(&post_blob_off.to_le_bytes());
     hdr[HDR_POST_BLOB_LEN].copy_from_slice(&postings_blob_len.to_le_bytes());
+    hdr[HDR_QUERY_OFF].copy_from_slice(&query_table_off.to_le_bytes());
+    hdr[HDR_QUERY_COUNT].copy_from_slice(&query_table_count.to_le_bytes());
     f.write_all(&hdr)?;
 
     for e in vocab {
@@ -1410,6 +1511,12 @@ fn write_index_file(
     }
     f.write_all(row_blob)?;
     f.write_all(postings_blob)?;
+    // Query table: sorted (term_hash u64, term_id u32) pairs.
+    // Vocab is already sorted by term_hash from phase 2, so we write in order.
+    for e in vocab {
+        f.write_all(&e.term_hash.to_le_bytes())?;
+        f.write_all(&e.term_id.to_le_bytes())?;
+    }
     f.flush()?;
     drop(f);
     fs::rename(&tmp, path)?;

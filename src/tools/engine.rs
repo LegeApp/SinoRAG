@@ -5755,59 +5755,138 @@ impl ToolEngine {
         let verified = !exact_hits.is_empty();
         let exact_hit_count = exact_hits.len();
 
-        // Near-match: search for the most distinctive 4-gram substring of the quote
+        // Near-match using TF-IDF query_top_k when a v4 index is available,
+        // falling back to 4-gram substring search for v3 or missing indexes.
         let mut near_matches: Vec<CitationNearMatch> = Vec::new();
         if !verified && req.include_near_matches {
             use crate::normalize::normalize_zh;
             let normalized = normalize_zh(&req.quote);
-            // Extract 4-char substrings as candidate search terms
-            let chars: Vec<char> = normalized.chars().collect();
-            let gram_len = 4usize;
-            let mut candidates: std::collections::BTreeMap<String, Vec<serde_json::Value>> = Default::default();
-            for start in (0..chars.len()).step_by(gram_len).take(5) {
-                let end = (start + gram_len).min(chars.len());
-                if end - start < 2 { break; }
-                let sub: String = chars[start..end].iter().collect();
-                let (sub_hits, _) = phrase_rows_with_explicit_doc_table(
-                    &passages,
-                    &doc_table,
-                    phrase_index_path.as_deref(),
-                    &sub,
-                    req.near_match_limit * 3,
-                    doc_range,
-                    canon_for_index,
-                    None,
-                )
-                .await
-                .unwrap_or_default();
-                for row in sub_hits {
-                    let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    if !pid.is_empty() {
-                        candidates.entry(pid).or_default().push(row);
+
+            let tfidf_candidates: Vec<(u32, f32)> = if let Ok(tfidf) = self.tfidf().await {
+                tfidf.query_top_k(&normalized, req.near_match_limit * 5)
+            } else {
+                Vec::new()
+            };
+
+            if !tfidf_candidates.is_empty() {
+                // TF-IDF path: fetch passage text for each candidate, score by
+                // character overlap with the normalized quote, return top results.
+                let pids: Vec<String> = tfidf_candidates
+                    .iter()
+                    .filter_map(|(doc_id, _)| {
+                        if let Some(range) = doc_range {
+                            if *doc_id < range.0 || *doc_id >= range.1 {
+                                return None;
+                            }
+                        }
+                        doc_table.passage_id(*doc_id).map(|s| s.to_string())
+                    })
+                    .collect();
+                let rows = passages
+                    .passages_by_ids(
+                        &pids,
+                        "passage_id, source_work_id, main_title, heading, zh_text_normalized",
+                    )
+                    .await
+                    .unwrap_or_default();
+                let mut scored: Vec<(f64, String, serde_json::Value)> = rows
+                    .into_iter()
+                    .filter_map(|row| {
+                        let pid = row
+                            .get("passage_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if pid.is_empty() {
+                            return None;
+                        }
+                        let text = row
+                            .get("zh_text_normalized")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let overlap = character_overlap_score(&normalized, text);
+                        Some((overlap, pid, row))
+                    })
+                    .collect();
+                scored
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                for (overlap, pid, row) in scored.into_iter().take(req.near_match_limit) {
+                    let text = row
+                        .get("zh_text_normalized")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    near_matches.push(CitationNearMatch {
+                        passage_id: pid,
+                        source_work_id: opt_str(&row, "source_work_id"),
+                        main_title: opt_str(&row, "main_title"),
+                        heading: opt_str(&row, "heading"),
+                        overlap_score: overlap,
+                        zh_quote: text.chars().take(200).collect(),
+                    });
+                }
+            } else {
+                // Fallback: 4-gram substring search when no TF-IDF index is available.
+                let chars: Vec<char> = normalized.chars().collect();
+                let gram_len = 4usize;
+                let mut candidates: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+                    Default::default();
+                for start in (0..chars.len()).step_by(gram_len).take(5) {
+                    let end = (start + gram_len).min(chars.len());
+                    if end - start < 2 {
+                        break;
+                    }
+                    let sub: String = chars[start..end].iter().collect();
+                    let (sub_hits, _) = phrase_rows_with_explicit_doc_table(
+                        &passages,
+                        &doc_table,
+                        phrase_index_path.as_deref(),
+                        &sub,
+                        req.near_match_limit * 3,
+                        doc_range,
+                        canon_for_index,
+                        None,
+                    )
+                    .await
+                    .unwrap_or_default();
+                    for row in sub_hits {
+                        let pid = row
+                            .get("passage_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !pid.is_empty() {
+                            candidates.entry(pid).or_default().push(row);
+                        }
                     }
                 }
-            }
-            // Score by how many sub-phrase windows matched + character overlap
-            let mut scored: Vec<(f64, String, serde_json::Value)> = candidates
-                .into_iter()
-                .filter_map(|(pid, rows)| {
-                    let row = rows.into_iter().next()?;
-                    let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
-                    let overlap = character_overlap_score(&normalized, text);
-                    Some((overlap, pid, row))
-                })
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            for (overlap, pid, row) in scored.into_iter().take(req.near_match_limit) {
-                let text = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
-                near_matches.push(CitationNearMatch {
-                    passage_id: pid,
-                    source_work_id: opt_str(&row, "source_work_id"),
-                    main_title: opt_str(&row, "main_title"),
-                    heading: opt_str(&row, "heading"),
-                    overlap_score: overlap,
-                    zh_quote: text.chars().take(200).collect(),
-                });
+                let mut scored: Vec<(f64, String, serde_json::Value)> = candidates
+                    .into_iter()
+                    .filter_map(|(pid, rows)| {
+                        let row = rows.into_iter().next()?;
+                        let text = row
+                            .get("zh_text_normalized")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let overlap = character_overlap_score(&normalized, text);
+                        Some((overlap, pid, row))
+                    })
+                    .collect();
+                scored
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                for (overlap, pid, row) in scored.into_iter().take(req.near_match_limit) {
+                    let text = row
+                        .get("zh_text_normalized")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    near_matches.push(CitationNearMatch {
+                        passage_id: pid,
+                        source_work_id: opt_str(&row, "source_work_id"),
+                        main_title: opt_str(&row, "main_title"),
+                        heading: opt_str(&row, "heading"),
+                        overlap_score: overlap,
+                        zh_quote: text.chars().take(200).collect(),
+                    });
+                }
             }
         }
 
