@@ -167,11 +167,33 @@ pub enum IndexCommand {
 
     /// Embed passages with a local model and build the vector index.
     ///
+    /// Build or update the vector (HNSW) index used for semantic search.
+    ///
     /// Uses fastembed-rs to embed passages directly from the parquet corpus.
     /// Maintains an append-only embedding cache so only new/changed passages
     /// are re-embedded on subsequent runs.
     ///
-    /// Requires the binary to be built with --features local-embeddings.
+    /// REQUIREMENTS
+    ///
+    /// Build flags:
+    ///   cargo build --release --features local-embeddings-tensorrt
+    ///
+    /// Runtime DLLs (all must be on PATH or in --tensorrt-root/bin):
+    ///   onnxruntime.dll          — ONNX Runtime (set ORT_DYLIB_PATH to override)
+    ///   ORTTensorRTEp.dll        — TensorRT execution-provider plugin for ORT
+    ///   nvinfer_10.dll           — TensorRT inference library (from TensorRT install)
+    ///   nvonnxparser_10.dll      — TensorRT ONNX parser (from TensorRT install)
+    ///   cudart64_12.dll          — CUDA runtime (from CUDA toolkit)
+    ///   cublas64_12.dll          — cuBLAS (from CUDA toolkit)
+    ///   cublasLt64_12.dll        — cuBLAS-Lt (from CUDA toolkit)
+    ///
+    /// Environment variables:
+    ///   ORT_DYLIB_PATH           — path to onnxruntime.dll
+    ///   SINORAG_TENSORRT_EP_DLL  — path to ORTTensorRTEp.dll
+    ///   SINORAG_TENSORRT_ROOT    — TensorRT install root (bin/ and lib/ added to PATH)
+    ///
+    /// First run builds TensorRT engines (slow). Subsequent runs load cached
+    /// engines from --tensorrt-cache-dir (default: data/derived/tensorrt/).
     VectorUpdate {
         /// Passages parquet directory.
         #[arg(long, default_value = "data/passages.parquet", hide = true)]

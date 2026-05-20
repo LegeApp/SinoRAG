@@ -19,7 +19,7 @@ local-embeddings-tensorrt = ["local-embeddings", "ort/api-22"]
 # TensorRT acceleration is gated by local-embeddings-tensorrt and uses ORT's plugin
 # EP registration API. It expects ORTTensorRTEp.dll plus NVIDIA/TensorRT DLLs at runtime.
 # On Windows the MSVC toolchain is still required to build the ort wrapper crate.
-fastembed = { path = "vendor/fastembed-rs", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
+fastembed = { git = "https://github.com/LegeApp/fastembed-rs", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
