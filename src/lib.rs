@@ -18,6 +18,7 @@ pub mod phrase_index;
 pub mod registry;
 pub mod research;
 pub mod research_tools;
+pub mod retrieval;
 pub mod search_packet;
 pub mod setup;
 pub mod storage;

@@ -18,6 +18,7 @@ mod phrase_index;
 mod registry;
 mod research;
 mod research_tools;
+mod retrieval;
 mod search_packet;
 mod setup;
 mod storage;

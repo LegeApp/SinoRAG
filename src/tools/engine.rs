@@ -278,6 +278,47 @@ fn round_percent(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
+fn refresh_hybrid_scores(hit: &mut crate::tools::responses::HybridDiscoverHit) {
+    let (semantic_score, lexical_score, final_score, sources) =
+        crate::retrieval::refresh_hybrid_scores(hit.vector_rank, hit.tfidf_rank);
+    hit.semantic_score = semantic_score;
+    hit.lexical_score = lexical_score;
+    hit.final_score = final_score;
+    hit.candidate_sources = sources
+        .into_iter()
+        .map(|source| source.as_str().to_string())
+        .collect();
+}
+
+fn optional_one(value: &Option<String>) -> Option<Vec<String>> {
+    value
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .map(|v| vec![v.clone()])
+}
+
+fn evidence_scope_spec(req: &crate::tools::requests::EvidenceSearchRequest) -> crate::retrieval::ScopeSpec {
+    crate::retrieval::ScopeSpec {
+        canon: optional_one(&req.scope_canon),
+        period: optional_one(&req.scope_period),
+        source_work_id: optional_one(&req.scope_source_work_id),
+        catalog_node_id: req.scope_node_id,
+        author: optional_one(&req.author),
+        source_corpus: None,
+    }
+}
+
+fn pair_scope_spec(req: &crate::tools::requests::PairAppearanceRequest) -> crate::retrieval::ScopeSpec {
+    crate::retrieval::ScopeSpec {
+        canon: optional_one(&req.scope_canon),
+        period: optional_one(&req.scope_period),
+        source_work_id: optional_one(&req.scope_source_work_id),
+        catalog_node_id: req.scope_node_id,
+        author: None,
+        source_corpus: None,
+    }
+}
+
 fn adjust_read_end(text: &str, start: usize, target_end: usize, total: usize) -> (usize, String) {
     let end = target_end.min(total);
     if end >= total || end <= start {
@@ -610,6 +651,7 @@ mod tests {
             "strpos(traditions, '\"canon\"') > 0"
         );
     }
+
 }
 
 impl ToolEngine {
@@ -3193,12 +3235,24 @@ impl ToolEngine {
         let canon = expand_optional_filter(req.scope_canon.as_deref());
         let period = expand_period_filter(req.scope_period.as_deref());
         let doc_range = if let Some(catalog) = catalog.as_deref() {
-            self.resolve_doc_range(catalog, req.scope_node_id, req.scope_source_work_id.as_deref())?
+            self.resolve_doc_range(
+                catalog,
+                req.scope_node_id,
+                req.scope_source_work_id.as_deref(),
+            )?
         } else {
             None
         };
-        let canon_for_index = if canon.is_empty() { None } else { Some(canon.as_slice()) };
-        let period_for_index = if period.len() == 1 { Some(period[0].as_str()) } else { None };
+        let canon_for_index = if canon.is_empty() {
+            None
+        } else {
+            Some(canon.as_slice())
+        };
+        let period_for_index = if period.len() == 1 {
+            Some(period[0].as_str())
+        } else {
+            None
+        };
 
         let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
@@ -3340,7 +3394,10 @@ impl ToolEngine {
 
         let term1_variants = pair_term_variants(&req.term1, req.allow_variants);
         let term2_variants = pair_term_variants(&req.term2, req.allow_variants);
-        let candidate_limit = req.max_candidates_per_term.max(req.limit.max(1));
+        let output_limit = req.limit.max(1);
+        let candidate_limit = req.max_candidates_per_term.max(output_limit);
+        let retrieval_budget = crate::retrieval::RetrievalBudget::new(output_limit, candidate_limit);
+        let scope = pair_scope_spec(&req);
 
         let (term1_rows, term1_strategy) = self
             .pair_candidate_rows(
@@ -3377,6 +3434,11 @@ impl ToolEngine {
                     .map(|pid| (pid.to_string(), row))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        let intersection_candidate_count = term1_rows
+            .iter()
+            .filter_map(|row| row.get("passage_id").and_then(|v| v.as_str()))
+            .filter(|pid| term2_by_pid.contains_key(*pid))
+            .count();
 
         let mut hits = Vec::new();
         for row in &term1_rows {
@@ -3428,7 +3490,7 @@ impl ToolEngine {
         }
 
         let pair_hit_count = hits.len();
-        hits.truncate(req.limit.max(1));
+        hits.truncate(output_limit);
 
         let negative_summary = if req.include_negative_summary {
             let term2_ids = term2_rows
@@ -3467,8 +3529,54 @@ impl ToolEngine {
             None
         };
 
+        let mut trace = crate::retrieval::RetrievalTraceBuilder::new();
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "term1_candidates",
+                term1_rows.len(),
+                term1_rows.len(),
+            )
+            .with_details(serde_json::json!({
+                "term": req.term1.clone(),
+                "variant_count": term1_variants.len(),
+                "strategy": term1_strategy.clone(),
+            })),
+        );
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "term2_candidates",
+                term2_rows.len(),
+                term2_rows.len(),
+            )
+            .with_details(serde_json::json!({
+                "term": req.term2.clone(),
+                "variant_count": term2_variants.len(),
+                "strategy": term2_strategy.clone(),
+            })),
+        );
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "pair_verify",
+                intersection_candidate_count,
+                pair_hit_count,
+            )
+            .with_verified_count(pair_hit_count)
+            .with_details(serde_json::json!({
+                "unit": unit.clone(),
+                "window_chars": req.window_chars,
+                "ordered": req.ordered,
+            })),
+        );
+        trace.push(crate::retrieval::RetrievalStageReport::new(
+            "return",
+            pair_hit_count,
+            hits.len(),
+        ));
+
         Ok(PairAppearanceResponse {
             schema: "sinorag-pair-appearance-v1",
+            candidate_budget: retrieval_budget,
+            scope,
             term1: req.term1,
             term2: req.term2,
             unit: unit.clone(),
@@ -3479,6 +3587,7 @@ impl ToolEngine {
             pair_hit_count,
             hits,
             negative_summary,
+            stages: trace.finish(),
             search_strategy: PairAppearanceSearchStrategy {
                 term1: term1_strategy,
                 term2: term2_strategy,
@@ -4049,8 +4158,17 @@ impl ToolEngine {
 
         let mut components = Vec::new();
         let mut warnings = Vec::new();
-        let effective_limit = req.limit.min(req.max_candidates.max(1));
+        let output_limit = req.limit.max(1);
+        let candidate_limit = req.max_candidates.max(output_limit);
+        let retrieval_budget =
+            crate::retrieval::RetrievalBudget::new(output_limit, candidate_limit)
+                .with_time_limits(req.max_elapsed_ms, req.max_component_ms);
+        let scope = evidence_scope_spec(&req);
+        let mut trace = crate::retrieval::RetrievalTraceBuilder::new();
         warnings.push(format!("workflow_quality={}", req.quality));
+        warnings.push(format!(
+            "candidate_budget_requested={candidate_limit}; returned_limit={output_limit}"
+        ));
 
         let budget = WorkflowBudget::new(req.max_elapsed_ms, req.max_component_ms);
 
@@ -4063,12 +4181,25 @@ impl ToolEngine {
                 max: 20,
             })
             .await?;
+        let query_expansion_elapsed_ms = started.elapsed().as_millis();
         components.push(component_ok(
             "query_expansion",
             "query-expand-terms",
-            started.elapsed().as_millis(),
+            query_expansion_elapsed_ms,
             format!("{} expanded/suggested terms", expanded.expanded.len()),
         ));
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "query_expansion",
+                expanded.expanded.len(),
+                expanded.expanded.len(),
+            )
+            .with_elapsed_ms(query_expansion_elapsed_ms)
+            .with_details(serde_json::json!({
+                "expanded_terms_used": req.variant_policy == "search_variants",
+                "variant_policy": req.variant_policy,
+            })),
+        );
         let expanded_terms_used = req.variant_policy == "search_variants";
         if !expanded_terms_used && expanded.expanded.len() > 1 {
             warnings.push("expanded_terms_are_suggestions_not_evidence_inputs".to_string());
@@ -4077,7 +4208,7 @@ impl ToolEngine {
         let started = std::time::Instant::now();
         let exact_req = crate::tools::requests::SearchRequest {
             phrase: req.phrase.clone(),
-            limit: effective_limit,
+            limit: output_limit,
             mode: "hits".to_string(),
             depth: "exact".to_string(),
             group_by: "work".to_string(),
@@ -4114,18 +4245,45 @@ impl ToolEngine {
                 .into_anyhow())
             }
         };
+        let exact_elapsed_ms = started.elapsed().as_millis();
         components.push(component_ok(
             "exact_search",
             "search",
-            started.elapsed().as_millis(),
+            exact_elapsed_ms,
             format!("{} exact hits", exact.hits.len()),
         ));
+        let exact_candidate_count = exact
+            .search_strategy
+            .candidate_count
+            .unwrap_or(exact.hits.len());
+        let exact_verified_count = exact
+            .search_strategy
+            .verified_count
+            .unwrap_or(exact.hits.len());
+        let mut exact_stage = crate::retrieval::RetrievalStageReport::new(
+            "exact_search",
+            exact_candidate_count,
+            exact.hits.len(),
+        )
+        .with_verified_count(exact_verified_count)
+        .with_elapsed_ms(exact_elapsed_ms)
+        .with_details(serde_json::json!({
+            "method": exact.search_strategy.method,
+            "candidate_source": exact.search_strategy.candidate_source,
+            "verification_source": exact.search_strategy.verification_source,
+            "used_phrase_index": exact.search_strategy.used_phrase_index,
+            "filters": exact.search_strategy.filters,
+        }));
+        if let Some(reason) = &exact.search_strategy.fallback_reason {
+            exact_stage = exact_stage.with_warning(reason.clone());
+        }
+        trace.push(exact_stage);
 
         let absence_check = if req.include_absence_check {
             let started = std::time::Instant::now();
             let component_req = crate::tools::requests::AbsenceCheckRequest {
                 phrase: req.phrase.clone(),
-                limit: effective_limit,
+                limit: candidate_limit,
                 scope_work_id: req.scope_source_work_id.clone(),
                 scope_canon: req.scope_canon.clone().into_iter().collect(),
                 scope_period: req.scope_period.clone(),
@@ -4151,6 +4309,17 @@ impl ToolEngine {
             ));
             None
         };
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "absence_check",
+                absence_check.as_ref().map_or(0, |v| v.hit_count),
+                absence_check.as_ref().map_or(0, |v| v.sample_hits.len()),
+            )
+            .with_details(serde_json::json!({
+                "requested": req.include_absence_check,
+                "found": absence_check.as_ref().map(|v| v.found),
+            })),
+        );
 
         let first_attestation = if req.include_attestation {
             let started = std::time::Instant::now();
@@ -4159,7 +4328,7 @@ impl ToolEngine {
                 scope_canon: req.scope_canon.clone().into_iter().collect(),
                 scope_period: req.scope_period.clone().into_iter().collect(),
                 scope_source_work_id: req.scope_source_work_id.clone(),
-                limit: effective_limit,
+                limit: output_limit,
             };
             record_component_outcome(
                 run_budgeted_component(&budget, self.first_attestation_impl(component_req)).await,
@@ -4181,6 +4350,26 @@ impl ToolEngine {
             ));
             None
         };
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "first_attestation",
+                first_attestation
+                    .as_ref()
+                    .map_or(0, |v| v.search_strategy.candidates_verified),
+                first_attestation.as_ref().map_or(0, |v| {
+                    usize::from(v.first.is_some()) + v.next_earlier.len()
+                }),
+            )
+            .with_verified_count(
+                first_attestation
+                    .as_ref()
+                    .map_or(0, |v| v.search_strategy.after_scope_and_sort),
+            )
+            .with_details(serde_json::json!({
+                "requested": req.include_attestation,
+                "first_found": first_attestation.as_ref().and_then(|v| v.first.as_ref()).is_some(),
+            })),
+        );
         let phrase_history = if req.include_history {
             let started = std::time::Instant::now();
             let component_req = crate::tools::requests::PhraseHistoryRequest {
@@ -4208,12 +4397,38 @@ impl ToolEngine {
             ));
             None
         };
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "phrase_history",
+                phrase_history.as_ref().map_or(0, |v| {
+                    v.payload
+                        .pointer("/analysis/returned_count")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0) as usize
+                }),
+                phrase_history.as_ref().map_or(0, |v| {
+                    v.payload
+                        .get("evidence")
+                        .and_then(|value| value.as_array())
+                        .map_or(0, Vec::len)
+                }),
+            )
+            .with_details(serde_json::json!({
+                "requested": req.include_history,
+                "timeline_buckets": phrase_history.as_ref().and_then(|v| {
+                    v.payload
+                        .pointer("/analysis/timeline_buckets")
+                        .and_then(|value| value.as_object())
+                        .map(|object| object.len())
+                }),
+            })),
+        );
         let usage = if req.include_usage {
             let started = std::time::Instant::now();
             let component_req = crate::tools::requests::TraceTermUsageRequest {
                 phrase: req.phrase.clone(),
                 group_by: "period".to_string(),
-                limit_total: effective_limit.max(200),
+                limit_total: candidate_limit.max(200),
                 limit_per_group: 5,
             };
             record_component_outcome(
@@ -4236,12 +4451,23 @@ impl ToolEngine {
             ));
             None
         };
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "term_usage",
+                usage.as_ref().map_or(0, |v| v.search_strategy.total_hits),
+                usage.as_ref().map_or(0, |v| v.groups.len()),
+            )
+            .with_details(serde_json::json!({
+                "requested": req.include_usage,
+                "group_by": "period",
+            })),
+        );
         let clusters = if req.include_clusters {
             let started = std::time::Instant::now();
             let component_req = crate::tools::requests::ClusterHitsRequest {
                 phrase: req.phrase.clone(),
                 cluster_by: "work".to_string(),
-                limit_total: effective_limit.max(200),
+                limit_total: candidate_limit.max(200),
                 limit_per_cluster: 20,
             };
             record_component_outcome(
@@ -4264,6 +4490,17 @@ impl ToolEngine {
             ));
             None
         };
+        trace.push(
+            crate::retrieval::RetrievalStageReport::new(
+                "clusters",
+                clusters.as_ref().map_or(0, |v| v.total_hits),
+                clusters.as_ref().map_or(0, |v| v.clusters.len()),
+            )
+            .with_details(serde_json::json!({
+                "requested": req.include_clusters,
+                "cluster_by": "work",
+            })),
+        );
 
         let mut indexes_used = vec!["passages.parquet".to_string()];
         if self.resolve_phrase_path().is_ok() {
@@ -4288,7 +4525,7 @@ impl ToolEngine {
         let suggested_next_tools = vec![
             suggested_tool(
                 "hybrid-discover",
-                serde_json::json!({"seed_passage_id": "<choose passage_id from exact.hits>", "limit": effective_limit.min(25)}),
+                serde_json::json!({"seed_passage_id": "<choose passage_id from exact.hits>", "limit": output_limit.min(25), "max_candidates": candidate_limit}),
                 "expand exact evidence hits into lexical and semantic discovery candidates",
             ),
             suggested_tool(
@@ -4301,6 +4538,8 @@ impl ToolEngine {
         Ok(EvidenceSearchResponse {
             schema: "sinorag-evidence-search-v1",
             workflow: "exact_evidence",
+            candidate_budget: retrieval_budget,
+            scope,
             phrase: req.phrase,
             expanded_terms: expanded.expanded,
             expanded_terms_used,
@@ -4311,6 +4550,7 @@ impl ToolEngine {
             phrase_history,
             usage,
             clusters,
+            stages: trace.finish(),
             components,
             suggested_next_tools,
             indexes_used,
@@ -4338,22 +4578,27 @@ impl ToolEngine {
         let mut warnings = Vec::new();
         let mut components = Vec::new();
         let mut indexes_used = Vec::new();
-        let effective_limit = req.limit.min(req.max_candidates.max(1));
+        let output_limit = req.limit.max(1);
+        let candidate_limit = req.max_candidates.max(output_limit);
         warnings.push(format!("workflow_quality={}", req.quality));
+        warnings.push(format!(
+            "candidate_budget_requested={candidate_limit}; returned_limit={output_limit}"
+        ));
 
         let budget = WorkflowBudget::new(req.max_elapsed_ms, req.max_component_ms);
 
         let vector_started = std::time::Instant::now();
-        let vector_req = crate::tools::requests::VectorNeighborsRequest {
-            seed_passage_id: req.seed_passage_id.clone(),
-            query_embedding: req.query_embedding.clone(),
-            query_text: None,
-            k: effective_limit,
-            ef_search: 64,
-            include_text: true,
-            rerank: true,
-        };
-        let vector_neighbors =
+        let mut vector_stage_warning = None;
+        let vector_neighbors = if self.resolve_vector_path().is_ok() {
+            let vector_req = crate::tools::requests::VectorNeighborsRequest {
+                seed_passage_id: req.seed_passage_id.clone(),
+                query_embedding: req.query_embedding.clone(),
+                query_text: None,
+                k: candidate_limit,
+                ef_search: 64,
+                include_text: true,
+                rerank: true,
+            };
             match run_budgeted_component(&budget, self.vector_neighbors_impl(vector_req)).await {
                 ComponentOutcome::Ok(v) => {
                     indexes_used.push("vector.index".to_string());
@@ -4373,6 +4618,7 @@ impl ToolEngine {
                         &err,
                     ));
                     warnings.push("vector_neighbors_unavailable".to_string());
+                    vector_stage_warning = Some("vector_neighbors_unavailable".to_string());
                     None
                 }
                 ComponentOutcome::TimedOut {
@@ -4386,6 +4632,7 @@ impl ToolEngine {
                         timeout_ms,
                     ));
                     warnings.push("vector_neighbors_timed_out".to_string());
+                    vector_stage_warning = Some("vector_neighbors_timed_out".to_string());
                     None
                 }
                 ComponentOutcome::BudgetExhausted => {
@@ -4395,15 +4642,29 @@ impl ToolEngine {
                         ComponentStatus::SkippedBudgetExhausted,
                         "budget exhausted",
                     ));
+                    vector_stage_warning = Some("budget_exhausted".to_string());
                     None
                 }
-            };
+            }
+        } else {
+            components.push(component_skipped(
+                "vector_neighbors",
+                "vector-neighbors",
+                ComponentStatus::SkippedUnavailable,
+                "vector.index missing; semantic neighbors unavailable",
+            ));
+            warnings.push("vector_index_missing_semantic_neighbors_unavailable".to_string());
+            vector_stage_warning = Some("vector_index_missing".to_string());
+            None
+        };
+        let vector_elapsed_ms = vector_started.elapsed().as_millis();
 
+        let mut tfidf_elapsed_ms = None;
         let tfidf_similar = if let Some(seed) = &req.seed_passage_id {
             let started = std::time::Instant::now();
             let component_req = crate::tools::requests::SimilarRequest {
                 seed: seed.clone(),
-                limit: effective_limit,
+                limit: candidate_limit,
                 shared_ngram_limit: 12,
                 shared_phrase_limit: 8,
                 min_shared_phrase_len: 4,
@@ -4422,6 +4683,7 @@ impl ToolEngine {
             if value.is_some() {
                 indexes_used.push("tfidf.index".to_string());
             }
+            tfidf_elapsed_ms = Some(started.elapsed().as_millis());
             value
         } else {
             components.push(component_skipped(
@@ -4477,16 +4739,26 @@ impl ToolEngine {
         let mut merged: FxHashMap<String, HybridDiscoverHit> = FxHashMap::default();
         if let Some(v) = &vector_neighbors {
             for (rank, hit) in v.hits.iter().enumerate() {
+                let vector_rank = Some(rank + 1);
+                let (semantic_score, lexical_score, final_score, candidate_sources) =
+                    crate::retrieval::refresh_hybrid_scores(vector_rank, None);
                 merged.insert(
                     hit.passage_id.clone(),
                     HybridDiscoverHit {
                         passage_id: hit.passage_id.clone(),
                         labels: vec!["semantic_candidate".to_string()],
+                        candidate_sources: candidate_sources
+                            .into_iter()
+                            .map(|source| source.as_str().to_string())
+                            .collect(),
                         evidence_status: "not_evidence_until_verified".to_string(),
                         vector_score: Some(hit.vector_score),
-                        vector_rank: Some(rank + 1),
+                        vector_rank,
                         tfidf_score: None,
                         tfidf_rank: None,
+                        semantic_score,
+                        lexical_score,
+                        final_score,
                         merged_rank_reason: "semantic candidate from vector-neighbors".to_string(),
                         title: hit.main_title.clone(),
                         snippet: hit.snippet.clone(),
@@ -4502,11 +4774,15 @@ impl ToolEngine {
                 let entry = merged.entry(pid.to_string()).or_insert(HybridDiscoverHit {
                     passage_id: pid.to_string(),
                     labels: Vec::new(),
+                    candidate_sources: Vec::new(),
                     evidence_status: "lexical_candidate_needs_verification".to_string(),
                     vector_score: None,
                     vector_rank: None,
                     tfidf_score: None,
                     tfidf_rank: None,
+                    semantic_score: None,
+                    lexical_score: None,
+                    final_score: 0.0,
                     merged_rank_reason: "lexical parallel from TF-IDF similar".to_string(),
                     title: opt_str(item, "main_title"),
                     snippet: opt_str(item, "zh_text_raw").map(|s| char_prefix(&s, 160)),
@@ -4525,14 +4801,21 @@ impl ToolEngine {
                     entry.merged_rank_reason =
                         "appears in both vector and TF-IDF candidates".to_string();
                 }
+                refresh_hybrid_scores(entry);
             }
         }
+        for hit in merged.values_mut() {
+            refresh_hybrid_scores(hit);
+        }
         let mut merged_hits: Vec<_> = merged.into_values().collect();
+        let merged_candidate_count = merged_hits.len();
         merged_hits.sort_by(|a, b| {
             let a_overlap = a.vector_rank.is_some() && a.tfidf_rank.is_some();
             let b_overlap = b.vector_rank.is_some() && b.tfidf_rank.is_some();
-            b_overlap
-                .cmp(&a_overlap)
+            b.final_score
+                .partial_cmp(&a.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b_overlap.cmp(&a_overlap))
                 .then_with(|| {
                     a.vector_rank
                         .unwrap_or(usize::MAX)
@@ -4544,7 +4827,72 @@ impl ToolEngine {
                         .cmp(&b.tfidf_rank.unwrap_or(usize::MAX))
                 })
         });
-        merged_hits.truncate(effective_limit);
+        merged_hits.truncate(output_limit);
+        let returned_count = merged_hits.len();
+
+        let has_vector_candidates = vector_neighbors
+            .as_ref()
+            .is_some_and(|v| !v.hits.is_empty());
+        let has_tfidf_candidates = tfidf_similar
+            .as_ref()
+            .is_some_and(|s| !s.similar_passages.is_empty());
+        let (mode, mode_reason) = match (has_vector_candidates, has_tfidf_candidates) {
+            (true, true) => (
+                "hybrid",
+                "vector and TF-IDF sources both produced candidates",
+            ),
+            (false, true) => (
+                "lexical_only",
+                "TF-IDF produced candidates; semantic vector candidates are unavailable or empty",
+            ),
+            (true, false) => (
+                "semantic_only",
+                "vector search produced candidates; TF-IDF candidates are unavailable, not applicable, or empty",
+            ),
+            (false, false) => (
+                "unavailable",
+                "no vector or TF-IDF discovery candidates were produced",
+            ),
+        };
+        warnings.push(format!("hybrid_discover_mode={mode}"));
+
+        let mut trace = crate::retrieval::RetrievalTraceBuilder::new();
+        let mut vector_stage = crate::retrieval::RetrievalStageReport::new(
+            "vector_candidates",
+            vector_neighbors.as_ref().map_or(0, |v| v.hits.len()),
+            vector_neighbors.as_ref().map_or(0, |v| v.hits.len()),
+        )
+        .with_elapsed_ms(vector_elapsed_ms);
+        if let Some(warning) = vector_stage_warning {
+            vector_stage = vector_stage.with_warning(warning);
+        }
+        trace.push(vector_stage);
+        let mut tfidf_stage = crate::retrieval::RetrievalStageReport::new(
+            "tfidf_candidates",
+            tfidf_similar
+                .as_ref()
+                .map_or(0, |s| s.similar_passages.len()),
+            tfidf_similar
+                .as_ref()
+                .map_or(0, |s| s.similar_passages.len()),
+        );
+        if let Some(elapsed_ms) = tfidf_elapsed_ms {
+            tfidf_stage = tfidf_stage.with_elapsed_ms(elapsed_ms);
+        } else if req.seed_passage_id.is_none() {
+            tfidf_stage = tfidf_stage.with_warning("tfidf_requires_seed_passage_id");
+        }
+        trace.push(tfidf_stage);
+        trace.push(crate::retrieval::RetrievalStageReport::new(
+            "merge_and_rank",
+            merged_candidate_count,
+            merged_candidate_count,
+        ));
+        trace.push(crate::retrieval::RetrievalStageReport::new(
+            "return",
+            merged_candidate_count,
+            returned_count,
+        ));
+
         let groups = HybridDiscoverGroups {
             semantic_candidates: merged_hits
                 .iter()
@@ -4579,12 +4927,19 @@ impl ToolEngine {
         Ok(HybridDiscoverResponse {
             schema: "sinorag-hybrid-discover-v1",
             workflow: "semantic_discovery",
+            mode: mode.to_string(),
+            mode_reason: mode_reason.to_string(),
+            candidate_budget: crate::retrieval::RetrievalBudget::new(output_limit, candidate_limit)
+                .with_time_limits(req.max_elapsed_ms, req.max_component_ms),
+            merged_candidate_count,
+            returned_count,
             seed_passage_id: req.seed_passage_id,
             vector_neighbors,
             tfidf_similar,
             context,
             groups,
             merged_hits,
+            stages: trace.finish(),
             components,
             suggested_next_tools,
             indexes_used,
@@ -5402,7 +5757,6 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::PairProfileRequest,
     ) -> Result<crate::tools::responses::PairProfileResponse> {
-        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
         use crate::tools::responses::{PairAppearanceHit, PairProfileGroup, PairProfileResponse};
 
         let unit = match req.unit.as_str() {
@@ -5423,8 +5777,16 @@ impl ToolEngine {
         } else {
             None
         };
-        let canon_for_index = if canon.is_empty() { None } else { Some(canon.as_slice()) };
-        let period_for_index = if period.len() == 1 { Some(period[0].as_str()) } else { None };
+        let canon_for_index = if canon.is_empty() {
+            None
+        } else {
+            Some(canon.as_slice())
+        };
+        let period_for_index = if period.len() == 1 {
+            Some(period[0].as_str())
+        } else {
+            None
+        };
 
         let term1_variants = pair_term_variants(&req.term1, req.allow_variants);
         let term2_variants = pair_term_variants(&req.term2, req.allow_variants);
@@ -5472,12 +5834,15 @@ impl ToolEngine {
             "canon" => "canon",
             "work" => "main_title",
             "author" => "author",
-            other => anyhow::bail!("unknown group_by '{other}'; use period, canon, work, or author"),
+            other => {
+                anyhow::bail!("unknown group_by '{other}'; use period, canon, work, or author")
+            }
         };
 
         let mut group_term1: std::collections::BTreeMap<String, usize> = Default::default();
         let mut group_term2: std::collections::BTreeMap<String, usize> = Default::default();
-        let mut group_pairs: std::collections::BTreeMap<String, Vec<PairAppearanceHit>> = Default::default();
+        let mut group_pairs: std::collections::BTreeMap<String, Vec<PairAppearanceHit>> =
+            Default::default();
 
         for row in &term1_rows {
             let label = opt_str(row, group_field).unwrap_or_default();
@@ -5490,14 +5855,21 @@ impl ToolEngine {
 
         let mut total_pair_hits = 0usize;
         for row in &term1_rows {
-            let Some(pid) = row.get("passage_id").and_then(|v| v.as_str()) else { continue };
+            let Some(pid) = row.get("passage_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
             if !term2_by_pid.contains_key(pid) {
                 continue;
             }
-            let norm = row.get("zh_text_normalized").and_then(|v| v.as_str()).unwrap_or("");
+            let norm = row
+                .get("zh_text_normalized")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let t1_off = find_offsets_for_terms(norm, &term1_variants);
             let t2_off = find_offsets_for_terms(norm, &term2_variants);
-            if t1_off.is_empty() || t2_off.is_empty() { continue; }
+            if t1_off.is_empty() || t2_off.is_empty() {
+                continue;
+            }
             let distance = min_pair_distance(&t1_off, &t2_off, false);
             let keep = match unit.as_str() {
                 "passage" => distance.is_some(),
@@ -5505,7 +5877,9 @@ impl ToolEngine {
                 "sentence" => has_sentence_pair(norm, &t1_off, &t2_off, false),
                 _ => false,
             };
-            if !keep { continue; }
+            if !keep {
+                continue;
+            }
             let label = opt_str(row, group_field).unwrap_or_default();
             let hit = PairAppearanceHit {
                 passage_id: pid.to_string(),
@@ -5614,11 +5988,13 @@ impl ToolEngine {
             ],
             evidence,
             caveats: vec![
-                "This is a corpus-local resolver; no external authority file is consulted.".to_string(),
+                "This is a corpus-local resolver; no external authority file is consulted."
+                    .to_string(),
                 "Supply all known aliases explicitly.".to_string(),
             ],
             suggested_next: vec![
-                "Run person-history with the same aliases to classify mention contexts.".to_string(),
+                "Run person-history with the same aliases to classify mention contexts."
+                    .to_string(),
             ],
         })
     }
@@ -5644,8 +6020,8 @@ impl ToolEngine {
 
         let mut by_passage: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         for (idx, form) in forms.iter().enumerate() {
-            let rows =
-                exact_phrase_rows(&passages, &SearchSpec::exact_phrase(form.clone(), limit)).await?;
+            let rows = exact_phrase_rows(&passages, &SearchSpec::exact_phrase(form.clone(), limit))
+                .await?;
             for mut row in rows {
                 let passage_id = field_str(&row, "passage_id");
                 let mention_class = classify_person_mention(&row, form);
@@ -5653,15 +6029,26 @@ impl ToolEngine {
                     obj.insert("matched_name_form".to_string(), serde_json::json!(form));
                     obj.insert("matched_name_forms".to_string(), serde_json::json!([form]));
                     obj.insert("is_primary_name".to_string(), serde_json::json!(idx == 0));
-                    obj.insert("mention_class".to_string(), serde_json::json!(mention_class));
+                    obj.insert(
+                        "mention_class".to_string(),
+                        serde_json::json!(mention_class),
+                    );
                     obj.insert(
                         "ambiguity".to_string(),
-                        serde_json::json!(if idx == 0 { "unambiguous_candidate" } else { "alias_candidate" }),
+                        serde_json::json!(if idx == 0 {
+                            "unambiguous_candidate"
+                        } else {
+                            "alias_candidate"
+                        }),
                     );
                 }
                 match by_passage.entry(passage_id) {
-                    Entry::Vacant(e) => { e.insert(row); }
-                    Entry::Occupied(mut e) => { merge_person_mention(e.get_mut(), form, idx == 0); }
+                    Entry::Vacant(e) => {
+                        e.insert(row);
+                    }
+                    Entry::Occupied(mut e) => {
+                        merge_person_mention(e.get_mut(), form, idx == 0);
+                    }
                 }
             }
         }
@@ -5669,7 +6056,9 @@ impl ToolEngine {
         let mut mentions: Vec<serde_json::Value> = by_passage.into_values().collect();
         mentions.sort_by_key(|row| {
             (
-                row.get("period_rank").and_then(|v| v.as_i64()).unwrap_or(99),
+                row.get("period_rank")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(99),
                 field_str(row, "source_rel_path"),
                 field_str(row, "from_lb"),
                 field_str(row, "xml_id"),
@@ -5692,7 +6081,10 @@ impl ToolEngine {
             .iter()
             .take(12)
             .map(|row| {
-                let form = row.get("matched_name_form").and_then(|v| v.as_str()).unwrap_or(&req.name);
+                let form = row
+                    .get("matched_name_form")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&req.name);
                 evidence_from_row(row, form, "person_mention")
             })
             .collect::<Vec<_>>();
@@ -5710,12 +6102,15 @@ impl ToolEngine {
             ambiguous_earlier_hits,
             evidence,
             caveats: vec![
-                "Rule-based mention classes are triage labels, not accepted historical claims.".to_string(),
+                "Rule-based mention classes are triage labels, not accepted historical claims."
+                    .to_string(),
                 "Alias hits may refer to more than one person.".to_string(),
             ],
             suggested_next: vec![
-                "Review earliest hits with source-read before asserting a first mention.".to_string(),
-                "Use pair-appearance to check if this person is mentioned with another figure.".to_string(),
+                "Review earliest hits with source-read before asserting a first mention."
+                    .to_string(),
+                "Use pair-appearance to check if this person is mentioned with another figure."
+                    .to_string(),
             ],
         })
     }
@@ -5738,7 +6133,11 @@ impl ToolEngine {
         } else {
             None
         };
-        let canon_for_index = if canon.is_empty() { None } else { Some(canon.as_slice()) };
+        let canon_for_index = if canon.is_empty() {
+            None
+        } else {
+            Some(canon.as_slice())
+        };
 
         let (exact_hits, strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
@@ -5808,8 +6207,7 @@ impl ToolEngine {
                         Some((overlap, pid, row))
                     })
                     .collect();
-                scored
-                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 for (overlap, pid, row) in scored.into_iter().take(req.near_match_limit) {
                     let text = row
                         .get("zh_text_normalized")
@@ -5871,8 +6269,7 @@ impl ToolEngine {
                         Some((overlap, pid, row))
                     })
                     .collect();
-                scored
-                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 for (overlap, pid, row) in scored.into_iter().take(req.near_match_limit) {
                     let text = row
                         .get("zh_text_normalized")
@@ -5891,7 +6288,10 @@ impl ToolEngine {
         }
 
         let verdict = if verified {
-            format!("VERIFIED — found {} exact occurrence(s) in the corpus", exact_hit_count)
+            format!(
+                "VERIFIED — found {} exact occurrence(s) in the corpus",
+                exact_hit_count
+            )
         } else if !near_matches.is_empty() {
             format!(
                 "NOT VERIFIED — quote not found exactly in the scoped corpus; {} near-match(es) found",
@@ -5901,7 +6301,8 @@ impl ToolEngine {
             "NOT VERIFIED — no exact or near matches found in the scoped corpus".to_string()
         };
 
-        let exact_hits_json: Vec<serde_json::Value> = exact_hits.into_iter().take(req.limit).collect();
+        let exact_hits_json: Vec<serde_json::Value> =
+            exact_hits.into_iter().take(req.limit).collect();
 
         Ok(CitationVerifyResponse {
             schema: "sinorag-citation-verify-v1",
@@ -5920,10 +6321,19 @@ impl ToolEngine {
 }
 
 fn classify_person_mention(row: &serde_json::Value, form: &str) -> &'static str {
-    let text = row.get("zh_text_raw").and_then(|v| v.as_str()).unwrap_or("");
-    if text.contains("嗣") || text.contains("法嗣") || text.contains("傳法") || text.contains("弟子") {
+    let text = row
+        .get("zh_text_raw")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if text.contains("嗣")
+        || text.contains("法嗣")
+        || text.contains("傳法")
+        || text.contains("弟子")
+    {
         "lineage_relation"
-    } else if text.contains(form) && (text.contains("云") || text.contains("曰") || text.contains("示")) {
+    } else if text.contains(form)
+        && (text.contains("云") || text.contains("曰") || text.contains("示"))
+    {
         "attributed_saying"
     } else if row.get("text_type").and_then(|v| v.as_str()) == Some("dialogue") {
         "case_appearance"
@@ -5935,13 +6345,20 @@ fn classify_person_mention(row: &serde_json::Value, form: &str) -> &'static str 
 }
 
 fn merge_person_mention(row: &mut serde_json::Value, form: &str, is_primary: bool) {
-    let Some(obj) = row.as_object_mut() else { return };
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
     if is_primary {
         obj.insert("is_primary_name".to_string(), serde_json::json!(true));
         obj.insert("matched_name_form".to_string(), serde_json::json!(form));
-        obj.insert("ambiguity".to_string(), serde_json::json!("unambiguous_candidate"));
+        obj.insert(
+            "ambiguity".to_string(),
+            serde_json::json!("unambiguous_candidate"),
+        );
     }
-    let entry = obj.entry("matched_name_forms".to_string()).or_insert_with(|| serde_json::json!([]));
+    let entry = obj
+        .entry("matched_name_forms".to_string())
+        .or_insert_with(|| serde_json::json!([]));
     if let Some(forms) = entry.as_array_mut() {
         if !forms.iter().any(|v| v.as_str() == Some(form)) {
             forms.push(serde_json::json!(form));

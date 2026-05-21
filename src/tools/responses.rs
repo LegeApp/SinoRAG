@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
+use crate::retrieval::{RetrievalBudget, RetrievalStageReport, ScopeSpec};
 use crate::tools::errors::ToolErrorBody;
 
 /// Response from the search tool
@@ -490,6 +491,8 @@ pub struct CollocationSearchStrategy {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PairAppearanceResponse {
     pub schema: &'static str,
+    pub candidate_budget: RetrievalBudget,
+    pub scope: ScopeSpec,
     pub term1: String,
     pub term2: String,
     pub unit: String,
@@ -501,6 +504,7 @@ pub struct PairAppearanceResponse {
     pub hits: Vec<PairAppearanceHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_summary: Option<PairAppearanceNegativeSummary>,
+    pub stages: Vec<RetrievalStageReport>,
     pub search_strategy: PairAppearanceSearchStrategy,
 }
 
@@ -675,6 +679,8 @@ pub struct VectorNeighborHit {
 pub struct EvidenceSearchResponse {
     pub schema: &'static str,
     pub workflow: &'static str,
+    pub candidate_budget: RetrievalBudget,
+    pub scope: ScopeSpec,
     pub phrase: String,
     pub expanded_terms: Vec<String>,
     pub expanded_terms_used: bool,
@@ -685,6 +691,7 @@ pub struct EvidenceSearchResponse {
     pub phrase_history: Option<PhraseHistoryResponse>,
     pub usage: Option<TraceTermUsageResponse>,
     pub clusters: Option<ClusterHitsResponse>,
+    pub stages: Vec<RetrievalStageReport>,
     pub components: Vec<WorkflowComponent>,
     pub suggested_next_tools: Vec<SuggestedToolCall>,
     pub indexes_used: Vec<String>,
@@ -697,12 +704,18 @@ pub struct EvidenceSearchResponse {
 pub struct HybridDiscoverResponse {
     pub schema: &'static str,
     pub workflow: &'static str,
+    pub mode: String,
+    pub mode_reason: String,
+    pub candidate_budget: RetrievalBudget,
+    pub merged_candidate_count: usize,
+    pub returned_count: usize,
     pub seed_passage_id: Option<String>,
     pub vector_neighbors: Option<VectorNeighborsResponse>,
     pub tfidf_similar: Option<SimilarResponse>,
     pub context: Option<ExpandContextAdaptiveResponse>,
     pub groups: HybridDiscoverGroups,
     pub merged_hits: Vec<HybridDiscoverHit>,
+    pub stages: Vec<RetrievalStageReport>,
     pub components: Vec<WorkflowComponent>,
     pub suggested_next_tools: Vec<SuggestedToolCall>,
     pub indexes_used: Vec<String>,
@@ -720,11 +733,15 @@ pub struct HybridDiscoverGroups {
 pub struct HybridDiscoverHit {
     pub passage_id: String,
     pub labels: Vec<String>,
+    pub candidate_sources: Vec<String>,
     pub evidence_status: String,
     pub vector_score: Option<f32>,
     pub vector_rank: Option<usize>,
     pub tfidf_score: Option<f32>,
     pub tfidf_rank: Option<usize>,
+    pub semantic_score: Option<f32>,
+    pub lexical_score: Option<f32>,
+    pub final_score: f32,
     pub merged_rank_reason: String,
     pub title: Option<String>,
     pub snippet: Option<String>,

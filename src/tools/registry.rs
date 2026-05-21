@@ -1033,7 +1033,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "hybrid-discover",
-                description: "Combine vector and TF-IDF discovery candidates with explicit semantic/lexical labels.",
+                description: "Combine vector and TF-IDF discovery candidates when both indexes are available, or degrade to explicit lexical-only/semantic-only discovery mode.",
                 input_schema: schema_for::<HybridDiscoverRequest>(),
                 output_schema: schema_for::<HybridDiscoverResponse>(),
                 requires: vec!["passages.parquet", "doc_table.bin"],
