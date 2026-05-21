@@ -1,4 +1,4 @@
-//! `sinorag setup opencode` — verify opencode is installed and configured.
+//! `sinorag setup opencode` — verify opencode and explain the wrapper flow.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -58,8 +58,15 @@ pub fn run(args: SetupOpencodeArgs) -> Result<()> {
     println!("  2. Build (or copy) a SinoRAG corpus pack — see `sinorag status`.");
     println!("  3. Launch the wrapped session:  sinorag agent");
     println!();
-    println!("`sinorag agent` regenerates `<workdir>/.opencode/opencode.json` and the");
-    println!("sinorag-managed slice of `<workdir>/AGENTS.md`, then execs opencode.");
+    println!("MCP is the supported live-agent transport. `sinorag agent` wraps");
+    println!("`sinorag mcp` for opencode by regenerating");
+    println!("`<workdir>/.opencode/opencode.json` and the sinorag-managed slice of");
+    println!("`<workdir>/AGENTS.md`, then execs opencode.");
+    println!();
+    println!("For scripts and audit trails, use the JSON CLI instead:");
+    println!("  sinorag tools-manifest");
+    println!("  sinorag tool-call <tool> --json '{{...}}'");
+    println!("  sinorag run-tools --input jobs.jsonl --output results.jsonl");
 
     Ok(())
 }

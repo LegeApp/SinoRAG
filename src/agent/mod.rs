@@ -22,6 +22,8 @@ pub struct AgentArgs {
     pub opencode: Option<PathBuf>,
     pub pack: Option<PathBuf>,
     pub allow_admin_tools: bool,
+    pub writable: bool,
+    pub output_root: Option<PathBuf>,
     pub dry_run: bool,
 }
 
@@ -47,6 +49,8 @@ pub fn run(args: AgentArgs) -> Result<()> {
         &self_exe,
         args.pack.as_deref(),
         args.allow_admin_tools,
+        args.writable,
+        args.output_root.as_deref(),
     )?;
     write_agents_md(&workdir)?;
 
@@ -116,6 +120,8 @@ fn write_opencode_config(
     self_exe: &std::path::Path,
     pack: Option<&std::path::Path>,
     allow_admin_tools: bool,
+    writable: bool,
+    output_root: Option<&std::path::Path>,
 ) -> Result<()> {
     let dir = workdir.join(".opencode");
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -127,6 +133,13 @@ fn write_opencode_config(
     }
     if allow_admin_tools {
         command.push("--allow-admin-tools".to_string());
+    }
+    if writable {
+        command.push("--writable".to_string());
+    }
+    if let Some(root) = output_root {
+        command.push("--output-root".to_string());
+        command.push(root.to_string_lossy().into_owned());
     }
 
     let config = json!({

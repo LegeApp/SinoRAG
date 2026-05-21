@@ -44,8 +44,45 @@ use crate::cli::{Cli, Command, IndexCommand, IndexesCommand, LexicalIndexArgs, S
 use crate::document_table::{match_index_fingerprint, DocumentTable, IndexCoverage};
 use crate::phrase_index::PhraseIndex;
 use crate::tfidf::index::TfidfIndex;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
+
+/// Returns the set of corpus names already present in `out_parquet` as
+/// `source_corpus=<name>` partition directories.
+fn ingested_corpora(out_parquet: &std::path::Path) -> Vec<String> {
+    if !out_parquet.is_dir() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(out_parquet) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let s = name.to_string_lossy();
+            if let Some(corpus) = s.strip_prefix("source_corpus=") {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    names.push(corpus.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Reads the `corpus_id` from a CEF corpus directory's `corpus.toml`.
+fn cef_corpus_id(path: &std::path::Path) -> Result<String> {
+    let corpus_dir = if path.is_file() {
+        path.parent()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine CEF corpus dir from {}", path.display()))?
+            .to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    let content = std::fs::read_to_string(corpus_dir.join("corpus.toml"))
+        .context("reading corpus.toml")?;
+    let corpus: crate::cef::CorpusToml =
+        toml::from_str(&content).context("parsing corpus.toml")?;
+    Ok(corpus.corpus_id)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_all_indexes(
@@ -70,9 +107,9 @@ pub fn build_all_indexes(
     if phrase_index_is_current(&phrase_out, &doc_table, &doc_table_loaded, phrase_gram_len)? {
         eprintln!("Phrase index is current; skipping.");
     } else {
-        phrase_index::build(
+        crate::phrase_index::build_from_table(
             parquet.clone(),
-            doc_table.clone(),
+            doc_table_loaded.clone(),
             phrase_out,
             phrase_gram_len,
             buckets,
@@ -86,14 +123,20 @@ pub fn build_all_indexes(
         min_df,
         max_df_ratio,
         max_features,
-        dtype: "float32".to_string(),
-        analyzer: "char".to_string(),
+        ..crate::tfidf::index::TfidfParams::default()
     };
     if tfidf_index_is_current(&tfidf_out, &doc_table, &doc_table_loaded, &params)? {
         eprintln!("TF-IDF index is current; skipping.");
         Ok(())
     } else {
-        crate::tfidf::index::build(parquet, doc_table, tfidf_out, params, buckets, tfidf_temp)
+        crate::tfidf::index::build_from_table(
+            parquet,
+            doc_table_loaded,
+            tfidf_out,
+            params,
+            buckets,
+            tfidf_temp,
+        )
     }
 }
 
@@ -192,6 +235,7 @@ fn tfidf_params_match(info: &serde_json::Value, params: &crate::tfidf::index::Tf
 }
 
 fn build_lexical_indexes(args: LexicalIndexArgs) -> Result<()> {
+    status::check_index_prerequisites(&args.parquet, &args.doc_table)?;
     build_all_indexes(
         args.parquet,
         args.doc_table,
@@ -239,7 +283,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 gram_len,
                 buckets,
                 temp_dir,
-            } => phrase_index::build(parquet, doc_table, out, gram_len, buckets, temp_dir),
+            } => {
+                status::check_index_prerequisites(&parquet, &doc_table)?;
+                phrase_index::build(parquet, doc_table, out, gram_len, buckets, temp_dir)
+            }
             IndexCommand::Tfidf {
                 parquet,
                 doc_table,
@@ -252,19 +299,41 @@ pub async fn run(cli: Cli) -> Result<()> {
                 buckets,
                 temp_dir,
             } => {
+                status::check_index_prerequisites(&parquet, &doc_table)?;
                 let params = crate::tfidf::index::TfidfParams {
                     min_ngram,
                     max_ngram,
                     min_df,
                     max_df_ratio,
                     max_features,
-                    dtype: "float32".to_string(),
-                    analyzer: "char".to_string(),
+                    ..crate::tfidf::index::TfidfParams::default()
                 };
                 crate::tfidf::index::build(parquet, doc_table, out, params, buckets, temp_dir)
             }
             IndexCommand::PhraseInfo { index } => phrase_index::info(index),
             IndexCommand::TfidfInfo { index } => tfidf::info(index),
+            IndexCommand::Catalog {
+                parquet,
+                doc_table,
+                out,
+            } => {
+                status::check_index_prerequisites(&parquet, &doc_table)?;
+                catalog_index::build(parquet, out.clone(), None, Some(doc_table.clone()))?;
+                let data_root = out
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("data"));
+                let phrase_index_path = data_root.join("derived").join("phrase.index");
+                let tfidf_index_path = data_root.join("derived").join("tfidf.index");
+                ingest::initialize_registry_after_ingest(
+                    &data_root,
+                    &doc_table,
+                    Some(&out),
+                    Some(&phrase_index_path),
+                    Some(&tfidf_index_path),
+                )
+            }
             IndexCommand::VectorExport {
                 parquet,
                 doc_table,
@@ -360,6 +429,29 @@ pub async fn run(cli: Cli) -> Result<()> {
             phrase_max_memory,
         } => {
             use crate::cli::IngestSource;
+
+            // Determine which corpus name this source will write, then
+            // check whether it is already present as a partition dir.
+            let incoming_corpus: String = match &source {
+                IngestSource::Cbeta => "cbeta".to_string(),
+                IngestSource::Kanripo => "kanripo".to_string(),
+                IngestSource::Terebess => "terebess".to_string(),
+                IngestSource::Cef => cef_corpus_id(&path)?,
+            };
+            let already = ingested_corpora(&out_parquet);
+            if already.contains(&incoming_corpus) {
+                anyhow::bail!(
+                    "corpus '{}' is already ingested at {}/source_corpus={}. \
+                     Delete that partition directory to re-ingest it.",
+                    incoming_corpus,
+                    out_parquet.display(),
+                    incoming_corpus
+                );
+            }
+
+            // If other corpora are already present the JSONL must be appended.
+            let append = !already.is_empty() && out_jsonl.exists();
+
             let (corpus, kanripo_input) = match source {
                 IngestSource::Cbeta => (Some(path), None),
                 IngestSource::Kanripo => (None, Some(path)),
@@ -374,6 +466,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         tfidf_out,
                         catalog_index_out,
                         phrase_max_memory,
+                        parallel_lexical: false,
                     });
                 }
                 IngestSource::Terebess => {
@@ -388,6 +481,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         tfidf_out,
                         catalog_index_out,
                         phrase_max_memory,
+                        parallel_lexical: false,
                     });
                 }
             };
@@ -398,6 +492,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 out_parquet,
                 zen_only,
                 resume,
+                append,
                 build_phrase_index,
                 phrase_index_out,
                 phrase_gram_len,
@@ -405,6 +500,63 @@ pub async fn run(cli: Cli) -> Result<()> {
                 tfidf_out,
                 catalog_index_out,
                 phrase_max_memory,
+                false,
+            )
+            .await
+        }
+        Command::IngestAll {
+            cbeta,
+            kanripo,
+            resume,
+            zen_only,
+            no_lexical,
+            no_phrase,
+            no_tfidf,
+            parallel_lexical,
+            phrase_gram_len,
+            phrase_max_memory,
+            phrase_index_out,
+            tfidf_out,
+            catalog_index_out,
+            out_jsonl,
+            out_parquet,
+        } => {
+            if cbeta.is_none() && kanripo.is_none() {
+                anyhow::bail!("ingest-all requires at least one of --cbeta or --kanripo");
+            }
+            let already = ingested_corpora(&out_parquet);
+            for (flag, name) in [(cbeta.is_some(), "cbeta"), (kanripo.is_some(), "kanripo")] {
+                if flag && already.iter().any(|c| c == name) {
+                    anyhow::bail!(
+                        "corpus '{}' is already ingested at {}/source_corpus={}. \
+                         Delete that partition directory to re-ingest it.",
+                        name,
+                        out_parquet.display(),
+                        name
+                    );
+                }
+            }
+            let append = !already.is_empty() && out_jsonl.exists();
+
+            let build_phrase_index = !no_lexical && !no_phrase;
+            let build_tfidf = !no_lexical && !no_tfidf;
+
+            ingest::run(
+                cbeta,
+                kanripo,
+                out_jsonl,
+                out_parquet,
+                zen_only,
+                resume,
+                append,
+                build_phrase_index,
+                phrase_index_out,
+                phrase_gram_len,
+                build_tfidf,
+                Some(tfidf_out),
+                Some(catalog_index_out),
+                phrase_max_memory,
+                parallel_lexical,
             )
             .await
         }
@@ -433,6 +585,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf.index")),
                 catalog_index_out: Some(std::path::PathBuf::from("data/derived/catalog.index")),
                 phrase_max_memory: None,
+                parallel_lexical: false,
             })
         }
         Command::KanripoToTei {
@@ -608,14 +761,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             buckets,
             temp_dir,
         } => {
+            status::check_index_prerequisites(&parquet, &doc_table)?;
             let params = crate::tfidf::index::TfidfParams {
                 min_ngram,
                 max_ngram,
                 min_df,
                 max_df_ratio,
                 max_features,
-                dtype: "float32".to_string(),
-                analyzer: "char".to_string(),
+                ..crate::tfidf::index::TfidfParams::default()
             };
             crate::tfidf::index::build(parquet, doc_table, out, params, buckets, temp_dir)
         }
@@ -627,7 +780,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             gram_len,
             buckets,
             temp_dir,
-        } => phrase_index::build(parquet, doc_table, out, gram_len, buckets, temp_dir),
+        } => {
+            status::check_index_prerequisites(&parquet, &doc_table)?;
+            phrase_index::build(parquet, doc_table, out, gram_len, buckets, temp_dir)
+        }
         Command::PhraseIndexInfo { index } => phrase_index::info(index),
         Command::PhraseIndexSearch {
             parquet,
@@ -718,6 +874,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 tfidf_out: Some(std::path::PathBuf::from("data/derived/tfidf.index")),
                 catalog_index_out: Some(std::path::PathBuf::from("data/derived/catalog.index")),
                 phrase_max_memory: None,
+                parallel_lexical: false,
             })
         }
         Command::BuildPack { pack, pack_id } => build_pack::run(pack, pack_id),
@@ -1403,6 +1560,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Mcp {
             pack,
             readonly,
+            writable,
             allow_admin_tools,
             passages_parquet,
             phrase_index,
@@ -1416,7 +1574,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             use crate::tools::EngineConfig;
             let config = EngineConfig {
                 pack,
-                readonly,
+                readonly: if writable { false } else { readonly },
                 allow_admin_tools,
                 // Heavy tools (parquet scans, TF-IDF, vector search) are
                 // memory-hungry. A small cap keeps a long-lived MCP process
@@ -1442,11 +1600,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             opencode,
             pack,
             allow_admin_tools,
+            writable,
+            output_root,
             dry_run,
         } => crate::agent::run(crate::agent::AgentArgs {
             opencode,
             pack,
             allow_admin_tools,
+            writable,
+            output_root,
             dry_run,
         }),
         Command::ToolsManifest {

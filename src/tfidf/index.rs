@@ -180,7 +180,10 @@ impl TfidfIndex {
         }
         let version = u16::from_le_bytes([mmap[8], mmap[9]]);
         if version != 3 && version != 4 {
-            anyhow::bail!("unsupported TF-IDF format version {}; rebuild required", version);
+            anyhow::bail!(
+                "unsupported TF-IDF format version {}; rebuild required",
+                version
+            );
         }
 
         let vocab_count = u32::from_le_bytes(mmap[HDR_VOCAB_COUNT].try_into()?) as usize;
@@ -462,8 +465,7 @@ impl TfidfIndex {
             let h = u64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap());
             match h.cmp(&hash) {
                 std::cmp::Ordering::Equal => {
-                    let tid =
-                        u32::from_le_bytes(self.mmap[off + 8..off + 12].try_into().unwrap());
+                    let tid = u32::from_le_bytes(self.mmap[off + 8..off + 12].try_into().unwrap());
                     return Some(tid);
                 }
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -518,8 +520,7 @@ impl TfidfIndex {
                 *scores.entry(doc_id).or_insert(0.0) += qw * dw;
             }
         }
-        let mut ranked: Vec<(DocId, f32)> =
-            scores.into_iter().filter(|(_, s)| *s > 0.0).collect();
+        let mut ranked: Vec<(DocId, f32)> = scores.into_iter().filter(|(_, s)| *s > 0.0).collect();
         ranked.sort_by_key(|&(_, s)| Reverse(OrderedFloat(s)));
         ranked.truncate(k.max(1));
         ranked
@@ -569,7 +570,10 @@ impl TfidfIndex {
         }
         let version = u16::from_le_bytes([hdr[8], hdr[9]]);
         if version != 3 && version != 4 {
-            anyhow::bail!("unsupported TF-IDF format version {}; rebuild required", version);
+            anyhow::bail!(
+                "unsupported TF-IDF format version {}; rebuild required",
+                version
+            );
         }
         let vocab_count = u32::from_le_bytes(hdr[HDR_VOCAB_COUNT].try_into()?) as usize;
         let doc_count = u32::from_le_bytes(hdr[HDR_DOC_COUNT].try_into()?) as usize;
@@ -818,6 +822,25 @@ pub fn build(
     bucket_count: usize,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
+    let doc_table = DocumentTable::load(&doc_table_path)?;
+    build_from_table(
+        parquet_path,
+        doc_table,
+        out_path,
+        params,
+        bucket_count,
+        temp_dir,
+    )
+}
+
+pub(crate) fn build_from_table(
+    parquet_path: PathBuf,
+    doc_table: DocumentTable,
+    out_path: PathBuf,
+    params: TfidfParams,
+    bucket_count: usize,
+    temp_dir: Option<PathBuf>,
+) -> Result<()> {
     let temp_dir = temp_dir.unwrap_or_else(|| {
         let mut p = out_path.as_os_str().to_os_string();
         p.push(".work");
@@ -826,7 +849,6 @@ pub fn build(
 
     eprintln!("=== TF-IDF builder (u8-log quantized) ===");
     eprintln!("Parquet : {}", parquet_path.display());
-    eprintln!("DocTable: {}", doc_table_path.display());
     eprintln!("Output  : {}", out_path.display());
     eprintln!(
         "Params  : min_n={} max_n={} min_df={} max_df={} max_features={}",
@@ -860,14 +882,9 @@ pub fn build(
     }
     fs::create_dir_all(&post_dir)?;
 
-    // -----------------------------------------------------------------------
-    // Phase 0 — load doc table
-    // -----------------------------------------------------------------------
-    eprintln!("\n[Phase 0] Loading doc table...");
-    let doc_table = DocumentTable::load(&doc_table_path)?;
     let doc_table_fingerprint = doc_table.source_fingerprint.clone();
     let doc_count = doc_table.passage_ids.len();
-    eprintln!("  {} passages", doc_count);
+    eprintln!("\n[Phase 0] doc table: {} passages", doc_count);
 
     let files = crate::phrase_index::parquet_files(&parquet_path)?;
     let work_units = parquet_work_units(&files)?;
@@ -998,12 +1015,14 @@ pub fn build(
             let mut out = OpenOptions::new().create(true).append(true).open(&main)?;
             for t in 0..nthreads {
                 let src = df_dir.join(format!("t{}/bucket-{:04}.bin", t, bucket_idx));
-                if src.exists() {
-                    let data = fs::read(&src)?;
-                    if !data.is_empty() {
-                        out.write_all(&data)?;
+                match File::open(&src) {
+                    Ok(mut f) => {
+                        std::io::copy(&mut f, &mut out)?;
+                        drop(f);
+                        fs::remove_file(&src)?;
                     }
-                    fs::remove_file(&src)?;
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
                 }
             }
         }
@@ -1280,12 +1299,14 @@ pub fn build(
         let mut out = OpenOptions::new().create(true).append(true).open(&main)?;
         for t in 0..nthreads {
             let src = post_dir.join(format!("t{}/bucket-{:04}.bin", t, bucket_idx));
-            if src.exists() {
-                let data = fs::read(&src)?;
-                if !data.is_empty() {
-                    out.write_all(&data)?;
+            match File::open(&src) {
+                Ok(mut f) => {
+                    std::io::copy(&mut f, &mut out)?;
+                    drop(f);
+                    fs::remove_file(&src)?;
                 }
-                fs::remove_file(&src)?;
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
         }
     }

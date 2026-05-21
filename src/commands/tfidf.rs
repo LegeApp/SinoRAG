@@ -204,13 +204,13 @@ pub async fn similar_passages_with_index(
     let seed_row = by_id
         .get(seed)
         .ok_or_else(|| anyhow!("Seed passage not found: {seed}"))?;
-    let seed_norm = value_str(seed_row, "zh_text_normalized");
+    let seed_norm = jsonout::value_str(seed_row, "zh_text_normalized");
 
     let mut results = Vec::new();
     for (doc_id, score) in ranked {
         let passage_id = doc_table.passage_id(doc_id).unwrap_or("");
         let cand = by_id.get(passage_id).cloned().unwrap_or_else(|| json!({}));
-        let cand_norm = value_str(&cand, "zh_text_normalized");
+        let cand_norm = jsonout::value_str(&cand, "zh_text_normalized");
         let shared_ngrams =
             index.shared_ngrams_with_seed_text(seed_doc_id, doc_id, &seed_norm, shared_ngram_limit);
         let shared_phrases = long_common_substrings(
@@ -220,11 +220,12 @@ pub async fn similar_passages_with_index(
             shared_phrase_limit,
         );
 
-        let same_file =
-            value_str(seed_row, "source_rel_path") == value_str(&cand, "source_rel_path");
-        let same_canon = value_str(seed_row, "canon") == value_str(&cand, "canon");
-        let cand_period = value_str(&cand, "period");
-        let same_period = value_str(seed_row, "period") == cand_period;
+        let same_file = jsonout::value_str(seed_row, "source_rel_path")
+            == jsonout::value_str(&cand, "source_rel_path");
+        let same_canon =
+            jsonout::value_str(seed_row, "canon") == jsonout::value_str(&cand, "canon");
+        let cand_period = jsonout::value_str(&cand, "period");
+        let same_period = jsonout::value_str(seed_row, "period") == cand_period;
         let cross_source = !same_file;
         let cross_period = !same_period && !cand_period.is_empty();
 
@@ -308,29 +309,21 @@ pub async fn similar_passages_with_index(
             "cand_char_len": cand_len,
             "shared_ngrams": shared_ngrams,
             "shared_phrases": shared_phrases,
-            "source_rel_path": value_str(&cand, "source_rel_path"),
-            "xml_id": value_str(&cand, "xml_id"),
-            "heading": value_str(&cand, "heading"),
+            "source_rel_path": jsonout::value_str(&cand, "source_rel_path"),
+            "xml_id": jsonout::value_str(&cand, "xml_id"),
+            "heading": jsonout::value_str(&cand, "heading"),
             "from_lb": cand.get("from_lb").cloned().unwrap_or(Value::Null),
             "to_lb": cand.get("to_lb").cloned().unwrap_or(Value::Null),
-            "zh_text_raw": value_str(&cand, "zh_text_raw"),
-            "canon": value_str(&cand, "canon"),
+            "zh_text_raw": jsonout::value_str(&cand, "zh_text_raw"),
+            "canon": jsonout::value_str(&cand, "canon"),
             "traditions": cand.get("traditions").cloned().unwrap_or_else(|| json!([])),
             "period": cand_period,
-            "origin": value_str(&cand, "origin"),
-            "author": value_str(&cand, "author"),
-            "main_title": value_str(&cand, "main_title"),
+            "origin": jsonout::value_str(&cand, "origin"),
+            "author": jsonout::value_str(&cand, "author"),
+            "main_title": jsonout::value_str(&cand, "main_title"),
         }));
     }
     Ok(results)
-}
-
-fn value_str(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
 }
 
 fn round_f32(value: f32, places: i32) -> f32 {

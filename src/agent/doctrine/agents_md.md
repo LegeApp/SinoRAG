@@ -23,8 +23,9 @@ not a tool catalog.
 - **Absence / clustering**: `absence-check`, `cluster-hits`.
 - **Variant expansion**: `query-expand-terms` (no corpus deps).
 - **Workflow planning**: `plan-tools` for "what should I do next" style tasks.
-- **Output / write** (gated; not available in readonly mode): `graph-build`,
-  `report-build`, `report-from-evidence`, `validate-adjudication`.
+- **Output / write** (gated; only available when MCP is launched with
+  `--writable`): `graph-build`, `report-build`, `report-from-evidence`,
+  `pdf-build`, `validate-adjudication`.
 
 **Principle**: exact evidence before discovery. Confirm a phrase exists with
 `search` / `evidence-search` first; only then chase neighbors with

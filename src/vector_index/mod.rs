@@ -137,9 +137,8 @@ impl VectorIndex {
         // process — a single-use cost per index open, not per query.
         let reloader: &'static mut HnswIo =
             Box::leak(Box::new(HnswIo::new(&dump_dir, &dump_basename)));
-        let hnsw: Hnsw<'static, f32, DistL2> = reloader
-            .load_hnsw::<f32, DistL2>()
-            .with_context(|| {
+        let hnsw: Hnsw<'static, f32, DistL2> =
+            reloader.load_hnsw::<f32, DistL2>().with_context(|| {
                 format!(
                     "load HNSW graph dump from {} / {}",
                     graph_path.display(),

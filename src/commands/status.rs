@@ -8,6 +8,28 @@ use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Returns `Ok(())` when the passage store and document table are present,
+/// otherwise returns a descriptive error telling the user what to run next.
+pub fn check_index_prerequisites(parquet: &Path, doc_table: &Path) -> Result<()> {
+    if !parquet_root_has_corpus(parquet) {
+        anyhow::bail!(
+            "No corpus ingested at {}.\n\
+             Run `sinorag ingest <source> <path>` first to build the passage store.\n\
+             Run `sinorag status` to see what's been built.",
+            parquet.display()
+        );
+    }
+    if !doc_table.exists() {
+        anyhow::bail!(
+            "Document table not found at {}.\n\
+             Run `sinorag doc-table-build` first (it reads from the passage store).\n\
+             Run `sinorag status` to see what's been built.",
+            doc_table.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn run(data: PathBuf) -> Result<()> {
     let parquet_root = data.join("passages.parquet");
     let derived = data.join("derived");
@@ -94,6 +116,7 @@ pub fn run(data: PathBuf) -> Result<()> {
         shown_any = true;
     }
     println!("  • Single tool call:  `sinorag tool-call search --json '{{\"phrase\":\"...\"}}'`");
+    println!("  • Interactive agent: `sinorag setup opencode` then `sinorag agent`");
     if !vector_index.exists() {
         println!(
             "  • Semantic discovery: `sinorag indexes semantic` with a local-embeddings build, or `sinorag index vector-export` + external embeddings + `sinorag index vector-build`"
@@ -107,6 +130,17 @@ pub fn run(data: PathBuf) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parquet_root_has_corpus(parquet_root: &Path) -> bool {
+    let Ok(read) = fs::read_dir(parquet_root) else {
+        return false;
+    };
+    read.flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .starts_with("source_corpus=")
+    })
 }
 
 fn list_partitions(parquet_root: &Path) -> Vec<(String, usize)> {

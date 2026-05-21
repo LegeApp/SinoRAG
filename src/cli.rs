@@ -27,8 +27,8 @@ User flow:\n  \
   5. sinorag setup opencode && \\\n     \
      sinorag agent                      # talk to the corpus from a TUI\n\n\
 Agents talk to SinoRAG one of two ways:\n  \
-  - JSON CLI:  `tool-call` (single call) or `run-tools` (JSONL batch)\n  \
-  - MCP:       `sinorag mcp` (stdio); wrapped by `sinorag agent` for opencode\n\n\
+  - JSON CLI:  `tools-manifest`, `tool-call`, `run-tools` for scripts/batches\n  \
+  - MCP:       `sinorag agent` for opencode, or `sinorag mcp` for other clients\n\n\
 Run `sinorag tools-manifest --include-examples` for available tools.")]
 #[command(after_help = "Run `sinorag help <COMMAND>` for command details.")]
 pub struct Cli {
@@ -39,8 +39,9 @@ pub struct Cli {
 /// Which agent to onboard via `sinorag setup`.
 #[derive(Debug, Subcommand)]
 pub enum SetupAgent {
-    /// Verify opencode is installed and remind the user to configure a
-    /// provider. Does not install or modify opencode itself.
+    /// Verify opencode is installed and show the supported MCP wrapper flow.
+    ///
+    /// Does not install or modify opencode itself.
     Opencode {
         /// Explicit path to opencode (overrides PATH / $OPENCODE_BIN).
         #[arg(long)]
@@ -108,6 +109,20 @@ pub enum IndexCommand {
     TfidfInfo {
         #[arg(long, default_value = "data/derived/tfidf.index")]
         index: PathBuf,
+    },
+
+    /// Build the catalog (works / sections / outline) index.
+    ///
+    /// Required for `works`, `outline`, `scope`, `outline-search`, and related
+    /// tools. Much faster than phrase or TF-IDF — expect a few minutes on CBETA.
+    /// Safe to re-run post-hoc on an existing corpus without re-ingesting.
+    Catalog {
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
+        parquet: PathBuf,
+        #[arg(long, default_value = "data/derived/doc_table.bin", hide = true)]
+        doc_table: PathBuf,
+        #[arg(long, default_value = "data/derived/catalog.index", hide = true)]
+        out: PathBuf,
     },
 
     /// Export passage records for external embedding generation.
@@ -397,16 +412,82 @@ pub enum Command {
         out_parquet: PathBuf,
     },
 
+    /// Ingest CBETA and/or Kanripo together, then build doc_table, catalog,
+    /// and (by default) the phrase + TF-IDF lexical indexes in one run.
+    ///
+    /// At least one of `--cbeta` or `--kanripo` is required. Runs both
+    /// corpora through a single atomic staging dir so doc_table and the
+    /// catalog index are built once over the combined passage store
+    /// instead of twice (once per `sinorag ingest`).
+    ///
+    /// Use `--no-lexical` to skip both phrase and TF-IDF, `--no-phrase` /
+    /// `--no-tfidf` to skip one. `--parallel-lexical` runs phrase + TF-IDF
+    /// concurrently after doc_table is built — faster on multi-core boxes
+    /// but ~doubles peak memory.
+    #[command(name = "ingest-all")]
+    IngestAll {
+        /// CBETA TEI xml-p5 root directory.
+        #[arg(long)]
+        cbeta: Option<PathBuf>,
+        /// Kanripo `texts/` root directory.
+        #[arg(long)]
+        kanripo: Option<PathBuf>,
+        /// Resume from a staging dir or "auto" to pick the freshest one.
+        #[arg(long)]
+        resume: Option<PathBuf>,
+        /// Kanripo only: ingest Zen-lineage works only.
+        #[arg(long)]
+        zen_only: bool,
+        /// Skip both phrase and TF-IDF index builds.
+        #[arg(long)]
+        no_lexical: bool,
+        /// Skip the phrase index build.
+        #[arg(long)]
+        no_phrase: bool,
+        /// Skip the TF-IDF index build.
+        #[arg(long)]
+        no_tfidf: bool,
+        /// Build phrase + TF-IDF in parallel after doc_table. Roughly
+        /// 1.5–1.7× faster but ~doubles peak memory.
+        #[arg(long)]
+        parallel_lexical: bool,
+        /// Phrase index gram length.
+        #[arg(long, default_value_t = 4)]
+        phrase_gram_len: usize,
+        /// Maximum memory for phrase index build (e.g. 4G, 800M;
+        /// default: auto-detect).
+        #[arg(long, value_parser = crate::memory::parse_memory_size)]
+        phrase_max_memory: Option<u64>,
+        /// Phrase index output path.
+        #[arg(long, default_value = "data/derived/phrase.index", hide = true)]
+        phrase_index_out: PathBuf,
+        /// TF-IDF index output path.
+        #[arg(long, default_value = "data/derived/tfidf.index", hide = true)]
+        tfidf_out: PathBuf,
+        /// Catalog index output path.
+        #[arg(long, default_value = "data/derived/catalog.index", hide = true)]
+        catalog_index_out: PathBuf,
+        #[arg(long, default_value = "data/passages.jsonl", hide = true)]
+        out_jsonl: PathBuf,
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
+        out_parquet: PathBuf,
+    },
+
     /// Start the stdio MCP server exposing the SinoRAG tool registry.
     ///
-    /// Designed to be spawned as a child process by an MCP client
-    /// (opencode, Claude Desktop, etc.). All logging goes to stderr;
-    /// stdout is reserved for JSON-RPC framing.
+    /// This is the supported transport for MCP-capable clients. For opencode,
+    /// prefer `sinorag agent`, which writes the MCP config and doctrine before
+    /// launching the TUI. Other clients can spawn this command directly.
+    /// All logging goes to stderr; stdout is reserved for JSON-RPC framing.
     Mcp {
         #[arg(long)]
         pack: Option<PathBuf>,
+        /// Start in read-only mode. This is the default for MCP.
         #[arg(long, default_value_t = true)]
         readonly: bool,
+        /// Allow tools with safety=writes_output, such as pdf-build.
+        #[arg(long, default_value_t = false)]
+        writable: bool,
         #[arg(long)]
         allow_admin_tools: bool,
         #[arg(long)]
@@ -429,8 +510,8 @@ pub enum Command {
 
     /// One-time onboarding checks for an agent SinoRAG can wrap.
     ///
-    /// Currently only `opencode` is supported. Future agents (Claude Code,
-    /// other MCP clients) will get their own subcommand here.
+    /// Currently only `opencode` has a managed wrapper. Other MCP clients can
+    /// still use `sinorag mcp` directly.
     Setup {
         #[command(subcommand)]
         agent: SetupAgent,
@@ -440,8 +521,9 @@ pub enum Command {
     ///
     /// Writes `<workdir>/.opencode/opencode.json` pointing opencode at
     /// `<this exe> mcp ...`, refreshes `<workdir>/AGENTS.md` from the
-    /// embedded doctrine, then execs opencode. A single binary, no
-    /// separate server lifecycle.
+    /// embedded doctrine, then execs opencode. This is the recommended
+    /// interactive-agent workflow; JSON CLI remains recommended for scripts
+    /// and reproducible batches.
     Agent {
         /// Path to the opencode executable. Resolution order:
         /// this flag → `$OPENCODE_BIN` → `opencode` on PATH.
@@ -455,6 +537,14 @@ pub enum Command {
         /// Pass `--allow-admin-tools` through to the MCP server.
         #[arg(long)]
         allow_admin_tools: bool,
+
+        /// Pass `--writable` through to the MCP server so output tools can write files.
+        #[arg(long, default_value_t = false)]
+        writable: bool,
+
+        /// Restrict MCP output tools to this directory.
+        #[arg(long)]
+        output_root: Option<PathBuf>,
 
         /// Write the launcher artifacts and exit without spawning
         /// opencode. Useful for inspecting the generated configuration.
@@ -937,6 +1027,7 @@ pub enum Command {
     /// PDF. The model can include sidecar Chinese passages by wrapping them
     /// in ```` ``` ```` fences; everything outside fences is treated as
     /// the English/translation body.
+    #[command(name = "pdf-build", alias = "export-pdf")]
     ExportPdf {
         /// Markdown file produced by `report-build`, `report-from-evidence`,
         /// or hand-edited prose.

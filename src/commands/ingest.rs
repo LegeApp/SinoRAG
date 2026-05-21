@@ -38,6 +38,9 @@ pub struct PostIngestOptions {
     pub tfidf_out: Option<PathBuf>,
     pub catalog_index_out: Option<PathBuf>,
     pub phrase_max_memory: Option<u64>,
+    /// Run phrase + TF-IDF builds in parallel threads after doc_table.
+    /// Roughly 1.5–1.7× faster but ~doubles peak memory.
+    pub parallel_lexical: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,6 +69,7 @@ pub async fn run(
     out_parquet: PathBuf,
     zen_only: bool,
     resume: Option<PathBuf>,
+    append: bool,
     build_phrase_index: bool,
     phrase_index_out: PathBuf,
     phrase_gram_len: usize,
@@ -73,6 +77,7 @@ pub async fn run(
     tfidf_out: Option<PathBuf>,
     catalog_index_out: Option<PathBuf>,
     phrase_max_memory: Option<u64>,
+    parallel_lexical: bool,
 ) -> Result<()> {
     let out = PathBuf::from("data");
 
@@ -133,17 +138,15 @@ pub async fn run(
         }
     };
 
-    // -- Pre-flight: refuse if target jsonl or per-corpus partitions exist
-    // (only on a fresh run — resume has already committed to staging).
-    if !resuming {
+    // -- Pre-flight: refuse if target jsonl exists, unless appending to an
+    // existing store (caller already verified the incoming corpus is new).
+    if !resuming && !append {
         if out_jsonl.exists() {
             anyhow::bail!(
                 "target jsonl already exists: {}. Move/delete or use a different --out-jsonl.",
                 out_jsonl.display()
             );
         }
-        // The per-corpus partition dirs are checked at promotion time; we
-        // can't know which corpora will appear until ingest runs.
     }
 
     let staging_parquet = staging_root.join("passages.parquet");
@@ -414,6 +417,7 @@ pub async fn run(
         &staging_jsonl,
         &out_jsonl,
         &out_parquet,
+        append,
     )?;
 
     println!("wrote {}", out_jsonl.display());
@@ -431,6 +435,7 @@ pub async fn run(
         tfidf_out,
         catalog_index_out,
         phrase_max_memory,
+        parallel_lexical,
     })
 }
 
@@ -460,17 +465,32 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
         append_to,
     )?;
 
+    // catalog is fast and required by many commands — build it right after
+    // doc_table and before the slow lexical indexes so it's always available.
+    if let Some(ref catalog_out) = opts.catalog_index_out {
+        println!("\n=== Building catalog index ===");
+        crate::commands::catalog_index::build(
+            opts.out_parquet.clone(),
+            catalog_out.clone(),
+            None,
+            Some(doc_table_path.clone()),
+        )?;
+        println!("wrote {}", catalog_out.display());
+    }
+
     let parquet_file_count = crate::phrase_index::parquet_files(&opts.out_parquet)
         .map(|v| v.len())
         .unwrap_or(0);
 
-    if opts.build_phrase_index {
+    let phrase_buckets =
+        crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
+    let tfidf_buckets = phrase_buckets;
+
+    let run_phrase = || -> Result<()> {
         println!("\n=== Building phrase index ===");
-        let buckets =
-            crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
         println!(
             "  buckets: {} (parquet files: {}, memory budget: {})",
-            buckets,
+            phrase_buckets,
             parquet_file_count,
             opts.phrase_max_memory
                 .map(|b| format!("{} MB", b / 1024 / 1024))
@@ -481,53 +501,66 @@ pub fn post_ingest(opts: PostIngestOptions) -> Result<()> {
             doc_table_path.clone(),
             opts.phrase_index_out.clone(),
             opts.phrase_gram_len,
-            buckets,
+            phrase_buckets,
             None,
         )?;
         println!("wrote {}", opts.phrase_index_out.display());
-    }
+        Ok(())
+    };
 
-    if opts.build_tfidf {
+    let run_tfidf = || -> Result<()> {
         println!("\n=== Building TF-IDF index ===");
         let params = crate::tfidf::index::TfidfParams::default();
-        let buckets =
-            crate::memory::bucket_count_for_corpus(parquet_file_count, opts.phrase_max_memory);
         crate::tfidf::index::build(
             opts.out_parquet.clone(),
             doc_table_path.clone(),
             tfidf_out_path.clone(),
             params,
-            buckets,
+            tfidf_buckets,
             None,
         )?;
         println!("wrote {}", tfidf_out_path.display());
+        Ok(())
+    };
+
+    if opts.parallel_lexical && opts.build_phrase_index && opts.build_tfidf {
+        println!("\n=== Building phrase + TF-IDF indexes in parallel ===");
+        std::thread::scope(|s| -> Result<()> {
+            let phrase_handle = s.spawn(run_phrase);
+            let tfidf_handle = s.spawn(run_tfidf);
+            let phrase_res = phrase_handle
+                .join()
+                .map_err(|_| anyhow!("phrase index thread panicked"))?;
+            let tfidf_res = tfidf_handle
+                .join()
+                .map_err(|_| anyhow!("tfidf index thread panicked"))?;
+            phrase_res?;
+            tfidf_res?;
+            Ok(())
+        })?;
+    } else {
+        if opts.build_phrase_index {
+            run_phrase()?;
+        }
+        if opts.build_tfidf {
+            run_tfidf()?;
+        }
     }
 
-    if let Some(catalog_index_out) = opts.catalog_index_out {
-        println!("\n=== Building catalog index ===");
-        crate::commands::catalog_index::build(
-            opts.out_parquet.clone(),
-            catalog_index_out.clone(),
-            None,
-            Some(doc_table_path.clone()),
-        )?;
-        initialize_registry_after_ingest(
-            &out,
-            &doc_table_path,
-            Some(&catalog_index_out),
-            Some(&opts.phrase_index_out),
-            Some(&tfidf_out_path),
-        )?;
-    } else {
-        initialize_registry_after_ingest(&out, &doc_table_path, None, None, None)?;
-    }
+    initialize_registry_after_ingest(
+        &out,
+        &doc_table_path,
+        opts.catalog_index_out.as_deref(),
+        Some(&opts.phrase_index_out),
+        Some(&tfidf_out_path),
+    )?;
 
     let parquet_bytes = crate::commands::estimate::dir_size(&opts.out_parquet);
     print_next_steps(opts.build_phrase_index, opts.build_tfidf, parquet_bytes);
     Ok(())
 }
 
-fn initialize_registry_after_ingest(
+pub(crate) fn initialize_registry_after_ingest(
     data_root: &Path,
     doc_table_path: &Path,
     catalog_index_path: Option<&Path>,
@@ -616,14 +649,15 @@ fn print_next_steps(built_phrase: bool, built_tfidf: bool, parquet_bytes: u64) {
 }
 
 /// Move staging partitions into their final home. Refuses to overwrite an
-/// existing same-named partition or jsonl. On any error, the staging dir
-/// is left intact for inspection.
+/// existing same-named partition. When `append_jsonl` is true, appends the
+/// staging JSONL to any existing JSONL instead of refusing.
 fn promote_staging(
     staging_root: &Path,
     staging_parquet: &Path,
     staging_jsonl: &Path,
     out_jsonl: &Path,
     out_parquet: &Path,
+    append_jsonl: bool,
 ) -> Result<()> {
     // Inventory which partitions the staging produced.
     let mut to_move: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -645,7 +679,7 @@ fn promote_staging(
             }
         }
     }
-    if out_jsonl.exists() {
+    if !append_jsonl && out_jsonl.exists() {
         anyhow::bail!(
             "target jsonl already exists: {}. Move/delete first.",
             out_jsonl.display()
@@ -664,13 +698,27 @@ fn promote_staging(
         if let Some(parent) = out_jsonl.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(staging_jsonl, out_jsonl).with_context(|| {
-            format!(
-                "rename {} → {}",
-                staging_jsonl.display(),
-                out_jsonl.display()
-            )
-        })?;
+        if append_jsonl && out_jsonl.exists() {
+            use std::io::copy;
+            let mut src = std::fs::File::open(staging_jsonl)
+                .with_context(|| format!("open staging jsonl {}", staging_jsonl.display()))?;
+            let mut dst = std::fs::File::options()
+                .append(true)
+                .open(out_jsonl)
+                .with_context(|| format!("open {} for append", out_jsonl.display()))?;
+            copy(&mut src, &mut dst).with_context(|| {
+                format!("append {} → {}", staging_jsonl.display(), out_jsonl.display())
+            })?;
+            let _ = std::fs::remove_file(staging_jsonl);
+        } else {
+            std::fs::rename(staging_jsonl, out_jsonl).with_context(|| {
+                format!(
+                    "rename {} → {}",
+                    staging_jsonl.display(),
+                    out_jsonl.display()
+                )
+            })?;
+        }
     }
     // Sweep staging dir; if anything unexpected remains, leave it.
     let _ = std::fs::remove_file(staging_root.join(".ingest_checkpoint.json"));

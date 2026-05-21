@@ -126,7 +126,7 @@ Add tests to verify parallel tool calls work under load.
 
 ### ✅ 4. Document Concurrency Limits in MCP Instructions (COMPLETED)
 
-**Status:** Added to `get_mcp_instructions()` in server.rs.
+**Status:** Added to the embedded MCP instructions in `src/agent/doctrine/mcp_instructions.md`, which `src/mcp/server.rs` exposes through the MCP server info.
 
 **Added documentation:**
 - Batch independent queries when possible
@@ -193,6 +193,8 @@ DuckDB could replace SQLite for the registry, but:
 ## Conclusion
 
 The current implementation now supports parallel tool calls within a single server instance with WAL mode enabled for SQLite. The improvements made (WAL mode, busy timeout) significantly reduce contention risks for 5+ parallel tool calls.
+
+MCP is still a supported interface. For opencode users, the maintained workflow is `sinorag setup opencode` followed by `sinorag agent`, which wraps `sinorag mcp` and writes the opencode config automatically. Use direct `sinorag mcp` for other MCP clients or transport debugging; use `tool-call` and `run-tools` for reproducible CLI workflows.
 
 **Completed improvements:**
 - ✅ SQLite WAL mode enabled

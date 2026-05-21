@@ -32,8 +32,9 @@ not a tool catalog.
   `pair-profile` (aggregate rates by period, canon, or work).
 - **Citation verification**: `citation-verify` to check whether a claimed quote
   appears in the corpus.
-- **Output / write** (gated; not available in readonly mode): `graph-build`,
-  `report-build`, `report-from-evidence`, `validate-adjudication`.
+- **Output / write** (gated; only available when MCP is launched with
+  `--writable`): `graph-build`, `report-build`, `report-from-evidence`,
+  `pdf-build`, `validate-adjudication`.
 
 **Principle**: exact evidence before discovery. Confirm a phrase exists with
 `search` / `evidence-search` first; only then chase neighbors with

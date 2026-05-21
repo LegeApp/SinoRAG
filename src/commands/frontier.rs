@@ -93,7 +93,7 @@ pub async fn phrase_frontiers(
     seed: &Value,
     limit: usize,
 ) -> Result<Vec<Value>> {
-    let candidates = seed_phrases(value_str(seed, "zh_text_normalized"));
+    let candidates = seed_phrases(jsonout::value_str(seed, "zh_text_normalized"));
     let mut frontiers = Vec::new();
     for phrase in candidates {
         let where_clause = string_contains_sql("zh_text_normalized", &phrase);
@@ -129,12 +129,12 @@ pub async fn phrase_frontiers(
         }
         let sources: BTreeSet<String> = rows
             .iter()
-            .map(|row| value_str(row, "source_rel_path"))
+            .map(|row| jsonout::value_str(row, "source_rel_path"))
             .filter(|value| !value.is_empty())
             .collect();
         let periods: BTreeSet<String> = rows
             .iter()
-            .map(|row| value_str(row, "period"))
+            .map(|row| jsonout::value_str(row, "period"))
             .filter(|value| !value.is_empty())
             .collect();
         let length = phrase.chars().count();
@@ -199,9 +199,9 @@ pub fn facet_summary(rows: &[Value]) -> Value {
     let mut origins = BTreeMap::new();
     let mut traditions = BTreeMap::new();
     for row in rows {
-        bump(&mut periods, value_str(row, "period"));
-        bump(&mut canons, value_str(row, "canon"));
-        bump(&mut origins, value_str(row, "origin"));
+        bump(&mut periods, jsonout::value_str(row, "period"));
+        bump(&mut canons, jsonout::value_str(row, "canon"));
+        bump(&mut origins, jsonout::value_str(row, "origin"));
         if let Some(items) = row.get("traditions").and_then(Value::as_array) {
             for item in items {
                 bump(
@@ -231,10 +231,10 @@ pub fn next_seed_candidates(rows: &[Value]) -> Vec<Value> {
         .take(5)
         .map(|row| {
             json!({
-                "passage_id": value_str(&row, "passage_id"),
+                "passage_id": jsonout::value_str(&row, "passage_id"),
                 "tfidf_cosine": row.get("tfidf_cosine").cloned().unwrap_or_else(|| json!(0)),
-                "heading": value_str(&row, "heading"),
-                "source_rel_path": value_str(&row, "source_rel_path"),
+                "heading": jsonout::value_str(&row, "heading"),
+                "source_rel_path": jsonout::value_str(&row, "source_rel_path"),
                 "reason": "high lexical similarity candidate for follow-up review",
             })
         })
@@ -256,14 +256,6 @@ fn frontier_key(value: &Value) -> (i64, usize, usize, i64) {
     let length = value.get("length").and_then(Value::as_u64).unwrap_or(0) as usize;
     let total = value.get("total_hits").and_then(Value::as_i64).unwrap_or(0);
     (graph, sources, length, -total)
-}
-
-fn value_str(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
 }
 
 fn value_f64(value: &Value, key: &str) -> f64 {

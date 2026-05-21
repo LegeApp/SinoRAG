@@ -747,6 +747,25 @@ pub fn build(
     bucket_count: usize,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
+    let doc_table = DocumentTable::load(&doc_table_path)?;
+    build_from_table(
+        parquet_path,
+        doc_table,
+        out_path,
+        gram_len,
+        bucket_count,
+        temp_dir,
+    )
+}
+
+pub(crate) fn build_from_table(
+    parquet_path: PathBuf,
+    doc_table: DocumentTable,
+    out_path: PathBuf,
+    gram_len: usize,
+    bucket_count: usize,
+    temp_dir: Option<PathBuf>,
+) -> Result<()> {
     if bucket_count == 0 {
         anyhow::bail!("bucket_count must be greater than zero");
     }
@@ -758,7 +777,6 @@ pub fn build(
 
     eprintln!("=== PhraseIndex builder (hybrid roaring/varint) ===");
     eprintln!("Parquet : {}", parquet_path.display());
-    eprintln!("DocTable: {}", doc_table_path.display());
     eprintln!("Output  : {}", out_path.display());
     eprintln!("Gram len: {}", gram_len);
     eprintln!("Buckets : {}", bucket_count);
@@ -769,7 +787,6 @@ pub fn build(
     }
     fs::create_dir_all(&temp_dir)?;
 
-    let doc_table = DocumentTable::load(&doc_table_path)?;
     let doc_table_fingerprint = doc_table.source_fingerprint.clone();
     let num_docs = doc_table.passage_ids.len();
     eprintln!("Loaded {} passages from doc_table", num_docs);
@@ -1165,9 +1182,10 @@ pub fn parquet_files(path: &Path) -> Result<Vec<PathBuf>> {
     }
     let mut files = Vec::new();
     for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
-        let p = entry.path();
-        if p.is_file() && p.extension().and_then(|v| v.to_str()) == Some("parquet") {
-            files.push(p.to_path_buf());
+        if entry.file_type().is_file()
+            && entry.path().extension().and_then(|v| v.to_str()) == Some("parquet")
+        {
+            files.push(entry.into_path());
         }
     }
     files.sort();

@@ -8,17 +8,27 @@
 //! <kanripo_root>/texts/KR<n>/KR<work_id>/KR<work_id>_<NNN>.txt
 //! ```
 //!
-//! Each non-blank, non-header CJK-bearing line becomes one passage,
-//! mirroring the segmentation policy of `commands::kanripo`.
+//! Lines are coalesced into paragraph-sized passages: the Mandoku
+//! plaintext is column-wrapped at ~20 CJK chars/line, so each raw line
+//! is a typographic fragment, not a semantic unit. We accumulate lines
+//! and break on any of (blank line after stripping `¶`/tags, `<pb:`
+//! page marker, line beginning with ≥2 full-width spaces), but only
+//! once the accumulator has reached `MIN_PASSAGE_CJK_CHARS`; short
+//! headings/stanzas therefore merge into the surrounding passage.
+//! A hard `MAX_PASSAGE_CJK_CHARS` cap prevents runaway when no break
+//! signal arrives. This yields CBETA-`<p>`-comparable granularity and
+//! shrinks the Kanripo passage count by roughly an order of magnitude.
 
 use crate::models::PassageRecord;
 use crate::normalize::{contains_cjk, normalize_zh};
 use anyhow::{Context, Result};
-use rayon::prelude::*;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+const MIN_PASSAGE_CJK_CHARS: usize = 120;
+const MAX_PASSAGE_CJK_CHARS: usize = 600;
 
 /// Walk a kanripo clone and yield passage records.
 ///
@@ -115,74 +125,148 @@ pub fn extract_section_passages(
         "synthetic_paragraph_segmentation": true,
         "kanripo_plain_text_source": true,
         "source_format": "kanripo_txt",
-        "paragraph_confidence": "low"
+        "paragraph_confidence": "medium",
+        "coalesce_strategy": "blank|pb|heading break gated by min/max chars"
     }))
     .unwrap_or_default();
 
-    // Collect lines first for parallel processing
-    let lines: Vec<&str> = raw.lines().collect();
-
-    // Process lines in parallel
-    let passages: Vec<Option<PassageRecord>> = lines.par_iter().enumerate().map(|(idx, line)| {
-        let cleaned = line.trim().trim_start_matches('\u{feff}').trim();
-        if cleaned.is_empty() || cleaned.starts_with('#') {
-            return None;
-        }
-        let cleaned = strip_mandoku_markup(cleaned);
-        let cleaned = cleaned.trim();
-        if cleaned.is_empty() || !contains_cjk(cleaned) {
-            return None;
-        }
-        let paragraph_idx = idx + 1;
-        let xml_id = format!("{section_id}-p{:04}", paragraph_idx);
-        let passage_id = format!("{rel_path}#{xml_id}");
-        Some(PassageRecord {
-            source_corpus: "kanripo".to_string(),
-            source_work_id: work_id.to_string(),
-            source_section_id: section_id.clone(),
-            source_locator: section_id.clone(),
-            source_url: source_url.clone(),
-            edition_siglum: edition_siglum.to_string(),
-            edition_label: edition_label.to_string(),
-            rights_id: "CC-BY-SA-4.0".to_string(),
-            rights_notes:
-                "Derived from a local Kanripo repository snapshot. Preserve attribution and share-alike obligations for redistributable outputs."
-                    .to_string(),
-            retrieval_method: "local-repository".to_string(),
-            snapshot_id: snapshot.to_string(),
-            quality_flags_json: quality_flags.clone(),
-            passage_id,
-            source_rel_path: rel_path.clone(),
-            xml_id,
-            div_path: rel_repo.to_string(),
-            heading: title.to_string(),
-            heading_path: format!("{title} / {section_id}"),
-            from_lb: None,
-            to_lb: None,
-            passage_ord_in_file: idx as u32,
-            zh_text_raw: cleaned.to_string(),
-            zh_text_normalized: normalize_zh(cleaned),
-            text_type: "paragraph".to_string(),
-            contains_person: false,
-            contains_term: false,
-            contains_foreign: false,
-            canon: "KANRIPO".to_string(),
-            canon_name: "Kanseki Repository".to_string(),
-            traditions: vec!["Classical Chinese".to_string()],
-            period: "Unknown Period".to_string(),
-            origin: "China".to_string(),
-            author: String::new(),
-            main_title: title.to_string(),
-            period_rank: 99,
-            zh: String::new(),
-            normalized_zh: String::new(),
-        }.finalize_aliases())
-    }).collect();
-
-    // Filter out None values and extend output
-    for passage in passages.into_iter().flatten() {
-        out.push(passage);
+    struct Acc {
+        text: String,
+        cjk_count: usize,
+        first_line: u32,
+        last_line: u32,
     }
+
+    let mut acc: Option<Acc> = None;
+    let mut next_ord: u32 = 0;
+
+    let mut flush =
+        |acc: &mut Option<Acc>, out: &mut Vec<PassageRecord>, next_ord: &mut u32| {
+            let Some(a) = acc.take() else { return };
+            if a.cjk_count == 0 {
+                return;
+            }
+            let ord = *next_ord;
+            *next_ord += 1;
+            let xml_id = format!("{section_id}-p{:04}", ord + 1);
+            let passage_id = format!("{rel_path}#{xml_id}");
+            let raw_text = a.text;
+            let normalized = normalize_zh(&raw_text);
+            out.push(
+                PassageRecord {
+                    source_corpus: "kanripo".to_string(),
+                    source_work_id: work_id.to_string(),
+                    source_section_id: section_id.clone(),
+                    source_locator: section_id.clone(),
+                    source_url: source_url.clone(),
+                    edition_siglum: edition_siglum.to_string(),
+                    edition_label: edition_label.to_string(),
+                    rights_id: "CC-BY-SA-4.0".to_string(),
+                    rights_notes:
+                        "Derived from a local Kanripo repository snapshot. Preserve attribution and share-alike obligations for redistributable outputs."
+                            .to_string(),
+                    retrieval_method: "local-repository".to_string(),
+                    snapshot_id: snapshot.to_string(),
+                    quality_flags_json: quality_flags.clone(),
+                    passage_id,
+                    source_rel_path: rel_path.clone(),
+                    xml_id,
+                    div_path: rel_repo.to_string(),
+                    heading: title.to_string(),
+                    heading_path: format!("{title} / {section_id}"),
+                    from_lb: Some(format!("L{}", a.first_line)),
+                    to_lb: Some(format!("L{}", a.last_line)),
+                    passage_ord_in_file: ord,
+                    zh_text_raw: raw_text,
+                    zh_text_normalized: normalized,
+                    text_type: "paragraph".to_string(),
+                    contains_person: false,
+                    contains_term: false,
+                    contains_foreign: false,
+                    canon: "KANRIPO".to_string(),
+                    canon_name: "Kanseki Repository".to_string(),
+                    traditions: vec!["Classical Chinese".to_string()],
+                    period: "Unknown Period".to_string(),
+                    origin: "China".to_string(),
+                    author: String::new(),
+                    main_title: title.to_string(),
+                    period_rank: 99,
+                    zh: String::new(),
+                    normalized_zh: String::new(),
+                }
+                .finalize_aliases(),
+            );
+        };
+
+    for (idx, line) in raw.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let s = line.trim_start_matches('\u{feff}');
+
+        let is_pb = s.trim_start().starts_with("<pb:");
+        let leading_fw = s.chars().take_while(|&c| c == '　').count();
+        let is_heading = leading_fw >= 2;
+
+        let stripped = strip_mandoku_markup(s);
+        let stripped_trim = stripped.trim();
+        let is_blank = stripped_trim.is_empty() || stripped_trim.starts_with('#');
+
+        let break_signal = is_blank || is_pb || is_heading;
+
+        if break_signal
+            && acc
+                .as_ref()
+                .map(|a| a.cjk_count >= MIN_PASSAGE_CJK_CHARS)
+                .unwrap_or(false)
+        {
+            flush(&mut acc, out, &mut next_ord);
+        }
+
+        if is_blank || is_pb {
+            continue;
+        }
+
+        if !contains_cjk(stripped_trim) {
+            continue;
+        }
+
+        let n_cjk = stripped_trim
+            .chars()
+            .filter(|c| {
+                let cp = *c as u32;
+                (0x3400..=0x4dbf).contains(&cp)
+                    || (0x4e00..=0x9fff).contains(&cp)
+                    || (0x20000..=0x2ffff).contains(&cp)
+                    || (0xf900..=0xfaff).contains(&cp)
+            })
+            .count();
+
+        match acc.as_mut() {
+            Some(a) => {
+                a.text.push('\n');
+                a.text.push_str(stripped_trim);
+                a.cjk_count += n_cjk;
+                a.last_line = line_no;
+            }
+            None => {
+                acc = Some(Acc {
+                    text: stripped_trim.to_string(),
+                    cjk_count: n_cjk,
+                    first_line: line_no,
+                    last_line: line_no,
+                });
+            }
+        }
+
+        if acc
+            .as_ref()
+            .map(|a| a.cjk_count >= MAX_PASSAGE_CJK_CHARS)
+            .unwrap_or(false)
+        {
+            flush(&mut acc, out, &mut next_ord);
+        }
+    }
+
+    flush(&mut acc, out, &mut next_ord);
 
     Ok(())
 }

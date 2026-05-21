@@ -13,7 +13,6 @@ use std::sync::OnceLock;
 static TENSORRT_PLUGIN_REGISTRATION: OnceLock<std::result::Result<std::path::PathBuf, String>> =
     OnceLock::new();
 
-
 #[cfg(feature = "local-embeddings")]
 pub struct FastEmbedProvider {
     model_id: String,
