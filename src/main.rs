@@ -1,5 +1,6 @@
 mod agent;
 mod catalog_index;
+mod cbeta_sidecar;
 mod cef;
 mod cli;
 mod commands;

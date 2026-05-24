@@ -2,7 +2,7 @@
 
 **SinoRAG** is a local-first research backend for Chinese Buddhist and classical Chinese corpora.
 
-It ingests TEI/XML, Kanripo, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, optional vector discovery, catalog browsing, and JSONL-based LLM-agent research workflows.
+It ingests TEI/XML, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, optional vector discovery, catalog browsing, and JSONL-based LLM-agent research workflows.
 
 > Let an LLM agent research Chinese source texts with tools instead of guessing from memory.
 
@@ -35,7 +35,7 @@ sinorag agent
 
 ## What it does
 
-- Ingests CBETA TEI/XML, Kanripo plain-text, CEF JSON-lines, and Terebess HTML corpora
+- Ingests CBETA TEI/XML (GitHub xml-p5 and ISO xml-iso layouts), CEF JSON-lines, and Terebess HTML corpora
 - Builds a Parquet passage store partitioned by `source_corpus`
 - Provides exact phrase search over normalized Chinese text (`phrase.index`)
 - Builds a document table for stable `doc_id ↔ passage_id` mapping
@@ -51,12 +51,12 @@ sinorag agent
 
 | Source | Command | Input |
 |---|---|---|
-| CBETA TEI/XML | `ingest cbeta <PATH>` | CBETA root (containing `xml-p5/`) or `xml-p5/` directly |
-| Kanripo | `ingest kanripo <PATH>` | Kanripo `texts/` root |
+| CBETA TEI/XML (GitHub) | `ingest cbeta <PATH>` | CBETA root (containing `xml-p5/`) or `xml-p5/` directly |
+| CBETA ISO distribution | `ingest cbeta-iso <PATH>` | CBETA ISO root (containing `xml-iso/`) or `xml-iso/` directly |
 | CEF JSON-lines | `ingest cef <FILE>` | `.jsonl` file in Corpus Exchange Format |
 | Terebess HTML | `ingest terebess <DIR>` | Directory of SingleFile-saved HTML pages |
 
-Multiple corpora can be ingested into the same store — each lands in a separate `source_corpus=<name>` Parquet partition.
+Multiple corpora can be ingested into the same store — each lands in a separate `source_corpus=<name>` Parquet partition. Both CBETA formats write to the same `cbeta` partition.
 
 ---
 
@@ -66,7 +66,7 @@ Multiple corpora can be ingested into the same store — each lands in a separat
 
 ```bash
 sinorag ingest cbeta /path/to/cbeta/xml-p5
-sinorag ingest kanripo /path/to/kanripo        # optional, append
+sinorag ingest cbeta-iso /path/to/cbeta-iso    # ISO distribution, optional append
 ```
 
 Use `--resume auto` to continue an interrupted run.
@@ -133,7 +133,6 @@ Agents should inspect the manifest or MCP tool list, then submit schema-valid to
 data/
   passages.parquet/
     source_corpus=cbeta/      ← partitioned by corpus
-    source_corpus=kanripo/
   derived/
     doc_table.bin             stable doc_id / passage_id mapping
     catalog.index             corpus / work / outline navigation

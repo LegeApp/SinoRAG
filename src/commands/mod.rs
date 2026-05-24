@@ -433,7 +433,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Determine which corpus name this source will write, then
             // check whether it is already present as a partition dir.
             let incoming_corpus: String = match &source {
-                IngestSource::Cbeta => "cbeta".to_string(),
+                IngestSource::Cbeta | IngestSource::CbetaIso => "cbeta".to_string(),
                 IngestSource::Kanripo => "kanripo".to_string(),
                 IngestSource::Terebess => "terebess".to_string(),
                 IngestSource::Cef => cef_corpus_id(&path)?,
@@ -453,7 +453,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let append = !already.is_empty() && out_jsonl.exists();
 
             let (corpus, kanripo_input) = match source {
-                IngestSource::Cbeta => (Some(path), None),
+                IngestSource::Cbeta | IngestSource::CbetaIso => (Some(path), None),
                 IngestSource::Kanripo => (None, Some(path)),
                 IngestSource::Cef => {
                     cef::ingest(path, out_parquet.clone()).await?;

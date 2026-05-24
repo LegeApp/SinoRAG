@@ -5,8 +5,10 @@ use std::path::PathBuf;
 /// Source corpus type for `ingest`.
 #[derive(Debug, Clone, ValueEnum)]
 pub enum IngestSource {
-    /// CBETA Buddhist canon TEI/XML corpus (xml-p5 layout).
+    /// CBETA Buddhist canon TEI/XML corpus (xml-p5 layout, one file per work).
     Cbeta,
+    /// CBETA Buddhist canon from the official ISO distribution (xml-iso layout, one file per fascicle).
+    CbetaIso,
     /// Kanripo plain-text classical Chinese repository.
     Kanripo,
     /// CEF (Corpus Exchange Format) JSON-lines file.
@@ -367,16 +369,16 @@ pub enum Command {
     /// Ingest a corpus into the passage store (passages.parquet).
     ///
     /// Usage:
-    ///   sinorag ingest cbeta    <PATH>   # CBETA TEI xml-p5 root directory
-    ///   sinorag ingest kanripo  <PATH>   # Kanripo texts/ root directory
-    ///   sinorag ingest cef      <FILE>   # CEF .jsonl file
-    ///   sinorag ingest terebess <DIR>    # Terebess HTML directory
+    ///   sinorag ingest cbeta      <PATH>   # CBETA GitHub TEI (xml-p5, one file per work)
+    ///   sinorag ingest cbeta-iso  <PATH>   # CBETA ISO (xml-iso, one file per fascicle)
+    ///   sinorag ingest kanripo    <PATH>   # Kanripo texts/ root directory
+    ///   sinorag ingest cef        <FILE>   # CEF .jsonl file
+    ///   sinorag ingest terebess   <DIR>    # Terebess HTML directory
     ///
-    /// Ingest appends to existing parquet partitions — running cbeta and
-    /// kanripo separately is fine; they land in separate partitions.
+    /// Both cbeta and cbeta-iso write to the same 'cbeta' partition.
     /// Use --resume auto to continue an interrupted run.
     Ingest {
-        /// Corpus type: cbeta, kanripo, cef, or terebess.
+        /// Corpus type: cbeta, cbeta-iso, kanripo, cef, or terebess.
         source: IngestSource,
         /// Path to the corpus root directory or file.
         path: PathBuf,

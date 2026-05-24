@@ -1,3 +1,4 @@
+use crate::cbeta_sidecar::SidecarIndex;
 use crate::models::PassageRecord;
 use crate::normalize::{collapse_whitespace, contains_cjk, normalize_zh};
 use anyhow::{Context, Result};
@@ -7,6 +8,34 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// Which CBETA distribution a given xml root came from. The two CBETA
+/// releases are not interchangeable — github xml-p5 is ~20% of the full
+/// ISO, with different volume coverage and one-file-per-work vs ISO's
+/// one-file-per-fascicle granularity. We tag every passage with this so
+/// downstream catalogs / dedup don't conflate the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CbetaDistribution {
+    /// github.com/cbeta-org/xml-p5 snapshot (one file per work).
+    GitHubP5,
+    /// CBETA ISO `xml-iso/` tree (one file per fascicle).
+    IsoP5,
+    /// Translation overlay (`xml-p5t/`) — same TEI, with translated nodes added.
+    P5Translated,
+    /// Bare directory of XML — we can't tell which release.
+    Unknown,
+}
+
+impl CbetaDistribution {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GitHubP5 => "xml-p5-github",
+            Self::IsoP5 => "xml-iso",
+            Self::P5Translated => "xml-p5t",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 const PASSAGE_TAGS: &[&str] = &["p", "lg"];
 const SKIP_TEXT_TAGS: &[&str] = &[
@@ -71,14 +100,30 @@ impl Default for BuddhistMeta {
     }
 }
 
-/// Extract Buddhist metadata directly from TEI XML file during parsing
-pub fn extract_metadata_from_xml(xml_path: &Path, rel_path: &str) -> BuddhistMeta {
+/// Extract Buddhist metadata directly from TEI XML file during parsing.
+///
+/// Classification (tradition / period / origin) comes from the
+/// `buddhist_metadata_analysis.json` sidecar when available — that file
+/// is the ground-truth catalog produced by `CBETA_Sorting_Data/` and
+/// covers the full 4990-work corpus. When a rel_path is not in the
+/// sidecar (e.g. a corpus subset or post-snapshot additions), we fall
+/// back to `classify_*_fallback`, which is intentionally narrower than
+/// the legacy heuristic.
+pub fn extract_metadata_from_xml(
+    xml_path: &Path,
+    rel_path: &str,
+    sidecar: Option<&SidecarIndex>,
+    distribution: CbetaDistribution,
+) -> BuddhistMeta {
     let file = File::open(xml_path);
     let mut meta = BuddhistMeta::default();
 
-    // Derive source_work_id from filename (e.g., T/T01/T01n0001.xml -> T01n0001)
+    // Derive source_work_id from filename.
+    // For ISO split-fascicle files (e.g. T01n0001_001.xml) strip the _NNN suffix
+    // so all fascicles of the same work share a single source_work_id.
     if let Some(filename) = xml_path.file_stem().and_then(|s| s.to_str()) {
-        meta.source_work_id = filename.to_string();
+        let work_id = strip_fascicle_suffix(filename);
+        meta.source_work_id = work_id.to_string();
     }
 
     // Extract canon from file path (first directory component)
@@ -166,66 +211,150 @@ pub fn extract_metadata_from_xml(xml_path: &Path, rel_path: &str) -> BuddhistMet
         }
     }
 
-    // Classify tradition, period, origin from available text
-    let text_content = format!("{} {} {}", meta.main_title, meta.author, meta.rights_notes);
-    meta.traditions = classify_tradition(&text_content);
-    meta.period = classify_period(&text_content);
-    meta.origin = classify_origin(&text_content);
+    // Classification: prefer the sidecar, fall back to heuristic.
+    let classification_source = if let Some(entry) = sidecar.and_then(|s| s.lookup(rel_path)) {
+        meta.traditions = entry.traditions.clone();
+        meta.period = entry.period.clone();
+        meta.origin = entry.origin.clone();
+        if let Some(name) = &entry.canon_name {
+            if meta.canon_name.is_empty() {
+                meta.canon_name = name.clone();
+            }
+        }
+        if meta.main_title.is_empty() {
+            if let Some(t) = &entry.main_title {
+                meta.main_title = t.clone();
+            }
+        }
+        if meta.author.is_empty() {
+            if let Some(a) = &entry.author {
+                meta.author = a.clone();
+            }
+        }
+        "sidecar"
+    } else {
+        let text_content = format!("{} {} {}", meta.main_title, meta.author, meta.rights_notes);
+        meta.traditions = classify_tradition_fallback(&text_content, &meta.canon, rel_path);
+        meta.period = classify_period_fallback(&text_content);
+        meta.origin = classify_origin_fallback(&text_content);
+        "fallback"
+    };
     meta.period_rank = period_rank(&meta.period);
+
+    // Stamp distribution + classification source on retrieval_method + quality_flags_json
+    // so downstream catalog / dedup can distinguish github-p5 from ISO and audit
+    // whether classification was authoritative or heuristic.
+    if meta.retrieval_method.is_empty() {
+        meta.retrieval_method = format!("cbeta-{}", distribution.as_str());
+    }
+    let flags = serde_json::json!({
+        "distribution": distribution.as_str(),
+        "classification_source": classification_source,
+    });
+    meta.quality_flags_json = flags.to_string();
 
     meta
 }
 
-fn classify_tradition(text: &str) -> Vec<String> {
+/// Fallback tradition classifier — only used for works not present in
+/// the `buddhist_metadata_analysis.json` sidecar. Two design changes vs
+/// the previous version, both motivated by false-positive rates measured
+/// against the sidecar ground truth:
+///
+/// 1. **論/史/傳/律 are demoted to *secondary* labels.** They match an
+///    enormous fraction of CBETA titles (every `論` = "Commentarial",
+///    every `傳` = "Historical") and were drowning out real school
+///    membership in mixed-tradition works. We only emit Commentarial /
+///    Historical / Vinaya when no primary school matched.
+///
+/// 2. **Canon + volume range prior for Chan/Zen.** The Taishō, X, and J
+///    canons group Chan literature into well-known volume ranges. A work
+///    landing in those ranges is Chan/Zen even when its title is
+///    Sanskrit-transliterated and contains no 禪. This recovers most of
+///    the 496 sidecar-tagged Chan works when the sidecar is absent.
+fn classify_tradition_fallback(text: &str, canon: &str, rel_path: &str) -> Vec<String> {
     let text_lower = text.to_lowercase();
-    let mut traditions = Vec::new();
+    let mut primary: Vec<String> = Vec::new();
 
-    // Chinese Buddhist traditions
     if text_lower.contains("禪")
         || text_lower.contains("禅")
         || text_lower.contains("chan")
         || text_lower.contains("zen")
+        || is_chan_canon_range(canon, rel_path)
     {
-        traditions.push("Chan/Zen".to_string());
+        primary.push("Chan/Zen".to_string());
     }
     if text_lower.contains("淨土") || text_lower.contains("净土") || text_lower.contains("阿彌陀")
     {
-        traditions.push("Pure Land".to_string());
+        primary.push("Pure Land".to_string());
     }
     if text_lower.contains("天台") || text_lower.contains("法華") {
-        traditions.push("Tiantai".to_string());
+        primary.push("Tiantai".to_string());
     }
     if text_lower.contains("華嚴") || text_lower.contains("华严") {
-        traditions.push("Huayan".to_string());
-    }
-    if text_lower.contains("律") || text_lower.contains("戒律") || text_lower.contains("毗奈耶")
-    {
-        traditions.push("Vinaya".to_string());
+        primary.push("Huayan".to_string());
     }
     if text_lower.contains("中觀") || text_lower.contains("中論") {
-        traditions.push("Madhyamaka".to_string());
+        primary.push("Madhyamaka".to_string());
     }
     if text_lower.contains("瑜伽") || text_lower.contains("唯識") {
-        traditions.push("Yogacara".to_string());
+        primary.push("Yogacara".to_string());
     }
     if text_lower.contains("密") || text_lower.contains("密教") {
-        traditions.push("Esoteric".to_string());
+        primary.push("Esoteric".to_string());
+    }
+
+    if !primary.is_empty() {
+        return primary;
+    }
+
+    // No primary school detected — fall through to secondary labels.
+    let mut secondary: Vec<String> = Vec::new();
+    if text_lower.contains("律") || text_lower.contains("戒律") || text_lower.contains("毗奈耶") {
+        secondary.push("Vinaya".to_string());
     }
     if text_lower.contains("註") || text_lower.contains("疏") || text_lower.contains("論") {
-        traditions.push("Commentarial".to_string());
+        secondary.push("Commentarial".to_string());
     }
     if text_lower.contains("史") || text_lower.contains("傳") {
-        traditions.push("Historical".to_string());
+        secondary.push("Historical".to_string());
     }
-
-    if traditions.is_empty() {
-        traditions.push("General/Unspecified".to_string());
+    if secondary.is_empty() {
+        secondary.push("General/Unspecified".to_string());
     }
-
-    traditions
+    secondary
 }
 
-fn classify_period(text: &str) -> String {
+/// Canon + volume ranges that the scholarly literature treats as
+/// predominantly Chan/Zen. These match the bulk of the sidecar's
+/// Chan/Zen tags (T 47–48 = 禪宗部, X 63–87 = 禪宗類續編, the entire
+/// J canon = 嘉興藏, mostly Chan/Pure Land late-imperial collections).
+fn is_chan_canon_range(canon: &str, rel_path: &str) -> bool {
+    if canon == "J" {
+        return true;
+    }
+    let vol = parse_volume_from_rel_path(rel_path);
+    match canon {
+        "T" => matches!(vol, Some(47..=48)),
+        "X" => matches!(vol, Some(63..=87)),
+        _ => false,
+    }
+}
+
+/// `T/T47/T47n1985.xml` -> Some(47); `T/T47t/T47n1985.xml` -> Some(47).
+fn parse_volume_from_rel_path(rel_path: &str) -> Option<u32> {
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let canon = parts[0];
+    let vol_dir = parts[1].trim_start_matches(canon);
+    // Trim trailing non-digit suffix (e.g. ISO's "T47t").
+    let digits: String = vol_dir.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn classify_period_fallback(text: &str) -> String {
     if text.contains("唐") {
         return "Tang".to_string();
     } else if text.contains("宋") {
@@ -246,7 +375,7 @@ fn classify_period(text: &str) -> String {
     "Unknown Period".to_string()
 }
 
-fn classify_origin(text: &str) -> String {
+fn classify_origin_fallback(text: &str) -> String {
     if text.contains("印度") || text.contains("天竺") {
         return "India".to_string();
     } else if text.contains("西域") || text.contains("中亞") {
@@ -262,7 +391,21 @@ fn classify_origin(text: &str) -> String {
 }
 
 pub fn iter_xml_paths(corpus_root: &Path) -> Result<Vec<(PathBuf, String)>> {
-    let xml_root = resolve_xml_root(corpus_root)?;
+    Ok(scan_cbeta_corpus(corpus_root)?.files)
+}
+
+/// Richer scan result: the resolved xml root, which distribution it
+/// belongs to, and the (abs, rel) file list. Callers that need to know
+/// "github xml-p5 vs ISO" or load a sidecar from a path relative to the
+/// corpus should use this directly.
+pub struct CbetaScan {
+    pub xml_root: PathBuf,
+    pub distribution: CbetaDistribution,
+    pub files: Vec<(PathBuf, String)>,
+}
+
+pub fn scan_cbeta_corpus(corpus_root: &Path) -> Result<CbetaScan> {
+    let (xml_root, distribution) = resolve_xml_root(corpus_root)?;
 
     let mut paths = Vec::new();
     for entry in WalkDir::new(&xml_root).into_iter().filter_map(Result::ok) {
@@ -278,28 +421,62 @@ pub fn iter_xml_paths(corpus_root: &Path) -> Result<Vec<(PathBuf, String)>> {
     }
 
     paths.sort_by(|a, b| a.1.cmp(&b.1));
-    Ok(paths)
+    Ok(CbetaScan {
+        xml_root,
+        distribution,
+        files: paths,
+    })
 }
 
-/// Resolve the directory that contains CBETA `xml-p5` content.
+/// Resolve the directory that contains CBETA XML content.
 ///
-/// Accepts either the CBETA root (which contains an `xml-p5/` subdir)
-/// or the `xml-p5` directory itself. Falls back to using the supplied
-/// path directly if it already contains `.xml` files anywhere below it.
-fn resolve_xml_root(corpus_root: &Path) -> Result<PathBuf> {
-    let nested = corpus_root.join("xml-p5");
-    if nested.is_dir() {
-        return Ok(nested);
+/// Accepts:
+/// - A CBETA root containing `xml-p5/` (GitHub TEI, one file per work)
+/// - A CBETA root containing `xml-iso/` (ISO TEI, one file per fascicle)
+/// - Either of those subdirectories directly
+/// - Any directory that already contains `.xml` files
+pub fn resolve_xml_root(corpus_root: &Path) -> Result<(PathBuf, CbetaDistribution)> {
+    for (sub, dist) in &[
+        ("xml-p5", CbetaDistribution::GitHubP5),
+        ("xml-iso", CbetaDistribution::IsoP5),
+        ("xml-p5t", CbetaDistribution::P5Translated),
+    ] {
+        let nested = corpus_root.join(sub);
+        if nested.is_dir() {
+            return Ok((nested, *dist));
+        }
     }
-    if corpus_root.is_dir() && contains_xml_anywhere(corpus_root) {
-        return Ok(corpus_root.to_path_buf());
+    // Passed a leaf directory directly? Infer distribution from its name.
+    if let Some(name) = corpus_root.file_name().and_then(|s| s.to_str()) {
+        let dist = match name {
+            "xml-p5" => CbetaDistribution::GitHubP5,
+            "xml-iso" => CbetaDistribution::IsoP5,
+            "xml-p5t" => CbetaDistribution::P5Translated,
+            _ => CbetaDistribution::Unknown,
+        };
+        if corpus_root.is_dir() && contains_xml_anywhere(corpus_root) {
+            return Ok((corpus_root.to_path_buf(), dist));
+        }
     }
     anyhow::bail!(
         "No CBETA XML content found under {}.\n  \
-         Expected either a directory containing `xml-p5/` (CBETA root) \
-         or an `xml-p5/` directory itself.",
+         Expected either a directory containing `xml-p5/`, `xml-iso/`, or `xml-p5t/` \
+         (CBETA root) or one of those directories itself.",
         corpus_root.display()
     );
+}
+
+/// Strip trailing `_NNN` fascicle suffix from CBETA ISO filenames.
+/// `T01n0001_001` → `T01n0001`, `T01n0001` → `T01n0001` (unchanged).
+fn strip_fascicle_suffix(stem: &str) -> &str {
+    // Suffix is `_` followed by 3+ digits at the end of the stem.
+    if let Some(idx) = stem.rfind('_') {
+        let suffix = &stem[idx + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return &stem[..idx];
+        }
+    }
+    stem
 }
 
 fn contains_xml_anywhere(dir: &Path) -> bool {

@@ -15,6 +15,7 @@
 //! the staging dir is deleted. If a target partition already exists,
 //! the run aborts before any rename (no silent overwrite).
 
+use crate::cbeta_sidecar;
 use crate::models::PassageRecord;
 use crate::{ingest, storage, tei};
 use anyhow::{anyhow, Context, Result};
@@ -243,7 +244,36 @@ pub async fn run(
 
     // -- CBETA -----------------------------------------------------------
     if let Some(corpus_root) = corpus.as_ref() {
-        let paths = tei::iter_xml_paths(corpus_root)?;
+        let scan = tei::scan_cbeta_corpus(corpus_root)?;
+        let distribution = scan.distribution;
+        let paths = scan.files;
+        // Sidecar resolution: a disk override next to the corpus wins
+        // (lets users refresh the analysis without rebuilding); otherwise
+        // use the copy embedded in the binary at compile time.
+        let disk_sidecar = cbeta_sidecar::discover_and_load(corpus_root);
+        let sidecar_ref = match &disk_sidecar {
+            Some(idx) => {
+                eprintln!(
+                    "loaded CBETA sidecar override: {} entries from {}",
+                    idx.len(),
+                    idx.source_path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                );
+                idx
+            }
+            None => {
+                let emb = cbeta_sidecar::embedded();
+                eprintln!(
+                    "using embedded CBETA sidecar: {} entries (no disk override found)",
+                    emb.len()
+                );
+                emb
+            }
+        };
+        let sidecar_ref = Some(sidecar_ref);
+        eprintln!("CBETA distribution: {}", distribution.as_str());
         let pb = ProgressBar::new(paths.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -260,7 +290,12 @@ pub async fn run(
                 pb.inc(1);
                 continue;
             }
-            let meta = tei::extract_metadata_from_xml(&xml_path, &rel_path);
+            let meta = tei::extract_metadata_from_xml(
+                &xml_path,
+                &rel_path,
+                sidecar_ref,
+                distribution,
+            );
             if zen_only && !meta.traditions.iter().any(|t| t == "Chan/Zen") {
                 pb.inc(1);
                 continue;

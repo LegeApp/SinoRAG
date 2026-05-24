@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod catalog_index;
+pub mod cbeta_sidecar;
 pub mod cef;
 pub mod cli;
 pub mod commands;
