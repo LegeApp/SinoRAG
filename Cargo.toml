@@ -44,6 +44,7 @@ rustc-hash = "2"
 roaring = "0.10"
 bincode = "1"
 zstd = "0.13"
+flate2 = "1"
 
 quick-xml = { version = "0.39", features = ["encoding"] }
 unicode-normalization = "0.1"
@@ -74,6 +75,9 @@ rmcp = { version = "1.7.0", default-features = false, features = ["server", "tra
 # is still evolving (input-shape negotiation with model-authored markdown) but
 # the renderer itself is ready to build into every release.
 cbeta-pdf-creator = { path = "cbeta-pdf-creator" }
+
+# 7z decompression used by `sinorag init` (pure Rust, no native libs).
+sevenz-rust = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }

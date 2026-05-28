@@ -953,6 +953,17 @@ pub struct PersonResolveRequest {
     pub aliases: Vec<String>,
 }
 
+/// Request for the place-resolve tool.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PlaceResolveRequest {
+    /// Primary place name to resolve.
+    pub name: String,
+
+    /// Additional alternate name forms to search alongside the primary name.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
 /// Request for the person-history tool.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PersonHistoryRequest {

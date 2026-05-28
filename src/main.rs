@@ -5,6 +5,7 @@ mod cef;
 mod cli;
 mod commands;
 mod datafusion_store;
+mod dict;
 mod document_table;
 mod embedding;
 mod ingest;

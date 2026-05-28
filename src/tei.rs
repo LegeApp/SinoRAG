@@ -24,6 +24,10 @@ pub enum CbetaDistribution {
     P5Translated,
     /// Bare directory of XML — we can't tell which release.
     Unknown,
+    /// Output of `sinorag merge-cbeta` — may contain both single-work files
+    /// (GitHub) and fascicle files (ISO). Distribution is inferred per-file
+    /// from the presence of the `_NNN` suffix on the filename stem.
+    Merged,
 }
 
 impl CbetaDistribution {
@@ -33,6 +37,7 @@ impl CbetaDistribution {
             Self::IsoP5 => "xml-iso",
             Self::P5Translated => "xml-p5t",
             Self::Unknown => "unknown",
+            Self::Merged => "xml-merged",
         }
     }
 }
@@ -211,8 +216,27 @@ pub fn extract_metadata_from_xml(
         }
     }
 
+    // For merged corpora, infer the per-file distribution from the filename:
+    // a fascicle suffix (_NNN) means the file came from ISO, otherwise GitHub.
+    let effective_dist = if distribution == CbetaDistribution::Merged {
+        if let Some(stem) = xml_path.file_stem().and_then(|s| s.to_str()) {
+            if strip_fascicle_suffix(stem) != stem {
+                CbetaDistribution::IsoP5
+            } else {
+                CbetaDistribution::GitHubP5
+            }
+        } else {
+            distribution
+        }
+    } else {
+        distribution
+    };
+
     // Classification: prefer the sidecar, fall back to heuristic.
-    let classification_source = if let Some(entry) = sidecar.and_then(|s| s.lookup(rel_path)) {
+    // For ISO fascicle files the sidecar is keyed on the GitHub-style
+    // single-file path (e.g. T/T01/T01n0001.xml), so normalise the key.
+    let sidecar_key = sidecar_key_for(rel_path);
+    let classification_source = if let Some(entry) = sidecar.and_then(|s| s.lookup(&sidecar_key)) {
         meta.traditions = entry.traditions.clone();
         meta.period = entry.period.clone();
         meta.origin = entry.origin.clone();
@@ -245,10 +269,10 @@ pub fn extract_metadata_from_xml(
     // so downstream catalog / dedup can distinguish github-p5 from ISO and audit
     // whether classification was authoritative or heuristic.
     if meta.retrieval_method.is_empty() {
-        meta.retrieval_method = format!("cbeta-{}", distribution.as_str());
+        meta.retrieval_method = format!("cbeta-{}", effective_dist.as_str());
     }
     let flags = serde_json::json!({
-        "distribution": distribution.as_str(),
+        "distribution": effective_dist.as_str(),
         "classification_source": classification_source,
     });
     meta.quality_flags_json = flags.to_string();
@@ -440,6 +464,7 @@ pub fn resolve_xml_root(corpus_root: &Path) -> Result<(PathBuf, CbetaDistributio
         ("xml-p5", CbetaDistribution::GitHubP5),
         ("xml-iso", CbetaDistribution::IsoP5),
         ("xml-p5t", CbetaDistribution::P5Translated),
+        ("xml-merged", CbetaDistribution::Merged),
     ] {
         let nested = corpus_root.join(sub);
         if nested.is_dir() {
@@ -452,6 +477,7 @@ pub fn resolve_xml_root(corpus_root: &Path) -> Result<(PathBuf, CbetaDistributio
             "xml-p5" => CbetaDistribution::GitHubP5,
             "xml-iso" => CbetaDistribution::IsoP5,
             "xml-p5t" => CbetaDistribution::P5Translated,
+            "xml-merged" => CbetaDistribution::Merged,
             _ => CbetaDistribution::Unknown,
         };
         if corpus_root.is_dir() && contains_xml_anywhere(corpus_root) {
@@ -460,15 +486,35 @@ pub fn resolve_xml_root(corpus_root: &Path) -> Result<(PathBuf, CbetaDistributio
     }
     anyhow::bail!(
         "No CBETA XML content found under {}.\n  \
-         Expected either a directory containing `xml-p5/`, `xml-iso/`, or `xml-p5t/` \
-         (CBETA root) or one of those directories itself.",
+         Expected a directory containing `xml-p5/`, `xml-iso/`, `xml-p5t/`, or \
+         `xml-merged/` (CBETA root) or one of those directories itself.",
         corpus_root.display()
     );
 }
 
+/// Compute the sidecar lookup key for `rel_path`.
+///
+/// The sidecar is indexed on GitHub-style single-file paths
+/// (`T/T01/T01n0001.xml`). ISO fascicle paths (`T01n0001_001.xml`) won't
+/// match directly, so strip the fascicle suffix from the stem before lookup.
+fn sidecar_key_for(rel_path: &str) -> String {
+    let p = Path::new(rel_path);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let stripped = strip_fascicle_suffix(stem);
+    if stripped == stem {
+        return rel_path.to_string();
+    }
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("xml");
+    match p.parent().and_then(|p| p.to_str()) {
+        Some("") | None => format!("{stripped}.{ext}"),
+        Some(parent) => format!("{parent}/{stripped}.{ext}"),
+    }
+}
+
 /// Strip trailing `_NNN` fascicle suffix from CBETA ISO filenames.
 /// `T01n0001_001` → `T01n0001`, `T01n0001` → `T01n0001` (unchanged).
-fn strip_fascicle_suffix(stem: &str) -> &str {
+/// Exported so `merge_cbeta` can use the same logic for work_id grouping.
+pub(crate) fn strip_fascicle_suffix(stem: &str) -> &str {
     // Suffix is `_` followed by 3+ digits at the end of the stem.
     if let Some(idx) = stem.rfind('_') {
         let suffix = &stem[idx + 1..];

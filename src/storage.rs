@@ -1,6 +1,6 @@
 use crate::models::PassageRecord;
 use anyhow::Result;
-use arrow::array::{ArrayRef, BooleanArray, Int32Array, StringArray};
+use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -11,6 +11,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const PARQUET_BATCH_SIZE: usize = 25_000;
+
+/// Compression codec for Parquet output.
+///
+/// ZSTD is the default — good ratio and fast decode. Use `Uncompressed` when
+/// you want to apply a separate outer compression (e.g. 7z/LZMA2) without paying
+/// the ZSTD overhead twice, or to benchmark different codecs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ParquetCompression {
+    #[default]
+    Zstd,
+    Uncompressed,
+}
+
+impl From<ParquetCompression> for Compression {
+    fn from(c: ParquetCompression) -> Self {
+        match c {
+            ParquetCompression::Zstd => Compression::ZSTD(Default::default()),
+            ParquetCompression::Uncompressed => Compression::UNCOMPRESSED,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct PassageBatch {
@@ -140,13 +161,14 @@ pub fn write_parquet_part(
     batch: &PassageBatch,
     out_dir: &Path,
     part_index: usize,
+    compression: ParquetCompression,
 ) -> Result<PathBuf> {
     let path = out_dir.join(format!("part-{part_index:06}.parquet"));
     let file = File::create(&path)?;
     let schema = passage_schema();
     let record_batch = batch.to_record_batch(schema.clone())?;
     let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
+        .set_compression(compression.into())
         .build();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
     writer.write(&record_batch)?;
@@ -159,6 +181,7 @@ pub fn write_parquet_part_partitioned(
     out_dir: &Path,
     source_corpus: &str,
     part_index: usize,
+    compression: ParquetCompression,
 ) -> Result<PathBuf> {
     let partition_dir = out_dir.join(format!("source_corpus={source_corpus}"));
     std::fs::create_dir_all(&partition_dir)?;
@@ -167,7 +190,7 @@ pub fn write_parquet_part_partitioned(
     let schema = passage_schema();
     let record_batch = batch.to_record_batch(schema.clone())?;
     let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
+        .set_compression(compression.into())
         .build();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
     writer.write(&record_batch)?;
@@ -218,6 +241,333 @@ impl PassageBatch {
         ];
         Ok(RecordBatch::try_new(schema, arrays)?)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary parquet
+// ---------------------------------------------------------------------------
+
+pub const DICT_BATCH_SIZE: usize = 50_000;
+
+#[derive(Default)]
+pub struct DictBatch {
+    term: Vec<String>,
+    source: Vec<String>,
+    sanskrit: Vec<Option<String>>,
+    gloss: Vec<String>,
+    usage_category: Vec<Option<String>>,
+}
+
+impl DictBatch {
+    pub fn push(
+        &mut self,
+        term: String,
+        source: String,
+        sanskrit: Option<String>,
+        gloss: String,
+        usage_category: Option<String>,
+    ) {
+        self.term.push(term);
+        self.source.push(source);
+        self.sanskrit.push(sanskrit);
+        self.gloss.push(gloss);
+        self.usage_category.push(usage_category);
+    }
+
+    pub fn len(&self) -> usize {
+        self.term.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.term.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn to_record_batch(&self, schema: Arc<Schema>) -> Result<RecordBatch> {
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(self.term.clone())),
+            Arc::new(StringArray::from(self.source.clone())),
+            Arc::new(StringArray::from(self.sanskrit.clone())),
+            Arc::new(StringArray::from(self.gloss.clone())),
+            Arc::new(StringArray::from(self.usage_category.clone())),
+        ];
+        Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+}
+
+pub fn dict_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("term", DataType::Utf8, false),
+        Field::new("source", DataType::Utf8, false),
+        Field::new("sanskrit", DataType::Utf8, true),
+        Field::new("gloss", DataType::Utf8, false),
+        Field::new("usage_category", DataType::Utf8, true),
+    ]))
+}
+
+pub fn write_dict_parquet_partitioned(
+    batch: &DictBatch,
+    out_dir: &Path,
+    source_name: &str,
+    part_index: usize,
+    compression: ParquetCompression,
+) -> Result<PathBuf> {
+    let partition_dir = out_dir.join(format!("source={source_name}"));
+    std::fs::create_dir_all(&partition_dir)?;
+    let path = partition_dir.join(format!("part-{part_index:06}.parquet"));
+    let file = File::create(&path)?;
+    let schema = dict_schema();
+    let record_batch = batch.to_record_batch(schema.clone())?;
+    let props = WriterProperties::builder()
+        .set_compression(compression.into())
+        .build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    writer.write(&record_batch)?;
+    writer.close()?;
+    Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// Person authority batch
+// ---------------------------------------------------------------------------
+
+pub const AUTHORITY_BATCH_SIZE: usize = 10_000;
+
+#[derive(Default)]
+pub struct PersonBatch {
+    person_id: Vec<String>,
+    primary_name: Vec<String>,
+    primary_name_lang: Vec<String>,
+    alt_names_json: Vec<String>,
+    gender: Vec<Option<String>>,
+    dynasty: Vec<Option<String>>,
+    birth_year: Vec<Option<String>>,
+    death_year: Vec<Option<String>>,
+    occupation: Vec<Option<String>>,
+    place_of_origin: Vec<Option<String>>,
+    concise_bio: Vec<Option<String>>,
+    teachers_json: Vec<String>,
+    students_json: Vec<String>,
+    wikidata_id: Vec<Option<String>>,
+    cbdb_id: Vec<Option<String>>,
+}
+
+impl PersonBatch {
+    #[allow(clippy::too_many_arguments)]
+    pub fn push(
+        &mut self,
+        person_id: String,
+        primary_name: String,
+        primary_name_lang: String,
+        alt_names_json: String,
+        gender: Option<String>,
+        dynasty: Option<String>,
+        birth_year: Option<String>,
+        death_year: Option<String>,
+        occupation: Option<String>,
+        place_of_origin: Option<String>,
+        concise_bio: Option<String>,
+        teachers_json: String,
+        students_json: String,
+        wikidata_id: Option<String>,
+        cbdb_id: Option<String>,
+    ) {
+        self.person_id.push(person_id);
+        self.primary_name.push(primary_name);
+        self.primary_name_lang.push(primary_name_lang);
+        self.alt_names_json.push(alt_names_json);
+        self.gender.push(gender);
+        self.dynasty.push(dynasty);
+        self.birth_year.push(birth_year);
+        self.death_year.push(death_year);
+        self.occupation.push(occupation);
+        self.place_of_origin.push(place_of_origin);
+        self.concise_bio.push(concise_bio);
+        self.teachers_json.push(teachers_json);
+        self.students_json.push(students_json);
+        self.wikidata_id.push(wikidata_id);
+        self.cbdb_id.push(cbdb_id);
+    }
+
+    pub fn len(&self) -> usize {
+        self.person_id.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.person_id.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn to_record_batch(&self, schema: Arc<Schema>) -> Result<RecordBatch> {
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(self.person_id.clone())),
+            Arc::new(StringArray::from(self.primary_name.clone())),
+            Arc::new(StringArray::from(self.primary_name_lang.clone())),
+            Arc::new(StringArray::from(self.alt_names_json.clone())),
+            Arc::new(StringArray::from(self.gender.clone())),
+            Arc::new(StringArray::from(self.dynasty.clone())),
+            Arc::new(StringArray::from(self.birth_year.clone())),
+            Arc::new(StringArray::from(self.death_year.clone())),
+            Arc::new(StringArray::from(self.occupation.clone())),
+            Arc::new(StringArray::from(self.place_of_origin.clone())),
+            Arc::new(StringArray::from(self.concise_bio.clone())),
+            Arc::new(StringArray::from(self.teachers_json.clone())),
+            Arc::new(StringArray::from(self.students_json.clone())),
+            Arc::new(StringArray::from(self.wikidata_id.clone())),
+            Arc::new(StringArray::from(self.cbdb_id.clone())),
+        ];
+        Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+}
+
+pub fn person_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("person_id", DataType::Utf8, false),
+        Field::new("primary_name", DataType::Utf8, false),
+        Field::new("primary_name_lang", DataType::Utf8, false),
+        Field::new("alt_names_json", DataType::Utf8, false),
+        Field::new("gender", DataType::Utf8, true),
+        Field::new("dynasty", DataType::Utf8, true),
+        Field::new("birth_year", DataType::Utf8, true),
+        Field::new("death_year", DataType::Utf8, true),
+        Field::new("occupation", DataType::Utf8, true),
+        Field::new("place_of_origin", DataType::Utf8, true),
+        Field::new("concise_bio", DataType::Utf8, true),
+        Field::new("teachers_json", DataType::Utf8, false),
+        Field::new("students_json", DataType::Utf8, false),
+        Field::new("wikidata_id", DataType::Utf8, true),
+        Field::new("cbdb_id", DataType::Utf8, true),
+    ]))
+}
+
+pub fn write_person_parquet(batch: &PersonBatch, out_dir: &Path, part_index: usize, compression: ParquetCompression) -> Result<PathBuf> {
+    std::fs::create_dir_all(out_dir)?;
+    let path = out_dir.join(format!("part-{part_index:06}.parquet"));
+    let file = File::create(&path)?;
+    let schema = person_schema();
+    let record_batch = batch.to_record_batch(schema.clone())?;
+    let props = WriterProperties::builder()
+        .set_compression(compression.into())
+        .build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    writer.write(&record_batch)?;
+    writer.close()?;
+    Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// Place authority batch
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+pub struct PlaceBatch {
+    place_id: Vec<String>,
+    primary_name: Vec<String>,
+    primary_name_lang: Vec<String>,
+    alt_names_json: Vec<String>,
+    latitude: Vec<Option<f64>>,
+    longitude: Vec<Option<f64>>,
+    geo_confidence: Vec<Option<String>>,
+    district: Vec<Option<String>>,
+    category: Vec<Option<String>>,
+    description: Vec<Option<String>>,
+    parent_place_id: Vec<Option<String>>,
+}
+
+impl PlaceBatch {
+    #[allow(clippy::too_many_arguments)]
+    pub fn push(
+        &mut self,
+        place_id: String,
+        primary_name: String,
+        primary_name_lang: String,
+        alt_names_json: String,
+        latitude: Option<f64>,
+        longitude: Option<f64>,
+        geo_confidence: Option<String>,
+        district: Option<String>,
+        category: Option<String>,
+        description: Option<String>,
+        parent_place_id: Option<String>,
+    ) {
+        self.place_id.push(place_id);
+        self.primary_name.push(primary_name);
+        self.primary_name_lang.push(primary_name_lang);
+        self.alt_names_json.push(alt_names_json);
+        self.latitude.push(latitude);
+        self.longitude.push(longitude);
+        self.geo_confidence.push(geo_confidence);
+        self.district.push(district);
+        self.category.push(category);
+        self.description.push(description);
+        self.parent_place_id.push(parent_place_id);
+    }
+
+    pub fn len(&self) -> usize {
+        self.place_id.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.place_id.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn to_record_batch(&self, schema: Arc<Schema>) -> Result<RecordBatch> {
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(self.place_id.clone())),
+            Arc::new(StringArray::from(self.primary_name.clone())),
+            Arc::new(StringArray::from(self.primary_name_lang.clone())),
+            Arc::new(StringArray::from(self.alt_names_json.clone())),
+            Arc::new(Float64Array::from(self.latitude.clone())),
+            Arc::new(Float64Array::from(self.longitude.clone())),
+            Arc::new(StringArray::from(self.geo_confidence.clone())),
+            Arc::new(StringArray::from(self.district.clone())),
+            Arc::new(StringArray::from(self.category.clone())),
+            Arc::new(StringArray::from(self.description.clone())),
+            Arc::new(StringArray::from(self.parent_place_id.clone())),
+        ];
+        Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+}
+
+pub fn place_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("place_id", DataType::Utf8, false),
+        Field::new("primary_name", DataType::Utf8, false),
+        Field::new("primary_name_lang", DataType::Utf8, false),
+        Field::new("alt_names_json", DataType::Utf8, false),
+        Field::new("latitude", DataType::Float64, true),
+        Field::new("longitude", DataType::Float64, true),
+        Field::new("geo_confidence", DataType::Utf8, true),
+        Field::new("district", DataType::Utf8, true),
+        Field::new("category", DataType::Utf8, true),
+        Field::new("description", DataType::Utf8, true),
+        Field::new("parent_place_id", DataType::Utf8, true),
+    ]))
+}
+
+pub fn write_place_parquet(batch: &PlaceBatch, out_dir: &Path, part_index: usize, compression: ParquetCompression) -> Result<PathBuf> {
+    std::fs::create_dir_all(out_dir)?;
+    let path = out_dir.join(format!("part-{part_index:06}.parquet"));
+    let file = File::create(&path)?;
+    let schema = place_schema();
+    let record_batch = batch.to_record_batch(schema.clone())?;
+    let props = WriterProperties::builder()
+        .set_compression(compression.into())
+        .build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    writer.write(&record_batch)?;
+    writer.close()?;
+    Ok(path)
 }
 
 fn passage_schema() -> Arc<Schema> {

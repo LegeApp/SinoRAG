@@ -1,6 +1,77 @@
+use std::collections::HashMap;
+use std::sync::OnceLock;
 use unicode_general_category::{get_general_category, GeneralCategory};
 use unicode_normalization::UnicodeNormalization;
 use wide::u8x16;
+
+// Character variant tables from https://github.com/zhaowenping/cbeta (cc/ directory).
+// See THIRD_PARTY_NOTICES.md for attribution.
+const ST_CHARS: &str = include_str!("../assets/cbeta/STCharacters.txt");
+const KX_VARIANTS: &str = include_str!("../assets/cbeta/KXVariants.txt");
+const JP_VARIANTS: &str = include_str!("../assets/cbeta/JPVariants.txt");
+
+static VARIANT_MAP: OnceLock<HashMap<char, char>> = OnceLock::new();
+
+/// Maps variant CJK characters to a single canonical form (modern Traditional Chinese).
+///
+/// Sources:
+///   STCharacters   — Simplified → Traditional (first target when ambiguous)
+///   KXVariants     — Kangxi archaic → modern standard (reversed from file)
+///   JPVariants     — Japanese variant → standard
+fn variant_map() -> &'static HashMap<char, char> {
+    VARIANT_MAP.get_or_init(|| {
+        let mut map = HashMap::with_capacity(4500);
+
+        // STCharacters: tab-delimited, Simplified → Traditional.
+        // Some lines have space-separated alternatives; take only the first.
+        for line in ST_CHARS.lines() {
+            let line = line.trim();
+            if let Some((src, targets)) = line.split_once('\t') {
+                let src = src.trim();
+                let target = targets.split_whitespace().next().unwrap_or("");
+                if let (Some(s), Some(t)) = (src.chars().next(), target.chars().next()) {
+                    if s != t {
+                        map.insert(s, t);
+                    }
+                }
+            }
+        }
+
+        // KXVariants: space-delimited, `modern kangxi_form`.
+        // Buddhist texts use Kangxi forms, so normalize modern → kangxi.
+        // This aligns with STCharacters (Simplified also maps to the
+        // traditional/kangxi form), so all variants converge.
+        for line in KX_VARIANTS.lines() {
+            let line = line.trim();
+            let mut chars = line.split_whitespace();
+            if let (Some(modern), Some(kangxi)) = (chars.next(), chars.next()) {
+                if let (Some(m), Some(k)) = (modern.chars().next(), kangxi.chars().next()) {
+                    if m != k {
+                        map.entry(m).or_insert(k);
+                    }
+                }
+            }
+        }
+
+        // JPVariants: tab-delimited, `jp_variant standard`.
+        // Only insert if neither the source nor target is already mapped by
+        // ST or KX — avoids Japanese Shinjitai simplification (國→国) from
+        // overriding the correct Traditional Chinese form.
+        for line in JP_VARIANTS.lines() {
+            let line = line.trim();
+            if let Some((src, target)) = line.split_once('\t') {
+                if let (Some(s), Some(t)) = (src.trim().chars().next(), target.trim().chars().next())
+                {
+                    if s != t && !map.contains_key(&s) && !map.contains_key(&t) {
+                        map.insert(s, t);
+                    }
+                }
+            }
+        }
+
+        map
+    })
+}
 
 pub fn contains_cjk(text: &str) -> bool {
     text.chars().any(|ch| {
@@ -59,6 +130,7 @@ pub fn normalize_zh_into(text: &str, out: &mut String) {
         // SAFETY: `i` only advances on confirmed ASCII codepoint boundaries
         // (every retained byte was < 0x80, which is a 1-byte UTF-8 sequence).
         let tail = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
+        let vmap = variant_map();
         for ch in tail.nfkc() {
             if ch.is_whitespace() {
                 continue;
@@ -66,6 +138,7 @@ pub fn normalize_zh_into(text: &str, out: &mut String) {
             if is_strippable_category(ch) {
                 continue;
             }
+            let ch = vmap.get(&ch).copied().unwrap_or(ch);
             out.push(ch);
         }
     }
@@ -144,6 +217,35 @@ mod tests {
     #[test]
     fn cjk_punct_stripped() {
         assert_eq!(normalize_zh("如是， 我聞。"), "如是我聞");
+    }
+
+    #[test]
+    fn variant_map_loads() {
+        let m = variant_map();
+        assert!(m.len() > 3000, "expected >3000 entries, got {}", m.len());
+    }
+
+    #[test]
+    fn simplified_normalizes_to_traditional() {
+        // 禅 (Simplified) → 禪 (Traditional)
+        assert_eq!(normalize_zh("禅"), "禪");
+    }
+
+    #[test]
+    fn modern_normalizes_to_kangxi() {
+        // 眾 (modern) → 衆 (Kangxi standard used in Buddhist texts)
+        assert_eq!(normalize_zh("眾"), "衆");
+    }
+
+    #[test]
+    fn mixed_variants_in_phrase() {
+        // 钵 (Simplified) and 鉢 (Traditional/Kangxi) should converge.
+        // 缽 (modern) also maps to 鉢 (Kangxi) via KXVariants.
+        let a = normalize_zh("持鉢入城");
+        let b = normalize_zh("持钵入城");
+        let c = normalize_zh("持缽入城");
+        assert_eq!(a, b);
+        assert_eq!(a, c);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! body text and the largest non-icon embedded image (written to disk).
 
 use crate::models::PassageRecord;
-use crate::storage::{write_parquet_part_partitioned, PassageBatch, PARQUET_BATCH_SIZE};
+use crate::storage::{write_parquet_part_partitioned, ParquetCompression, PassageBatch, PARQUET_BATCH_SIZE};
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use rayon::prelude::*;
@@ -110,13 +110,13 @@ fn write_chunks(paired: &[(PassageRecord, Option<String>)], out_parquet: &Path) 
     for (rec, meta) in paired {
         batch.push_with_metadata(rec, meta.clone())?;
         if batch.len() >= PARQUET_BATCH_SIZE {
-            write_parquet_part_partitioned(&batch, out_parquet, "terebess", part_index)?;
+            write_parquet_part_partitioned(&batch, out_parquet, "terebess", part_index, ParquetCompression::Zstd)?;
             part_index += 1;
             batch.clear();
         }
     }
     if !batch.is_empty() {
-        write_parquet_part_partitioned(&batch, out_parquet, "terebess", part_index)?;
+        write_parquet_part_partitioned(&batch, out_parquet, "terebess", part_index, ParquetCompression::Zstd)?;
     }
     Ok(())
 }

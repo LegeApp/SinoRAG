@@ -79,6 +79,7 @@ pub async fn run(
     catalog_index_out: Option<PathBuf>,
     phrase_max_memory: Option<u64>,
     parallel_lexical: bool,
+    parquet_compression: storage::ParquetCompression,
 ) -> Result<()> {
     let out = PathBuf::from("data");
 
@@ -192,6 +193,7 @@ pub async fn run(
     let emit = |passage: &PassageRecord,
                 batch: &mut storage::PassageBatch,
                 part_index: &mut usize,
+                compression: storage::ParquetCompression,
                 jsonl: &mut BufWriter<File>,
                 corpus_name: &str|
      -> Result<()> {
@@ -204,6 +206,7 @@ pub async fn run(
                 &staging_parquet,
                 corpus_name,
                 *part_index,
+                compression,
             )?;
             batch.clear();
             *part_index += 1;
@@ -305,6 +308,7 @@ pub async fn run(
                     &passage,
                     &mut cbeta_batch,
                     &mut cbeta_part_index,
+                    parquet_compression,
                     &mut jsonl,
                     "cbeta",
                 )?;
@@ -390,6 +394,7 @@ pub async fn run(
                         &passage,
                         &mut kanripo_batch,
                         &mut kanripo_part_index,
+                        parquet_compression,
                         &mut jsonl,
                         "kanripo",
                     )?;
@@ -421,6 +426,7 @@ pub async fn run(
             &staging_parquet,
             "cbeta",
             cbeta_part_index,
+            parquet_compression,
         )?;
         cbeta_part_index += 1;
     }
@@ -430,6 +436,7 @@ pub async fn run(
             &staging_parquet,
             "kanripo",
             kanripo_part_index,
+            parquet_compression,
         )?;
         kanripo_part_index += 1;
     }

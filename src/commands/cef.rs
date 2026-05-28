@@ -559,7 +559,7 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
     for passage in &passages {
         batch.push(passage)?;
     }
-    storage::write_parquet_part_partitioned(&batch, &out_parquet, &corpus.corpus_id, 0)?;
+    storage::write_parquet_part_partitioned(&batch, &out_parquet, &corpus.corpus_id, 0, crate::storage::ParquetCompression::Zstd)?;
 
     eprintln!(
         "Ingest complete. Wrote {} passages to {}",

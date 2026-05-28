@@ -222,6 +222,216 @@ fn normalize_file_key(file: &str) -> String {
     s
 }
 
+// ---------------------------------------------------------------------------
+// Work catalog: sutra_sch.lst — authoritative list of every CBETA work.
+// Source: https://github.com/zhaowenping/cbeta (idx/sutra_sch.lst)
+// ---------------------------------------------------------------------------
+
+const CATALOG_BYTES: &[u8] = include_bytes!("../assets/cbeta/sutra_sch.lst");
+
+static CATALOG: OnceLock<WorkCatalog> = OnceLock::new();
+
+pub fn work_catalog() -> &'static WorkCatalog {
+    CATALOG.get_or_init(|| parse_work_catalog(CATALOG_BYTES))
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogEntry {
+    pub work_id: String,
+    pub title: String,
+    pub juan_count: Option<u32>,
+    pub translator_field: String,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkCatalog {
+    entries: HashMap<String, CatalogEntry>,
+}
+
+impl WorkCatalog {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn get(&self, work_id: &str) -> Option<&CatalogEntry> {
+        self.entries.get(work_id)
+    }
+
+    pub fn work_ids(&self) -> impl Iterator<Item = &String> {
+        self.entries.keys()
+    }
+}
+
+/// Parse `sutra_sch.lst` — one work per line.
+///
+/// Format: `{work_id} {title} ({juan}卷)【{dynasty} {translator}】`
+///
+/// Lines with fascicle suffixes (`_NNN`) or anchors (`#pNNNNaNNN`) are
+/// folded into their parent work_id so the catalog has one entry per work.
+fn parse_work_catalog(bytes: &[u8]) -> WorkCatalog {
+    let text = String::from_utf8_lossy(bytes);
+    let mut entries: HashMap<String, CatalogEntry> = HashMap::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((raw_id, rest)) = line.split_once(' ') else {
+            continue;
+        };
+
+        // Strip anchor (#pNNNN...) then fascicle suffix (_NNN).
+        let id_no_anchor = raw_id.split('#').next().unwrap_or(raw_id);
+        let work_id = crate::tei::strip_fascicle_suffix(id_no_anchor);
+
+        // Only keep the first (most complete) entry per work_id.
+        if entries.contains_key(work_id) {
+            continue;
+        }
+
+        let (title, juan, translator) = parse_catalog_fields(rest);
+
+        entries.insert(
+            work_id.to_string(),
+            CatalogEntry {
+                work_id: work_id.to_string(),
+                title,
+                juan_count: juan,
+                translator_field: translator,
+            },
+        );
+    }
+
+    WorkCatalog { entries }
+}
+
+/// Extract title, juan count, and translator from the rest of a catalog line.
+///
+/// Example input: `長阿含經 (22卷)【後秦 佛陀耶舍共竺佛念譯】`
+fn parse_catalog_fields(rest: &str) -> (String, Option<u32>, String) {
+    let mut title = String::new();
+    let mut juan: Option<u32> = None;
+    let mut translator = String::new();
+
+    // Find `(N卷)` and `【...】` by scanning for the delimiters.
+    if let Some(paren_start) = rest.find('(') {
+        title = rest[..paren_start].trim().to_string();
+        if let Some(juan_end) = rest[paren_start..].find('卷') {
+            let juan_str = &rest[paren_start + '('.len_utf8()..paren_start + juan_end];
+            juan = juan_str.trim().parse().ok();
+        }
+    }
+
+    if let Some(bracket_start) = rest.find('【') {
+        if let Some(bracket_end) = rest.find('】') {
+            translator = rest[bracket_start + '【'.len_utf8()..bracket_end]
+                .trim()
+                .to_string();
+        }
+    }
+
+    if title.is_empty() {
+        // No `(N卷)` found — title is the entire rest minus any 【】 block.
+        let end = rest.find('【').unwrap_or(rest.len());
+        title = rest[..end].trim().to_string();
+    }
+
+    (title, juan, translator)
+}
+
+// ---------------------------------------------------------------------------
+// Cross-canon parallel works: cmp.lst
+// Source: https://github.com/zhaowenping/cbeta (idx/cmp.lst)
+// ---------------------------------------------------------------------------
+
+const CMP_BYTES: &[u8] = include_bytes!("../assets/cbeta/cmp.lst");
+
+static PARALLEL_WORKS: OnceLock<ParallelWorksIndex> = OnceLock::new();
+
+pub fn parallel_works() -> &'static ParallelWorksIndex {
+    PARALLEL_WORKS.get_or_init(|| parse_parallel_works(CMP_BYTES))
+}
+
+#[derive(Debug, Default)]
+pub struct ParallelWorksIndex {
+    map: HashMap<String, Vec<String>>,
+}
+
+impl ParallelWorksIndex {
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Return the work_ids of parallel editions for `work_id`.
+    /// Does NOT include `work_id` itself.
+    pub fn parallels(&self, work_id: &str) -> Option<&[String]> {
+        self.map.get(work_id).map(|v| v.as_slice())
+    }
+}
+
+/// Parse `cmp.lst`. Each line starts with `{work_id} {title} ({juan}卷)...`,
+/// optionally followed by tab-separated or space-separated cross-references
+/// after the 【】 block.
+///
+/// A cross-reference is anything that looks like a CBETA work_id
+/// (`{CANON}{TOME}n{SUTRA}` possibly with `_NNN#...` suffixes).
+/// We strip suffixes and anchors to get the base work_id.
+fn parse_parallel_works(bytes: &[u8]) -> ParallelWorksIndex {
+    let text = String::from_utf8_lossy(bytes);
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let Some((raw_id, rest)) = line.split_once(' ') else {
+            continue;
+        };
+        let work_id = normalize_cmp_id(raw_id);
+        if work_id.is_empty() {
+            continue;
+        }
+
+        // The cross-references follow the 【translator】 block or, if absent,
+        // after the title/(卷) section. Look for them as tokens that match
+        // the CBETA id pattern.
+        let refs_start = rest
+            .find('】')
+            .map(|i| i + '】'.len_utf8())
+            .or_else(|| rest.find(')').map(|i| i + 1))
+            .unwrap_or(rest.len());
+        let refs_part = &rest[refs_start..];
+
+        let mut refs: Vec<String> = Vec::new();
+        for token in refs_part.split([',', ' ', '\t']) {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            let ref_id = normalize_cmp_id(token);
+            if !ref_id.is_empty() && ref_id != work_id {
+                if !refs.contains(&ref_id) {
+                    refs.push(ref_id);
+                }
+            }
+        }
+
+        if !refs.is_empty() {
+            map.insert(work_id, refs);
+        }
+    }
+
+    ParallelWorksIndex { map }
+}
+
+fn normalize_cmp_id(raw: &str) -> String {
+    let no_anchor = raw.split('#').next().unwrap_or(raw);
+    crate::tei::strip_fascicle_suffix(no_anchor).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +454,42 @@ mod tests {
             normalize_file_key("T/T01/T01n0001.xml"),
             "T/T01/T01n0001.xml"
         );
+    }
+
+    #[test]
+    fn catalog_parses_standard_entry() {
+        let (title, juan, translator) =
+            parse_catalog_fields("長阿含經 (22卷)【後秦 佛陀耶舍共竺佛念譯】");
+        assert_eq!(title, "長阿含經");
+        assert_eq!(juan, Some(22));
+        assert_eq!(translator, "後秦 佛陀耶舍共竺佛念譯");
+    }
+
+    #[test]
+    fn catalog_parses_lost_translator() {
+        let (title, juan, translator) = parse_catalog_fields("般泥洹經 (2卷)【失譯】");
+        assert_eq!(title, "般泥洹經");
+        assert_eq!(juan, Some(2));
+        assert_eq!(translator, "失譯");
+    }
+
+    #[test]
+    fn embedded_catalog_loads() {
+        let cat = work_catalog();
+        assert!(cat.len() > 4000, "expected >4000 works, got {}", cat.len());
+        let entry = cat.get("T01n0001").expect("T01n0001 should be in catalog");
+        assert_eq!(entry.title, "長阿含經");
+        assert_eq!(entry.juan_count, Some(22));
+    }
+
+    #[test]
+    fn parallel_works_loads() {
+        let pw = parallel_works();
+        assert!(pw.len() > 50, "expected >50 entries with parallels, got {}", pw.len());
+        // T01n0005 (佛般泥洹經) has parallels T01n0006, T01n0007, etc.
+        let refs = pw.parallels("T01n0005").expect("T01n0005 should have parallels");
+        assert!(refs.contains(&"T01n0006".to_string()));
+        assert!(refs.contains(&"T01n0007".to_string()));
     }
 
     #[test]

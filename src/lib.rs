@@ -5,6 +5,7 @@ pub mod cef;
 pub mod cli;
 pub mod commands;
 pub mod datafusion_store;
+pub mod dict;
 pub mod document_table;
 pub mod embedding;
 pub mod ingest;

@@ -658,6 +658,14 @@ impl ToolEngine {
     pub async fn open(config: EngineConfig) -> Result<Self> {
         let max_heavy = config.max_heavy_concurrency.max(1);
 
+        // Tell the dict/entity annotation layer where to find parquet stores.
+        let dict_path = Self::resolve_dict_path_static(&config);
+        crate::dict::set_dict_path(dict_path);
+        let person_path = Self::resolve_authority_path_static(&config, crate::pack::DEFAULT_PERSONS, "data/persons.parquet");
+        crate::dict::set_person_path(person_path);
+        let place_path = Self::resolve_authority_path_static(&config, crate::pack::DEFAULT_PLACES, "data/places.parquet");
+        crate::dict::set_place_path(place_path);
+
         Ok(Self {
             config,
             passages: OnceCell::new(),
@@ -669,6 +677,34 @@ impl ToolEngine {
             registry: OnceCell::new(),
             heavy_slots: Semaphore::new(max_heavy),
         })
+    }
+
+    fn resolve_dict_path_static(config: &EngineConfig) -> Option<PathBuf> {
+        if let Some(ref pack) = config.pack {
+            let p = pack.join(crate::pack::DEFAULT_DICT);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        let default = PathBuf::from("data/dict.parquet");
+        if default.is_dir() {
+            return Some(default);
+        }
+        None
+    }
+
+    fn resolve_authority_path_static(config: &EngineConfig, pack_rel: &str, default_rel: &str) -> Option<PathBuf> {
+        if let Some(ref pack) = config.pack {
+            let p = pack.join(pack_rel);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        let default = PathBuf::from(default_rel);
+        if default.is_dir() {
+            return Some(default);
+        }
+        None
     }
 
     /// Resolve the passages parquet path
@@ -5959,6 +5995,9 @@ impl ToolEngine {
             }
         }
 
+        // Query DDBC authority parquet for structured data
+        let authority = query_person_authority(&req.name, &req.aliases).await;
+
         let mut name_forms = Vec::new();
         let mut evidence = Vec::new();
         for form in &forms {
@@ -5976,25 +6015,83 @@ impl ToolEngine {
             }));
         }
 
+        let mut caveats = vec!["Supply all known aliases explicitly.".to_string()];
+        if authority.is_none() {
+            caveats.push("Name not found in DDBC authority database; corpus-local search only.".to_string());
+        }
+
         Ok(PersonResolveResponse {
-            schema: "sinorag-person-resolve-v1",
+            schema: "sinorag-person-resolve-v2",
             name: req.name.clone(),
             aliases: req.aliases,
             canonical_candidate: forms.first().cloned().unwrap_or_default(),
+            authority,
             name_forms,
             ambiguity_notes: vec![
                 "Short aliases and honorific titles may refer to more than one person.".to_string(),
                 "Use person-history to inspect earliest and contextualised mentions.".to_string(),
             ],
             evidence,
-            caveats: vec![
-                "This is a corpus-local resolver; no external authority file is consulted."
-                    .to_string(),
-                "Supply all known aliases explicitly.".to_string(),
-            ],
+            caveats,
             suggested_next: vec![
-                "Run person-history with the same aliases to classify mention contexts."
-                    .to_string(),
+                "Run person-history with the same aliases to classify mention contexts.".to_string(),
+            ],
+        })
+    }
+
+    /// Implement the place-resolve tool.
+    pub async fn place_resolve_impl(
+        &self,
+        req: crate::tools::requests::PlaceResolveRequest,
+    ) -> Result<crate::tools::responses::PlaceResolveResponse> {
+        use crate::research::{evidence_from_row, exact_phrase_rows, SearchSpec};
+        use crate::tools::responses::PlaceResolveResponse;
+
+        let passages = self.passages().await?;
+        let mut forms = vec![req.name.clone()];
+        for alias in &req.aliases {
+            if !forms.iter().any(|v| v == alias) {
+                forms.push(alias.clone());
+            }
+        }
+
+        // Query DDBC authority parquet for structured place data
+        let authority = query_place_authority(&req.name, &req.aliases).await;
+
+        let mut name_forms = Vec::new();
+        let mut evidence = Vec::new();
+        for form in &forms {
+            let spec = SearchSpec::exact_phrase(form.clone(), 50);
+            let rows = exact_phrase_rows(&passages, &spec).await?;
+            if let Some(first) = rows.first() {
+                evidence.push(evidence_from_row(first, form, "place_mention_sample"));
+            }
+            name_forms.push(serde_json::json!({
+                "form": form,
+                "normalized": spec.normalized,
+                "hit_count_sample": rows.len(),
+                "first_hit": rows.first().cloned().unwrap_or(serde_json::Value::Null),
+            }));
+        }
+
+        let mut caveats = vec!["Supply all known alternate names explicitly.".to_string()];
+        if authority.is_none() {
+            caveats.push("Place not found in DDBC authority database; corpus-local search only.".to_string());
+        }
+
+        Ok(PlaceResolveResponse {
+            schema: "sinorag-place-resolve-v1",
+            name: req.name.clone(),
+            aliases: req.aliases,
+            authority,
+            name_forms,
+            ambiguity_notes: vec![
+                "Place names may refer to multiple locations across different periods.".to_string(),
+            ],
+            evidence,
+            caveats,
+            suggested_next: vec![
+                "Search corpus passages for contextual mentions.".to_string(),
             ],
         })
     }
@@ -6318,6 +6415,166 @@ impl ToolEngine {
             search_strategy: strategy,
         })
     }
+}
+
+/// Query persons.parquet for the best-matching DDBC authority record.
+/// Tries exact match on primary_name, then scans alt_names_json for any alias match.
+async fn query_person_authority(name: &str, aliases: &[String]) -> Option<serde_json::Value> {
+    use datafusion::prelude::*;
+
+    let path_opt = crate::dict::get_person_path();
+    let dir = path_opt.as_deref()?;
+    if !dir.is_dir() {
+        return None;
+    }
+
+    let ctx = SessionContext::new();
+    let src = dir.join("**/*.parquet").to_string_lossy().replace('\\', "/");
+    ctx.register_parquet("persons", &src, ParquetReadOptions::default()).await.ok()?;
+
+    // Try all forms: primary name + aliases
+    let mut all_forms: Vec<&str> = vec![name];
+    for a in aliases {
+        all_forms.push(a.as_str());
+    }
+
+    for form in all_forms {
+        let escaped = form.replace('\'', "''");
+        let sql = format!(
+            "SELECT person_id, primary_name, alt_names_json, gender, dynasty, \
+             birth_year, death_year, occupation, place_of_origin, concise_bio, \
+             teachers_json, students_json, wikidata_id, cbdb_id \
+             FROM persons \
+             WHERE primary_name = '{escaped}' OR alt_names_json LIKE '%\"{escaped}\"%' \
+             LIMIT 1"
+        );
+        if let Ok(df) = ctx.sql(&sql).await {
+            if let Ok(batches) = df.collect().await {
+                for batch in &batches {
+                    if batch.num_rows() == 0 { continue; }
+                    let row = authority_person_row(batch, 0);
+                    if row.is_some() { return row; }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn authority_person_row(batch: &arrow::record_batch::RecordBatch, i: usize) -> Option<serde_json::Value> {
+    #[allow(unused_imports)]
+    use arrow::array::{Array, StringArray};
+    let get = |name: &str| -> Option<String> {
+        batch.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i).to_string()) })
+    };
+
+    let person_id = get("person_id")?;
+    let primary_name = get("primary_name")?;
+    let mut obj = serde_json::json!({
+        "person_id": person_id,
+        "primary_name": primary_name,
+    });
+    let m = obj.as_object_mut().unwrap();
+    if let Some(v) = get("gender") { m.insert("gender".into(), v.into()); }
+    if let Some(v) = get("dynasty") { m.insert("dynasty".into(), v.trim().to_string().into()); }
+    if let Some(v) = get("birth_year") { m.insert("birth_year".into(), v.into()); }
+    if let Some(v) = get("death_year") { m.insert("death_year".into(), v.into()); }
+    if let Some(v) = get("occupation") { m.insert("occupation".into(), v.into()); }
+    if let Some(v) = get("place_of_origin") { m.insert("place_of_origin".into(), v.into()); }
+    if let Some(v) = get("concise_bio") { m.insert("concise_bio".into(), v.into()); }
+    if let Some(v) = get("wikidata_id") { m.insert("wikidata_id".into(), v.into()); }
+    if let Some(v) = get("cbdb_id") { m.insert("cbdb_id".into(), v.into()); }
+    // Parse teacher/student JSON arrays
+    if let Some(v) = get("teachers_json") {
+        if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&v) {
+            m.insert("teachers".into(), arr);
+        }
+    }
+    if let Some(v) = get("students_json") {
+        if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&v) {
+            m.insert("students".into(), arr);
+        }
+    }
+    if let Some(v) = get("alt_names_json") {
+        if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&v) {
+            m.insert("alt_names".into(), arr);
+        }
+    }
+    Some(obj)
+}
+
+/// Query places.parquet for the best-matching DDBC authority record.
+async fn query_place_authority(name: &str, aliases: &[String]) -> Option<serde_json::Value> {
+    #[allow(unused_imports)]
+    use arrow::array::{Array, Float64Array, StringArray};
+    use datafusion::prelude::*;
+
+    let path_opt = crate::dict::get_place_path();
+    let dir = path_opt.as_deref()?;
+    if !dir.is_dir() {
+        return None;
+    }
+
+    let ctx = SessionContext::new();
+    let src = dir.join("**/*.parquet").to_string_lossy().replace('\\', "/");
+    ctx.register_parquet("places", &src, ParquetReadOptions::default()).await.ok()?;
+
+    let mut all_forms: Vec<&str> = vec![name];
+    for a in aliases {
+        all_forms.push(a.as_str());
+    }
+
+    for form in all_forms {
+        let escaped = form.replace('\'', "''");
+        let sql = format!(
+            "SELECT place_id, primary_name, alt_names_json, latitude, longitude, \
+             geo_confidence, district, category, description, parent_place_id \
+             FROM places \
+             WHERE primary_name = '{escaped}' OR alt_names_json LIKE '%\"{escaped}\"%' \
+             LIMIT 1"
+        );
+        if let Ok(df) = ctx.sql(&sql).await {
+            if let Ok(batches) = df.collect().await {
+                for batch in &batches {
+                    if batch.num_rows() == 0 { continue; }
+                    let get_str = |col: &str| -> Option<String> {
+                        batch.column_by_name(col)
+                            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                            .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0).to_string()) })
+                    };
+                    let get_f64 = |col: &str| -> Option<f64> {
+                        batch.column_by_name(col)
+                            .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+                            .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0)) })
+                    };
+
+                    let place_id = get_str("place_id")?;
+                    let primary_name = get_str("primary_name")?;
+                    let mut obj = serde_json::json!({
+                        "place_id": place_id,
+                        "primary_name": primary_name,
+                    });
+                    let m = obj.as_object_mut().unwrap();
+                    if let Some(lat) = get_f64("latitude") { m.insert("latitude".into(), lat.into()); }
+                    if let Some(lon) = get_f64("longitude") { m.insert("longitude".into(), lon.into()); }
+                    if let Some(v) = get_str("geo_confidence") { m.insert("geo_confidence".into(), v.into()); }
+                    if let Some(v) = get_str("district") { m.insert("district".into(), v.into()); }
+                    if let Some(v) = get_str("category") { m.insert("category".into(), v.trim().to_string().into()); }
+                    if let Some(v) = get_str("description") { m.insert("description".into(), v.into()); }
+                    if let Some(v) = get_str("parent_place_id") { m.insert("parent_place_id".into(), v.into()); }
+                    if let Some(v) = get_str("alt_names_json") {
+                        if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&v) {
+                            m.insert("alt_names".into(), arr);
+                        }
+                    }
+                    return Some(obj);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn classify_person_mention(row: &serde_json::Value, form: &str) -> &'static str {

@@ -72,7 +72,9 @@ pub async fn call_tool(engine: &ToolEngine, name: &str, args: Value) -> Result<V
 
     enforce_safety(engine, &def.spec)?;
 
-    (def.call)(engine, args).await
+    let mut result = (def.call)(engine, args).await?;
+    crate::dict::annotate_response(&mut result).await;
+    Ok(result)
 }
 
 /// Call a tool with envelope response
@@ -126,6 +128,7 @@ pub fn audience_for_tool(name: &str) -> ToolAudience {
         | "pair-profile"
         | "citation-verify"
         | "person-resolve"
+        | "place-resolve"
         | "person-history"
         | "report-from-evidence"
         | "pdf-build" => ToolAudience::DefaultAgent,
@@ -1199,6 +1202,32 @@ pub fn tool_defs() -> Vec<ToolDef> {
             call: |engine, args| Box::pin(async move {
                 let req: PersonResolveRequest = serde_json::from_value(args)?;
                 let res = engine.person_resolve_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // place-resolve tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "place-resolve",
+                description: "Resolve a place name to its DDBC authority record (coordinates, category, alternate names) and show corpus presence. Use to disambiguate historical place names and find geographic context.",
+                input_schema: schema_for::<PlaceResolveRequest>(),
+                output_schema: schema_for::<PlaceResolveResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Resolve a place name",
+                        args: serde_json::json!({
+                            "name": "那爛陀",
+                            "aliases": ["那爛陀寺"]
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PlaceResolveRequest = serde_json::from_value(args)?;
+                let res = engine.place_resolve_impl(req).await?;
                 Ok(serde_json::to_value(res)?)
             }),
         },

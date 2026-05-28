@@ -332,10 +332,69 @@ pub enum IndexesCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Three-way merge of CBETA distributions into one canonical directory.
+    ///
+    /// Combines GitHub xml-p5, ISO xml-iso, and optionally tei-extra (CC, LC,
+    /// TX, YP canons) into `<out>/xml-merged/`. For each work, the source with
+    /// the most bytes wins; works unique to any source are always included.
+    ///
+    ///   sinorag merge-cbeta --github /path/to/xml-p5 \
+    ///                       --iso    /path/to/xml-iso \
+    ///                       --extra  /path/to/tei-extra \
+    ///                       --out    /path/to/merged
+    ///   sinorag ingest cbeta /path/to/merged
+    #[command(name = "merge-cbeta")]
+    MergeCbeta {
+        /// Path to the GitHub xml-p5 CBETA corpus root (contains `xml-p5/`).
+        #[arg(long)]
+        github: PathBuf,
+        /// Path to the ISO xml-iso CBETA corpus root (contains `xml-iso/`).
+        #[arg(long)]
+        iso: PathBuf,
+        /// Path to supplementary TEI canons (CC, LC, TX, YP — typically `tei-extra/`).
+        #[arg(long)]
+        extra: Option<PathBuf>,
+        /// Output directory. Will contain `xml-merged/` and `merge-manifest.json`.
+        #[arg(long)]
+        out: PathBuf,
+        /// Scan and report without copying any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Bootstrap the CBETA corpus from the official pre-built pack.
+    ///
+    /// Downloads cbeta-pack.7z from GitHub Releases, decompresses it with
+    /// LZMA2, and builds the doc_table and catalog index locally.
+    /// This is the recommended first step for most users.
+    ///
+    /// Phrase and TF-IDF indexes are NOT included in the pack (too large).
+    /// Build them separately with `sinorag indexes lexical`.
+    ///
+    /// To build from your own CBETA source files instead (GitHub xml-p5 or
+    /// ISO xml-iso layout):
+    ///
+    ///   sinorag init --from-raw /path/to/cbeta
+    Init {
+        /// Override the download URL. Accepts https:// or file:// URLs.
+        /// Useful for testing with a locally built pack.
+        #[arg(long)]
+        url: Option<String>,
+        /// Re-initialize even if a CBETA corpus is already present.
+        #[arg(long)]
+        force: bool,
+        /// Skip download: ingest from a local CBETA corpus directory instead.
+        /// Accepts the same paths as `sinorag ingest cbeta` / `cbeta-iso`.
+        #[arg(long, value_name = "PATH")]
+        from_raw: Option<PathBuf>,
+        #[arg(long, default_value = "data/passages.parquet", hide = true)]
+        out_parquet: PathBuf,
+    },
+
     /// Show what's been ingested and which indexes are built under the data root.
     ///
     /// Cheap filesystem inspection — safe to run any time. Useful as the first
-    /// command after `ingest` to verify state and see suggested next steps.
+    /// command after `init` or `ingest` to verify state and see suggested next steps.
     Status {
         /// Data root (default: data/).
         #[arg(long, default_value = "data")]
@@ -407,6 +466,10 @@ pub enum Command {
         catalog_index_out: Option<PathBuf>,
         #[arg(long, value_parser = crate::memory::parse_memory_size, help = "Maximum memory for phrase index build (e.g. 4G, 800M; default: auto-detect)")]
         phrase_max_memory: Option<u64>,
+        /// Write parquet with no compression. Useful when applying an external
+        /// compressor (e.g. 7z/LZMA2). Default is ZSTD.
+        #[arg(long)]
+        no_parquet_compression: bool,
         // Legacy/internal passthrough fields kept for compatibility (hidden from help).
         #[arg(long, default_value = "data/passages.jsonl", hide = true)]
         out_jsonl: PathBuf,
@@ -469,6 +532,10 @@ pub enum Command {
         /// Catalog index output path.
         #[arg(long, default_value = "data/derived/catalog.index", hide = true)]
         catalog_index_out: PathBuf,
+        /// Write parquet with no compression. Useful when applying an external
+        /// compressor (e.g. 7z/LZMA2). Default is ZSTD.
+        #[arg(long)]
+        no_parquet_compression: bool,
         #[arg(long, default_value = "data/passages.jsonl", hide = true)]
         out_jsonl: PathBuf,
         #[arg(long, default_value = "data/passages.parquet", hide = true)]
@@ -552,6 +619,31 @@ pub enum Command {
         /// opencode. Useful for inspecting the generated configuration.
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// Build the CBETA distribution pack (.7z) for GitHub Releases.
+    ///
+    /// Compresses passages.parquet, dict.parquet, persons.parquet, and
+    /// places.parquet into a single LZMA2 .7z file using the system 7z binary.
+    /// The resulting file can be distributed and unpacked by `sinorag init`.
+    ///
+    /// Requires 7z (p7zip-full on Linux, 7-Zip on Windows/macOS) on PATH.
+    ///
+    /// Required sources (run before this command):
+    ///   sinorag ingest cbeta   ... --no-parquet-compression
+    ///   sinorag ingest-dict    ...
+    ///   sinorag ingest-authority ...
+    ///
+    /// Example:
+    ///   sinorag pack-create --out cbeta-pack.7z
+    #[command(name = "pack-create")]
+    PackCreate {
+        /// Data root directory containing the parquet datasets.
+        #[arg(long, default_value = "data")]
+        data: PathBuf,
+        /// Output .7z file path.
+        #[arg(long, default_value = "cbeta-pack.7z")]
+        out: PathBuf,
     },
 
     /// Stitch already-built index artifacts into a validated pack with manifest.
@@ -699,6 +791,43 @@ pub enum Command {
     CefStats {
         #[arg(long)]
         input: PathBuf,
+    },
+
+    /// Ingest Buddhist dictionaries into dict.parquet.
+    ///
+    /// Reads JSON dictionary files from the cbeta-reader dict/ directory and
+    /// produces a Hive-partitioned parquet at data/dict.parquet/source={name}/.
+    /// Includes Soothill-Hodous, 丁福保, 佛光, 阿含, 翻譯名義集, and others.
+    #[command(name = "ingest-dict")]
+    IngestDict {
+        /// Path to the cbeta-reader dict/ directory.
+        path: PathBuf,
+        #[arg(long, default_value = "data/dict.parquet")]
+        out_parquet: PathBuf,
+        /// Write parquet with no compression. Useful when applying an external
+        /// compressor (e.g. 7z/LZMA2). Default is ZSTD.
+        #[arg(long)]
+        no_parquet_compression: bool,
+    },
+
+    /// Ingest DDBC person and place authority XML into parquet.
+    ///
+    /// Reads Buddhist_Studies_Person_Authority.xml and Buddhist_Studies_Place_Authority.xml
+    /// from the cbeta-reader dict/ directory and produces:
+    ///   data/persons.parquet/   — 46k persons with names, dates, bios, relationships
+    ///   data/places.parquet/    — 38k places with names, coordinates, categories
+    #[command(name = "ingest-authority")]
+    IngestAuthority {
+        /// Path to the cbeta-reader dict/ directory containing the authority XML files.
+        path: PathBuf,
+        #[arg(long, default_value = "data/persons.parquet")]
+        persons_out: PathBuf,
+        #[arg(long, default_value = "data/places.parquet")]
+        places_out: PathBuf,
+        /// Write parquet with no compression. Useful when applying an external
+        /// compressor (e.g. 7z/LZMA2). Default is ZSTD.
+        #[arg(long)]
+        no_parquet_compression: bool,
     },
 
     /// Ingest a CEF JSON-lines file into the passage parquet.

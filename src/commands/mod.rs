@@ -15,9 +15,14 @@ pub mod find_first_mention;
 pub mod first_attestation;
 pub mod frontier;
 pub mod ingest;
+pub mod ingest_authority;
+pub mod ingest_dict;
 pub mod ingest_terebess;
+pub mod init;
+pub mod merge_cbeta;
 pub mod kanripo;
 pub mod outline_search;
+pub mod pack;
 pub mod passage;
 pub mod person_history;
 pub mod person_resolve;
@@ -274,6 +279,19 @@ async fn build_semantic_index(args: SemanticIndexArgs) -> Result<()> {
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::MergeCbeta {
+            github,
+            iso,
+            extra,
+            out,
+            dry_run,
+        } => merge_cbeta::run(github, iso, extra, out, dry_run),
+        Command::Init {
+            url,
+            force,
+            from_raw,
+            out_parquet,
+        } => init::run(url, force, from_raw, out_parquet).await,
         Command::Status { data } => status::run(data),
         Command::Index { command } => match command {
             IndexCommand::Phrase {
@@ -427,7 +445,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             tfidf_out,
             catalog_index_out,
             phrase_max_memory,
+            no_parquet_compression,
         } => {
+            let parquet_compression = if no_parquet_compression {
+                crate::storage::ParquetCompression::Uncompressed
+            } else {
+                crate::storage::ParquetCompression::Zstd
+            };
             use crate::cli::IngestSource;
 
             // Determine which corpus name this source will write, then
@@ -501,6 +525,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 catalog_index_out,
                 phrase_max_memory,
                 false,
+                parquet_compression,
             )
             .await
         }
@@ -520,7 +545,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             catalog_index_out,
             out_jsonl,
             out_parquet,
+            no_parquet_compression,
         } => {
+            let parquet_compression = if no_parquet_compression {
+                crate::storage::ParquetCompression::Uncompressed
+            } else {
+                crate::storage::ParquetCompression::Zstd
+            };
             if cbeta.is_none() && kanripo.is_none() {
                 anyhow::bail!("ingest-all requires at least one of --cbeta or --kanripo");
             }
@@ -557,6 +588,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 Some(catalog_index_out),
                 phrase_max_memory,
                 parallel_lexical,
+                parquet_compression,
             )
             .await
         }
@@ -574,6 +606,22 @@ pub async fn run(cli: Cli) -> Result<()> {
         }),
         Command::CefInit { out } => cef::init(out),
         Command::CefStats { input } => cef::stats(input),
+        Command::IngestAuthority { path, persons_out, places_out, no_parquet_compression } => {
+            let parquet_compression = if no_parquet_compression {
+                crate::storage::ParquetCompression::Uncompressed
+            } else {
+                crate::storage::ParquetCompression::Zstd
+            };
+            ingest_authority::run(path, persons_out, places_out, parquet_compression)
+        }
+        Command::IngestDict { path, out_parquet, no_parquet_compression } => {
+            let parquet_compression = if no_parquet_compression {
+                crate::storage::ParquetCompression::Uncompressed
+            } else {
+                crate::storage::ParquetCompression::Zstd
+            };
+            ingest_dict::run(path, out_parquet, parquet_compression)
+        }
         Command::IngestCef { input, out_parquet } => {
             cef::ingest(input, out_parquet.clone()).await?;
             ingest::post_ingest(ingest::PostIngestOptions {
@@ -877,6 +925,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 parallel_lexical: false,
             })
         }
+        Command::PackCreate { data, out } => pack::run(data, out),
         Command::BuildPack { pack, pack_id } => build_pack::run(pack, pack_id),
         Command::ExpandContextAdaptive {
             parquet,

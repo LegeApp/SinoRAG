@@ -31,6 +31,9 @@ pub const DEFAULT_REGISTRY: &str = "derived/registry.sqlite";
 pub const DEFAULT_PHRASE: &str = "derived/phrase.index";
 pub const DEFAULT_TFIDF: &str = "derived/tfidf.index";
 pub const DEFAULT_VECTOR: &str = "derived/vector.index";
+pub const DEFAULT_DICT: &str = "data/dict.parquet";
+pub const DEFAULT_PERSONS: &str = "data/persons.parquet";
+pub const DEFAULT_PLACES: &str = "data/places.parquet";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackManifest {

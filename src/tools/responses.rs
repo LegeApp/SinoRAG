@@ -864,6 +864,23 @@ pub struct PersonResolveResponse {
     pub name: String,
     pub aliases: Vec<String>,
     pub canonical_candidate: String,
+    /// DDBC authority record, if found (null if not in authority database).
+    pub authority: Option<serde_json::Value>,
+    pub name_forms: Vec<serde_json::Value>,
+    pub ambiguity_notes: Vec<String>,
+    pub evidence: Vec<serde_json::Value>,
+    pub caveats: Vec<String>,
+    pub suggested_next: Vec<String>,
+}
+
+/// Response from the place-resolve tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PlaceResolveResponse {
+    pub schema: &'static str,
+    pub name: String,
+    pub aliases: Vec<String>,
+    /// DDBC authority record, if found (null if not in authority database).
+    pub authority: Option<serde_json::Value>,
     pub name_forms: Vec<serde_json::Value>,
     pub ambiguity_notes: Vec<String>,
     pub evidence: Vec<serde_json::Value>,
