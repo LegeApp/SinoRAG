@@ -11,25 +11,39 @@ It ingests TEI/XML, CEF, and HTML corpora into a searchable passage database, th
 ## Quick start
 
 ```bash
-# 1. Ingest a corpus (one-time, slow)
-sinorag ingest cbeta /path/to/cbeta/xml-p5
+# 1. Download and initialize the CBETA corpus (one command)
+sinorag init
 
-# 2. Check what's built and what's next
+# 2. Check what's built
 sinorag status
 
-# 3. Build lexical indexes when needed
-sinorag indexes lexical  # phrase + TF-IDF indexes in one indexing run
-
-# 4. Use the research tools
+# 3. Use the research tools
 sinorag tools-manifest --include-examples
 sinorag tool-call search --json '{"phrase":"金剛經","limit":5}'
+
+# 4. Optional: semantic (vector) search
+sinorag indexes semantic --model bge-small-zh-v1.5
 
 # 5. Optional interactive agent session through opencode
 sinorag setup opencode
 sinorag agent
 ```
 
-`sinorag --help` shows the full flow. SinoRAG exposes the same tool registry through two supported front doors: JSON CLI commands (`tools-manifest`, `tool-call`, `run-tools`) for scripts and reproducible batches, and MCP (`sinorag mcp`) for interactive agents. The recommended MCP path for opencode is `sinorag agent`, which generates the opencode MCP config and `AGENTS.md` guidance for you.
+`sinorag init` downloads the pre-built CBETA corpus pack from GitHub Releases, extracts it, and builds all lexical indexes (phrase + TF-IDF) in a single run. After it completes, every tool is ready to use — no separate index build step required. The only optional step is semantic vector search, which requires a separate embedding run.
+
+`sinorag --help` shows the full command reference. SinoRAG exposes the same tool registry through two supported interfaces: JSON CLI (`tools-manifest`, `tool-call`, `run-tools`) for scripts and reproducible batches, and MCP (`sinorag mcp`) for interactive agents. The recommended MCP path for opencode is `sinorag agent`.
+
+---
+
+## What `sinorag init` does
+
+1. Downloads `cbeta-pack.7z` from GitHub Releases (~curl, progress bar shown)
+2. Extracts it in-process with pure-Rust LZMA2 (no 7z binary required)
+3. Produces: `passages.parquet/`, `dict.parquet/`, `persons.parquet/`, `places.parquet/`
+4. Builds `doc_table.bin` and `catalog.index` (fast, a few minutes)
+5. Builds `phrase.index` and `tfidf.index` (slow, up to several hours on large corpora)
+
+After init, all tools work except `vector-neighbors` and `hybrid-discover`'s semantic path, which require a vector index (step 4 below).
 
 ---
 
@@ -37,6 +51,7 @@ sinorag agent
 
 - Ingests CBETA TEI/XML (GitHub xml-p5 and ISO xml-iso layouts), CEF JSON-lines, and Terebess HTML corpora
 - Builds a Parquet passage store partitioned by `source_corpus`
+- Annotates tool responses with Buddhist term glosses (`dict.parquet`) and DDBC person/place authority data (`persons.parquet`, `places.parquet`)
 - Provides exact phrase search over normalized Chinese text (`phrase.index`)
 - Builds a document table for stable `doc_id ↔ passage_id` mapping
 - Builds catalog indexes for corpus/work/section navigation
@@ -51,25 +66,41 @@ sinorag agent
 
 | Source | Command | Input |
 |---|---|---|
-| CBETA TEI/XML (GitHub) | `ingest cbeta <PATH>` | CBETA root (containing `xml-p5/`) or `xml-p5/` directly |
-| CBETA ISO distribution | `ingest cbeta-iso <PATH>` | CBETA ISO root (containing `xml-iso/`) or `xml-iso/` directly |
+| CBETA (automatic, from pack) | `init` | no local files needed |
+| CBETA TEI/XML (GitHub) | `init --from-raw <PATH>` | CBETA root (containing `xml-p5/`) or `xml-p5/` directly |
+| CBETA ISO distribution | `init --from-raw <PATH>` | CBETA ISO root (containing `xml-iso/`) |
 | CEF JSON-lines | `ingest cef <FILE>` | `.jsonl` file in Corpus Exchange Format |
 | Terebess HTML | `ingest terebess <DIR>` | Directory of SingleFile-saved HTML pages |
 
-Multiple corpora can be ingested into the same store — each lands in a separate `source_corpus=<name>` Parquet partition. Both CBETA formats write to the same `cbeta` partition.
+Both CBETA formats write to the same `cbeta` partition. Multiple corpora can be ingested into the same store — each lands in its own `source_corpus=<name>` Parquet partition.
 
 ---
 
 ## User workflow
 
-### Step 1 — Ingest
+### Step 1 — Initialize
 
 ```bash
-sinorag ingest cbeta /path/to/cbeta/xml-p5
-sinorag ingest cbeta-iso /path/to/cbeta-iso    # ISO distribution, optional append
+sinorag init
 ```
 
-Use `--resume auto` to continue an interrupted run.
+Downloads the CBETA corpus pack and builds all lexical indexes. Takes anywhere from 30 minutes to a few hours depending on your machine. Uses `curl` (ships with Windows 10 1803+, macOS, and most Linux distros).
+
+**If you already have the CBETA source files:**
+
+```bash
+sinorag init --from-raw /path/to/cbeta/xml-p5   # GitHub layout
+sinorag init --from-raw /path/to/cbeta-iso       # ISO layout
+```
+
+**If you have a custom pack URL or a local file:**
+
+```bash
+sinorag init --url file:///path/to/cbeta-pack.7z
+sinorag init --url https://example.com/cbeta-pack.7z
+```
+
+Use `--force` to re-initialize if the corpus is already present.
 
 ### Step 2 — Check status
 
@@ -77,37 +108,9 @@ Use `--resume auto` to continue an interrupted run.
 sinorag status
 ```
 
-Reports what's ingested, which indexes are present, estimated cost for the missing optional ones, and suggested next steps.
+Reports what's ingested, which indexes are present, and suggested next steps.
 
-### Step 3 — Build indexes
-
-These are not required for basic `search` and `passage` tools. Build them when the tools that depend on them are needed.
-
-```bash
-# Exact phrase search + similarity / frontier discovery
-sinorag indexes lexical
-
-# Incremental rebuilds remain available
-sinorag index phrase
-sinorag index tfidf
-
-# Semantic discovery index: local cached embedding + vector build
-# This can take many hours on large corpora.
-sinorag indexes semantic --model bge-small-zh-v1.5
-
-# External embedding flow remains available for provider-managed batches
-sinorag index vector-export --out data/derived/vector_input.jsonl
-sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id BAAI/bge-m3
-```
-
-Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
-Local embedding commands require a binary built with `--features local-embeddings`.
-For TensorRT acceleration, build with `--features local-embeddings-tensorrt`
-and use `--execution-provider tensorrt`. TensorRT engine/timing caches are
-stored beside the embedding cache by default so subsequent runs can resume
-without rebuilding optimized engines.
-
-### Step 4 — Use the tools
+### Step 3 — Use the tools
 
 ```bash
 # Scriptable / batchable JSON CLI
@@ -123,7 +126,32 @@ sinorag agent
 
 JSON CLI is the best fit for scripts, tests, repeatable batches, and audit trails. MCP is the supported interactive transport for MCP-capable agents. `sinorag agent` wraps `sinorag mcp` for opencode by regenerating `<workdir>/.opencode/opencode.json` and the sinorag-managed block in `<workdir>/AGENTS.md`, then launching opencode. If you use another MCP client, point it at `sinorag mcp`.
 
-Agents should inspect the manifest or MCP tool list, then submit schema-valid tool calls. Batch mode writes one response envelope per input line for auditability and retry.
+### Step 4 — Optional: semantic vector search
+
+```bash
+sinorag indexes semantic --model bge-small-zh-v1.5
+```
+
+Builds a vector index for semantic discovery. This can take many hours on large corpora and requires a binary built with `--features local-embeddings`. For TensorRT acceleration, build with `--features local-embeddings-tensorrt`.
+
+An external embedding flow is also available for provider-managed batches:
+
+```bash
+sinorag index vector-export --out data/derived/vector_input.jsonl
+sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id BAAI/bge-m3
+```
+
+### Rebuilding individual indexes
+
+Phrase and TF-IDF indexes can be rebuilt separately if needed:
+
+```bash
+sinorag indexes lexical       # phrase + TF-IDF together (skips if current)
+sinorag index phrase          # phrase only
+sinorag index tfidf           # TF-IDF only
+```
+
+Use `--temp-dir` pointing to a fast SSD for large builds. Avoid RAM-backed `/tmp`.
 
 ---
 
@@ -133,12 +161,15 @@ Agents should inspect the manifest or MCP tool list, then submit schema-valid to
 data/
   passages.parquet/
     source_corpus=cbeta/      ← partitioned by corpus
+  dict.parquet/               ← Buddhist term glossary (Soothill, Dingfubao, etc.)
+  persons.parquet/            ← DDBC person authority (46k+ entries)
+  places.parquet/             ← DDBC place authority (38k+ entries)
   derived/
     doc_table.bin             stable doc_id / passage_id mapping
     catalog.index             corpus / work / outline navigation
-    phrase.index           exact phrase candidate index  (optional)
-    tfidf.index            similarity index              (optional)
-    vector.index           semantic discovery index       (optional)
+    phrase.index              exact phrase candidate index
+    tfidf.index               similarity index
+    vector.index              semantic discovery index      (optional)
     registry.sqlite           mutable research state        (auto-created)
 ```
 
@@ -169,7 +200,7 @@ Which artifacts each tool needs:
 | `frontier` / `research-packet` | ✓ | ✓ | optional | optional | optional | — | |
 | `query-expand-terms` | — | — | — | — | — | — | zero corpus deps |
 
-**Minimum viable agent workflow** (just `passage`, `search`, `expand-context`): ingest only, no heavy indexes required.
+**After `sinorag init`:** all tools in the table above are ready except those requiring `vector`.
 
 ---
 
@@ -258,8 +289,8 @@ SinoRAG can export research bundles (`export-readzen`, `graph-build`, `report-bu
 ## Install
 
 ```bash
-git clone https://github.com/yourname/sinorag
-cd sinorag
+git clone https://github.com/LegeApp/SinoRAG
+cd SinoRAG
 cargo install --path .
 ```
 
@@ -267,7 +298,7 @@ cargo install --path .
 
 ## Status
 
-Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`ingest`, `status`, `indexes lexical`, `indexes semantic`, `tools-manifest`, `tool-call`, `run-tools`, `setup opencode`, `agent`, and `mcp`) are supported.
+Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`init`, `status`, `indexes lexical`, `indexes semantic`, `tools-manifest`, `tool-call`, `run-tools`, `setup opencode`, `agent`, and `mcp`) are supported.
 
 SinoRAG supports both JSON CLI and MCP against the same tool registry: use JSON CLI for reproducible command-line workflows, and use MCP for live agent sessions. `sinorag agent` is the maintained opencode wrapper around `sinorag mcp`.
 

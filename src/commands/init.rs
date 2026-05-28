@@ -1,15 +1,15 @@
 //! `sinorag init` — bootstrap the CBETA corpus from a pre-built pack.
 //!
-//! Default path (once a pack is published):
+//! Default path:
 //!   1. curl downloads cbeta-pack.7z from GitHub Releases
 //!   2. sevenz-rust decompresses the .7z in-process (pure Rust LZMA2)
 //!   3. passages.parquet/, dict.parquet/, persons.parquet/, places.parquet/
 //!      are extracted into the data root
-//!   4. doc_table and catalog are built locally (fast)
+//!   4. doc_table, catalog, phrase, and TF-IDF indexes are built locally
+//!      (doc_table + catalog: fast; phrase + TF-IDF: up to several hours)
 //!
-//! Phrase and TF-IDF indexes are intentionally excluded from the pack —
-//! they are 3-10× larger than the parquet and take hours to build.
-//! Build them separately with `sinorag indexes lexical`.
+//! After init, all tools are ready to use except semantic vector search,
+//! which requires a separate `sinorag indexes semantic` run.
 //!
 //! Alternative: `sinorag init --from-raw <PATH>` ingests from a local
 //! CBETA corpus directory (GitHub xml-p5 or ISO xml-iso layout) and
@@ -180,12 +180,14 @@ fn extract_7z(arc_path: &Path, data_root: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Local index build (doc_table + catalog; phrase/tfidf left for user)
+// Local index build (doc_table + catalog + phrase + tfidf; vector left for user)
 // ---------------------------------------------------------------------------
 
 fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
     let doc_table_path = data_root.join("derived").join("doc_table.bin");
     let catalog_path = data_root.join("derived").join("catalog.index");
+    let phrase_path = data_root.join("derived").join("phrase.index");
+    let tfidf_path = data_root.join("derived").join("tfidf.index");
 
     if let Some(parent) = doc_table_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -206,6 +208,22 @@ fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
         Some(doc_table_path.clone()),
     )?;
 
+    eprintln!("\n=== Building phrase + TF-IDF indexes (this may take several hours) ===");
+    crate::commands::build_all_indexes(
+        out_parquet.to_path_buf(),
+        doc_table_path.clone(),
+        phrase_path,
+        tfidf_path,
+        4,       // phrase_gram_len
+        5,       // min_ngram
+        8,       // max_ngram
+        5,       // min_df
+        0.05,    // max_df_ratio
+        200_000, // max_features
+        2048,    // buckets
+        None,    // temp_dir
+    )?;
+
     crate::commands::ingest::initialize_registry_after_ingest(
         data_root,
         &doc_table_path,
@@ -214,11 +232,10 @@ fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
         None,
     )?;
 
-    eprintln!("\nCorpus ready.");
-    eprintln!("  Check state:          sinorag status");
-    eprintln!("  Build lexical indexes (optional, slow, several GB):");
-    eprintln!("                        sinorag indexes lexical");
-    eprintln!("  Add a CEF corpus:     sinorag ingest cef <path>");
+    eprintln!("\nCorpus ready. All tools are available except semantic vector search.");
+    eprintln!("  Check state:               sinorag status");
+    eprintln!("  Add semantic search:       sinorag indexes semantic --model bge-small-zh-v1.5");
+    eprintln!("  Add a CEF corpus:          sinorag ingest cef <path>");
     Ok(())
 }
 
