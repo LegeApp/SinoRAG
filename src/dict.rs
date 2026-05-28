@@ -339,11 +339,12 @@ impl EntityStore {
                     for i in start..start + window {
                         covered[i] = true;
                     }
-                    for e in entries {
-                        results.push(e);
-                        if results.len() >= limit {
-                            break 'outer;
-                        }
+                    // Collect all entries for this name slot before checking the limit so
+                    // that a person+place co-entry isn't split at the boundary.
+                    let remaining = limit.saturating_sub(results.len());
+                    results.extend(entries.iter().take(remaining));
+                    if results.len() >= limit {
+                        break 'outer;
                     }
                 }
             }
@@ -356,30 +357,44 @@ impl EntityStore {
 // Global state — loaded once from parquet at first tool call
 // ---------------------------------------------------------------------------
 
-static DICT_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static DICT_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Set the dict parquet path before any tool calls. Called from ToolEngine::open.
+/// No-op when `path` is None (leaves the lock unset so a later open with a real
+/// path can still succeed). Warns on stderr if called twice with different values.
 pub fn set_dict_path(path: Option<PathBuf>) {
-    let _ = DICT_PATH.set(path);
+    if let Some(p) = path {
+        if DICT_PATH.set(p).is_err() {
+            eprintln!("warn: dict path already set; ignoring second call to set_dict_path");
+        }
+    }
 }
 
-static PERSON_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-static PLACE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static PERSON_PATH: OnceLock<PathBuf> = OnceLock::new();
+static PLACE_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn set_person_path(path: Option<PathBuf>) {
-    let _ = PERSON_PATH.set(path);
+    if let Some(p) = path {
+        if PERSON_PATH.set(p).is_err() {
+            eprintln!("warn: person path already set; ignoring second call to set_person_path");
+        }
+    }
 }
 
 pub fn set_place_path(path: Option<PathBuf>) {
-    let _ = PLACE_PATH.set(path);
+    if let Some(p) = path {
+        if PLACE_PATH.set(p).is_err() {
+            eprintln!("warn: place path already set; ignoring second call to set_place_path");
+        }
+    }
 }
 
 pub fn get_person_path() -> Option<PathBuf> {
-    PERSON_PATH.get()?.clone()
+    PERSON_PATH.get().cloned()
 }
 
 pub fn get_place_path() -> Option<PathBuf> {
-    PLACE_PATH.get()?.clone()
+    PLACE_PATH.get().cloned()
 }
 
 /// Lazy-loaded global EntityStore. Returns None if neither persons nor places parquet exist.
@@ -388,12 +403,12 @@ static ENTITY_STORE: OnceCell<Option<EntityStore>> = OnceCell::const_new();
 async fn get_entity_store() -> &'static Option<EntityStore> {
     ENTITY_STORE
         .get_or_init(|| async {
-            let persons = PERSON_PATH.get().and_then(|p| p.as_ref());
-            let places = PLACE_PATH.get().and_then(|p| p.as_ref());
+            let persons = PERSON_PATH.get().map(|p| p.as_path());
+            let places = PLACE_PATH.get().map(|p| p.as_path());
             if persons.is_none() && places.is_none() {
                 return None;
             }
-            match EntityStore::load(persons.map(|p| p.as_path()), places.map(|p| p.as_path())).await {
+            match EntityStore::load(persons, places).await {
                 Ok(store) => Some(store),
                 Err(e) => {
                     eprintln!("warn: failed to load entity parquet: {e}");
@@ -410,7 +425,7 @@ static DICT_STORE: OnceCell<Option<DictStore>> = OnceCell::const_new();
 async fn get_dict_store() -> &'static Option<DictStore> {
     DICT_STORE
         .get_or_init(|| async {
-            let path = DICT_PATH.get().and_then(|p| p.as_ref());
+            let path = DICT_PATH.get().map(|p| p.as_path());
             match path {
                 Some(p) if p.is_dir() => match DictStore::load(p).await {
                     Ok(store) => Some(store),
@@ -537,7 +552,7 @@ fn collect_text_recursive(value: &serde_json::Value, buf: &mut String) {
     }
 }
 
-fn truncate_gloss(gloss: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_gloss(gloss: &str, max_chars: usize) -> String {
     if gloss.chars().count() <= max_chars {
         return gloss.to_string();
     }

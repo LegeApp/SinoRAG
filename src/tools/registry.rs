@@ -139,7 +139,7 @@ pub fn audience_for_tool(name: &str) -> ToolAudience {
 
 /// Get all tool definitions
 pub fn tool_defs() -> Vec<ToolDef> {
-    vec![
+    let mut defs = vec![
         // Status tool
         ToolDef {
             spec: ToolSpec {
@@ -1324,7 +1324,18 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 Ok(serde_json::to_value(res)?)
             }),
         },
-    ]
+    ];
+
+    // annotate_response injects _term_context and _entity_context into every tool
+    // response. Explicitly allow additional properties in all output schemas so
+    // strict JSON-Schema validators do not reject annotated responses.
+    for def in &mut defs {
+        if let Some(obj) = def.spec.output_schema.as_object_mut() {
+            obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(true));
+        }
+    }
+
+    defs
 }
 
 // Implementations will be added to engine.rs

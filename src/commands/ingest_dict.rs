@@ -97,7 +97,7 @@ fn ingest_source(
         if term.chars().count() < 2 || gloss.is_empty() {
             continue;
         }
-        let gloss = truncate(&gloss, MAX_GLOSS_CHARS);
+        let gloss = crate::dict::truncate_gloss(&gloss, MAX_GLOSS_CHARS);
         batch.push(term, source_name.to_string(), sanskrit, gloss, usage_cat);
         count += 1;
 
@@ -217,10 +217,3 @@ fn parse_pentaglot(bytes: &[u8]) -> Result<Vec<EntryTuple>> {
     Ok(out)
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let t: String = s.chars().take(max_chars).collect();
-    format!("{t}…")
-}

@@ -99,7 +99,7 @@ fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::
                 match local {
                     b"person" => {
                         in_person = true;
-                        person_id = attr_val(e, b"id").or_else(|| attr_val(e, b"xml:id")).unwrap_or_default();
+                        person_id = attr_val(e, b"xml:id").or_else(|| attr_val(e, b"id")).unwrap_or_default();
                         primary_name.clear();
                         primary_name_lang.clear();
                         alt_names.clear();
@@ -237,7 +237,7 @@ fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::
                             continue;
                         }
                         // Truncate concise bio
-                        let bio = concise_bio.as_deref().map(|s| truncate(s, 800));
+                        let bio = concise_bio.as_deref().map(|s| crate::dict::truncate_gloss(s, 800));
                         let alt_json = serde_json::to_string(&alt_names).unwrap_or_default();
                         let teachers_json = serde_json::to_string(&teachers).unwrap_or_default();
                         let students_json = serde_json::to_string(&students).unwrap_or_default();
@@ -330,7 +330,11 @@ fn ingest_places(xml_path: &Path, out_dir: &Path, compression: crate::storage::P
     let mut buf = Vec::new();
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        let ev = reader.read_event_into(&mut buf);
+        // Track whether the current event is a self-closing element: those never emit
+        // a corresponding End event, so they must not increment place_depth.
+        let is_empty_element = matches!(&ev, Ok(Event::Empty(_)));
+        match ev {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let ename = e.name();
                 let local = local_name(ename.as_ref());
@@ -344,11 +348,15 @@ fn ingest_places(xml_path: &Path, out_dir: &Path, compression: crate::storage::P
                                     parent_place_id = Some(key);
                                 }
                             }
-                            place_depth += 1;
+                            // Only non-self-closing nested places get a depth increment;
+                            // Empty elements never emit an End event so must not be counted.
+                            if !is_empty_element {
+                                place_depth += 1;
+                            }
                         } else {
                             // Check if this is an authority entry (xml:id starts with "PL")
-                            let id = attr_val(e, b"id")
-                                .or_else(|| attr_val(e, b"xml:id"))
+                            let id = attr_val(e, b"xml:id")
+                                .or_else(|| attr_val(e, b"id"))
                                 .unwrap_or_default();
                             if id.starts_with("PL") {
                                 in_place = true;
@@ -437,7 +445,7 @@ fn ingest_places(xml_path: &Path, out_dir: &Path, compression: crate::storage::P
                     }
                     PlaceCtx::NoteGeneral => {
                         if description.is_none() {
-                            description = Some(truncate(text, 600));
+                            description = Some(crate::dict::truncate_gloss(text, 600));
                         }
                     }
                     PlaceCtx::None => {}
@@ -524,21 +532,21 @@ fn attr_val(e: &quick_xml::events::BytesStart, name: &[u8]) -> Option<String> {
 }
 
 /// Extract a 4-digit year from a date string like "+0602-02-01 ~ +0603-02-18".
+/// BCE dates are represented as negative years, e.g. "-0563" → "-0563".
 fn extract_year(s: &str) -> String {
-    let s = s.trim_start_matches('+').trim_start_matches('-');
-    // Take first 4 numeric chars
+    let s = s.trim();
+    // Strip the leading sign, preserving BCE (-) vs CE (+).
+    let (bce, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, s.strip_prefix('+').unwrap_or(s))
+    };
     let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
-    if digits.len() == 4 {
+    let year = if digits.len() == 4 {
         digits
     } else {
         s.split_whitespace().next().unwrap_or("").to_string()
-    }
+    };
+    if bce { format!("-{year}") } else { year }
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let t: String = s.chars().take(max_chars).collect();
-    format!("{t}…")
-}

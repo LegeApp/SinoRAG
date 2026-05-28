@@ -90,16 +90,21 @@ pub async fn run(
     let arc_path = tmp_dir.join(PACK_FILENAME);
 
     eprintln!("Downloading pack from {}", url);
-    download_with_curl(url, &arc_path)?;
 
-    eprintln!("\nExtracting pack...");
-    extract_7z(&arc_path, &data_root)?;
-
-    // Sweep temp dir; ignore errors if something remains.
-    let _ = std::fs::remove_file(&arc_path);
-    let _ = std::fs::remove_dir(&tmp_dir);
-
-    build_local_indexes(&data_root, &out_parquet)
+    // download_with_curl, extract_7z, and build_local_indexes are all synchronous
+    // and can block for minutes on large packs — run them on a dedicated blocking thread
+    // so the Tokio runtime stays responsive.
+    let url_owned = url.to_string();
+    tokio::task::spawn_blocking(move || {
+        download_with_curl(&url_owned, &arc_path)?;
+        eprintln!("\nExtracting pack...");
+        extract_7z(&arc_path, &data_root)?;
+        let _ = std::fs::remove_file(&arc_path);
+        let _ = std::fs::remove_dir(&tmp_dir);
+        build_local_indexes(&data_root, &out_parquet)
+    })
+    .await
+    .context("init blocking task panicked")?
 }
 
 // ---------------------------------------------------------------------------
