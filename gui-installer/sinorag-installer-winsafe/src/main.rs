@@ -38,10 +38,13 @@ mod app {
 
     // Freya palette — matches the Freya installer colour constants exactly.
     const CINNABAR: (u8, u8, u8) = (154, 73, 55);
+    const CINNABAR_HOVER: (u8, u8, u8) = (175, 91, 69);
     const PAPER: (u8, u8, u8) = (247, 244, 234);
     const PANEL_BG: (u8, u8, u8) = (236, 231, 216);
     const TEXT: (u8, u8, u8) = (23, 36, 38);
     const MUTED: (u8, u8, u8) = (93, 104, 102);
+    const BORDER: (u8, u8, u8) = (138, 124, 99);
+    const TEXT_INVERSE: (u8, u8, u8) = (255, 249, 238); // button label on cinnabar
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Phase {
@@ -118,7 +121,6 @@ mod app {
 
         // Controls kept as fields so their event handlers and Win32 lifetimes are managed.
         // Fields not read after setup are allowed dead_code.
-        title: gui::Label,
         #[allow(dead_code)]
         subtitle: gui::Label,
         #[allow(dead_code)]
@@ -128,7 +130,10 @@ mod app {
         desktop_cb: gui::CheckBox,
         start_menu_cb: gui::CheckBox,
         step_label: gui::Label,
-        progress: gui::ProgressBar,
+        // Owner-drawn progress bar (an SS_OWNERDRAW static). The native ProgressBar's
+        // PBM_SETBKCOLOR/PBM_SETBARCOLOR rendered an unthemed black trough, so we paint
+        // it ourselves on WM_DRAWITEM to guarantee the cinnabar/cream palette.
+        progress_bar: gui::Label,
         log_edit: gui::Edit,
         action_btn: gui::Button,
 
@@ -167,9 +172,10 @@ mod app {
                 )?;
                 g.leak()
             };
-            let hfont_title = {
-                let mut lf = w::LOGFONT::new_face(-52, "Segoe UI"); // ≈38pt at 96 DPI
-                lf.lfWeight = co::FW::BOLD;
+            let hfont_subtitle = {
+                // Header font — slightly larger than body, semibold.
+                let mut lf = w::LOGFONT::new_face(-21, "Segoe UI"); // ≈16pt at 96 DPI
+                lf.lfWeight = co::FW::SEMIBOLD;
                 let mut g = w::HFONT::CreateFontIndirect(&lf)?;
                 g.leak()
             };
@@ -187,18 +193,12 @@ mod app {
                 ..Default::default()
             });
 
-            // Title label — large bold heading matching the Freya version.
-            let title = gui::Label::new(&wnd, gui::LabelOpts {
-                text: "SinoRAG",
-                position: gui::dpi(20, 14),
-                size: gui::dpi(460, 44),
-                ..Default::default()
-            });
-
+            // Header — centered, slightly larger than body text.
             let subtitle = gui::Label::new(&wnd, gui::LabelOpts {
                 text: "Buddhist corpus research engine",
-                position: gui::dpi(22, 58),
-                size: gui::dpi(440, 22),
+                position: gui::dpi(20, 30),
+                size: gui::dpi(448, 30),
+                control_style: co::SS::CENTER,
                 ..Default::default()
             });
 
@@ -250,9 +250,11 @@ mod app {
                 ..Default::default()
             });
 
-            let progress = gui::ProgressBar::new(&wnd, gui::ProgressBarOpts {
+            let progress_bar = gui::Label::new(&wnd, gui::LabelOpts {
+                text: "",
                 position: gui::dpi(20, 250),
                 size: gui::dpi(448, 22),
+                control_style: co::SS::OWNERDRAW,
                 ..Default::default()
             });
 
@@ -280,12 +282,13 @@ mod app {
                 position: gui::dpi(20, 560),
                 width: action_w,
                 height: action_h,
+                // Owner-drawn so we can paint it CINNABAR (themed buttons ignore colour messages).
+                control_style: co::BS::OWNERDRAW,
                 ..Default::default()
             });
 
             let new_self = Self {
                 wnd,
-                title,
                 subtitle,
                 path_label,
                 path_edit,
@@ -293,7 +296,7 @@ mod app {
                 desktop_cb,
                 start_menu_cb,
                 step_label,
-                progress,
+                progress_bar,
                 log_edit,
                 action_btn,
                 state,
@@ -302,7 +305,7 @@ mod app {
                 progress_floor: Rc::new(Cell::new(0)),
             };
 
-            new_self.events(br_paper, br_panel, hfont_title, hfont_ui);
+            new_self.events(br_paper, br_panel, hfont_subtitle, hfont_ui);
             new_self.wnd.run_main(None)
         }
 
@@ -310,64 +313,47 @@ mod app {
             &self,
             br_paper: w::HBRUSH,
             br_panel: w::HBRUSH,
-            hfont_title: w::HFONT,
+            hfont_subtitle: w::HFONT,
             hfont_ui: w::HFONT,
         ) {
             // HBRUSH/HFONT are not Copy. Create raw non-owning copies for closures that
             // only borrow the handle value (correct for WM_CTLCOLOR return and WM_SETFONT).
             // raw_copy() is unsafe but semantically fine: the GDI objects outlive the process.
             let br_paper_for_static = unsafe { br_paper.raw_copy() };
+            // Separate copy for the owner-draw button (hfont_ui is moved into wm_create below).
+            let hfont_ui_btn = unsafe { hfont_ui.raw_copy() };
 
             // Clones for captures — gui controls are cheap reference-counted wrappers.
-            let progress = self.progress.clone();
             let wnd_clone = self.wnd.clone();
-            let title_ctrl = self.title.clone();
             let subtitle_ctrl = self.subtitle.clone();
             let path_label_ctrl = self.path_label.clone();
             let step_label_ctrl = self.step_label.clone();
             let path_edit_ctrl = self.path_edit.clone();
             let desktop_cb_ctrl = self.desktop_cb.clone();
             let start_menu_cb_ctrl = self.start_menu_cb.clone();
-            let action_btn_ctrl = self.action_btn.clone();
             let log_edit_ctrl = self.log_edit.clone();
 
             self.wnd.on().wm_create(move |_| {
-                progress.set_range(0, 100);
-                progress.set_position(0);
                 wnd_clone.hwnd().SetTimer(1, 75, None)?;
 
-                // Progress bar: CINNABAR fill, PANEL_BG trough — matches Freya palette.
+                // Header font on the subtitle, Segoe UI on the rest.
+                // raw_copy() borrows the captured handle and produces a non-owning value.
+                // This is safe here: the leaked GDI objects live for the process.
                 unsafe {
-                    let _ = progress.hwnd().SendMessage(w::msg::pbm::SetBarColor {
-                        color: Some(w::COLORREF::from_rgb(
-                            CINNABAR.0, CINNABAR.1, CINNABAR.2,
-                        )),
-                    });
-                    let _ = progress.hwnd().SendMessage(w::msg::pbm::SetBkColor {
-                        color: Some(w::COLORREF::from_rgb(
-                            PANEL_BG.0, PANEL_BG.1, PANEL_BG.2,
-                        )),
-                    });
-
-                    // Fonts: large bold on title, Segoe UI on everything else.
-                    // raw_copy() borrows the captured handle and produces a non-owning value.
-                    // This is safe here: the leaked GDI objects live for the process.
-                    let _ = title_ctrl.hwnd().SendMessage(w::msg::wm::SetFont {
-                        hfont: unsafe { hfont_title.raw_copy() },
+                    let _ = subtitle_ctrl.hwnd().SendMessage(w::msg::wm::SetFont {
+                        hfont: hfont_subtitle.raw_copy(),
                         redraw: true,
                     });
                     for hwnd in [
-                        subtitle_ctrl.hwnd(),
                         path_label_ctrl.hwnd(),
                         step_label_ctrl.hwnd(),
                         path_edit_ctrl.hwnd(),
                         desktop_cb_ctrl.hwnd(),
                         start_menu_cb_ctrl.hwnd(),
-                        action_btn_ctrl.hwnd(),
                         log_edit_ctrl.hwnd(),
                     ] {
                         let _ = hwnd.SendMessage(w::msg::wm::SetFont {
-                            hfont: unsafe { hfont_ui.raw_copy() },
+                            hfont: hfont_ui.raw_copy(),
                             redraw: true,
                         });
                     }
@@ -383,14 +369,11 @@ mod app {
                 Ok(1)
             });
 
-            // Static controls (labels, checkboxes): PAPER background, appropriate text colour.
-            // Title uses INK for visual weight; subtitle uses MUTED; everything else uses TEXT.
-            let title_for_color = self.title.clone();
+            // Static controls (labels, checkboxes): PAPER background. The subtitle/header
+            // uses MUTED; everything else uses TEXT.
             let subtitle_for_color = self.subtitle.clone();
             self.wnd.on().wm_ctl_color_static(move |p| {
-                let color = if p.hwnd == *title_for_color.hwnd() {
-                    w::COLORREF::from_rgb(18, 50, 53) // INK
-                } else if p.hwnd == *subtitle_for_color.hwnd() {
+                let color = if p.hwnd == *subtitle_for_color.hwnd() {
                     w::COLORREF::from_rgb(MUTED.0, MUTED.1, MUTED.2)
                 } else {
                     w::COLORREF::from_rgb(TEXT.0, TEXT.1, TEXT.2)
@@ -408,6 +391,86 @@ mod app {
                     PANEL_BG.0, PANEL_BG.1, PANEL_BG.2,
                 ))?;
                 Ok(unsafe { br_panel.raw_copy() })
+            });
+
+            // Owner-draw both the action button (flat CINNABAR, matches the Freya primary
+            // button) and the progress bar (cinnabar fill on a cream trough). Themed
+            // controls ignore colour messages, so we paint them ourselves on WM_DRAWITEM,
+            // which the parent receives for every owner-draw child.
+            let action_btn_for_draw = self.action_btn.clone();
+            let progress_for_draw = self.progress_bar.clone();
+            let progress_pct = self.progress_floor.clone();
+            self.wnd.on().wm(co::WM::DRAWITEM, move |p: w::msg::WndMsg| {
+                let dis = unsafe { &*(p.lparam as *const w::DRAWITEMSTRUCT) };
+
+                // ── Progress bar ────────────────────────────────────────────
+                if dis.hwndItem == *progress_for_draw.hwnd() {
+                    let full = dis.rcItem;
+                    let border = w::HBRUSH::CreateSolidBrush(
+                        w::COLORREF::from_rgb(BORDER.0, BORDER.1, BORDER.2),
+                    )?;
+                    let trough = w::HBRUSH::CreateSolidBrush(
+                        w::COLORREF::from_rgb(PANEL_BG.0, PANEL_BG.1, PANEL_BG.2),
+                    )?;
+                    // 1px border, then the cream trough inset by 1px.
+                    dis.hDC.FillRect(full, &border)?;
+                    let inner = w::RECT {
+                        left: full.left + 1,
+                        top: full.top + 1,
+                        right: full.right - 1,
+                        bottom: full.bottom - 1,
+                    };
+                    dis.hDC.FillRect(inner, &trough)?;
+                    // Cinnabar fill proportional to percent.
+                    let pct = progress_pct.get().min(100);
+                    let span = inner.right - inner.left;
+                    let fill_w = span * pct as i32 / 100;
+                    if fill_w > 0 {
+                        let fill = w::HBRUSH::CreateSolidBrush(
+                            w::COLORREF::from_rgb(CINNABAR.0, CINNABAR.1, CINNABAR.2),
+                        )?;
+                        let bar = w::RECT {
+                            left: inner.left,
+                            top: inner.top,
+                            right: inner.left + fill_w,
+                            bottom: inner.bottom,
+                        };
+                        dis.hDC.FillRect(bar, &fill)?;
+                    }
+                    return Ok(1);
+                }
+
+                // ── Action button ───────────────────────────────────────────
+                if dis.hwndItem != *action_btn_for_draw.hwnd() {
+                    return Ok(0); // not one of our owner-draw controls
+                }
+                let pressed = dis.itemState.has(co::ODS::SELECTED);
+                let disabled = dis.itemState.has(co::ODS::DISABLED);
+                let fill = if disabled {
+                    w::COLORREF::from_rgb(150, 110, 100) // muted cinnabar
+                } else if pressed {
+                    w::COLORREF::from_rgb(CINNABAR_HOVER.0, CINNABAR_HOVER.1, CINNABAR_HOVER.2)
+                } else {
+                    w::COLORREF::from_rgb(CINNABAR.0, CINNABAR.1, CINNABAR.2)
+                };
+                let brush = w::HBRUSH::CreateSolidBrush(fill)?;
+                dis.hDC.FillRect(dis.rcItem, &brush)?;
+
+                // Centered label in the inverse (cream) text colour, Segoe UI.
+                // SelectObject returns a guard that re-selects the previous font on drop.
+                let font = unsafe { hfont_ui_btn.raw_copy() };
+                let _prev_font = dis.hDC.SelectObject(&font);
+                dis.hDC.SetBkMode(co::BKMODE::TRANSPARENT)?;
+                dis.hDC.SetTextColor(w::COLORREF::from_rgb(
+                    TEXT_INVERSE.0, TEXT_INVERSE.1, TEXT_INVERSE.2,
+                ))?;
+                let label = action_btn_for_draw.hwnd().GetWindowText()?;
+                dis.hDC.DrawText(
+                    &label,
+                    dis.rcItem,
+                    co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE,
+                )?;
+                Ok(1) // handled
             });
 
             let me = self.clone();
@@ -484,7 +547,7 @@ mod app {
             self.set_enabled_controls(false)?;
             self.set_action_label("Installing")?;
             self.set_step("Starting installation")?;
-            self.progress.set_position(0);
+            self.repaint_progress()?;
             self.reset_log(&format!("Target path: {path_display}\r\n"))?;
 
             let (tx, rx) = flume::unbounded::<InstallerEvent>();
@@ -526,7 +589,7 @@ mod app {
                         s.step = step.clone();
                     }
                     self.set_step(&step)?;
-                    self.progress.set_position(pct);
+                    self.repaint_progress()?;
                     self.append_log(&step)?;
                 }
                 InstallerEvent::Log(line) => {
@@ -563,7 +626,8 @@ mod app {
                             )
                         }
                     }; // borrow_mut dropped here — safe to call UI methods below
-                    self.progress.set_position(100);
+                    self.progress_floor.set(100);
+                    self.repaint_progress()?;
                     self.set_enabled_controls(true)?;
                     self.set_action_label("Open install folder")?;
                     self.set_step(&step_text)?;
@@ -597,6 +661,12 @@ mod app {
 
         fn set_step(&self, text: &str) -> w::SysResult<()> {
             self.step_label.hwnd().SetWindowText(text)
+        }
+
+        /// Invalidate the owner-drawn progress bar so it repaints with the current
+        /// progress_floor percentage (drives a WM_DRAWITEM on the parent).
+        fn repaint_progress(&self) -> w::SysResult<()> {
+            self.progress_bar.hwnd().InvalidateRect(None, false)
         }
 
         fn set_action_label(&self, text: &str) -> w::SysResult<()> {
