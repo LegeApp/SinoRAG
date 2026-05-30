@@ -1,0 +1,3 @@
+[submodule "gui-installer/freya"]
+	path = gui-installer/freya
+	url = https://github.com/marc2332/freya

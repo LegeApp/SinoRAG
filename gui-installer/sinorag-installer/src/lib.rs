@@ -1,0 +1,231 @@
+/// Shared Windows utilities used by both the installer and uninstaller binaries.
+/// Everything here is cfg-gated to Windows; the lib target is otherwise empty.
+
+#[cfg(target_os = "windows")]
+pub mod win_utils {
+    use std::path::PathBuf;
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegOpenKeyExW, RegQueryValueExW,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE,
+        REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+    };
+    use windows::Win32::UI::Shell::{
+        FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_Programs, KNOWN_FOLDER_FLAG,
+        SHGetKnownFolderPath,
+    };
+    use windows::core::{GUID, PCWSTR};
+
+    pub const UNINSTALL_SUBKEY: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\SinoRAG";
+
+    // ── Wide-string helpers ────────────────────────────────────────────────
+
+    pub fn to_wide(path: &std::path::Path) -> Vec<u16> {
+        path.to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    pub fn to_wide_str(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    // ── Shell known-folder paths ───────────────────────────────────────────
+
+    pub fn known_folder_path(id: &GUID) -> Option<PathBuf> {
+        unsafe {
+            let pwstr = SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG(0), None).ok()?;
+            let result = pwstr.to_string().ok().map(PathBuf::from);
+            // PWSTR from SHGetKnownFolderPath must be freed with CoTaskMemFree.
+            CoTaskMemFree(Some(pwstr.as_ptr() as *const std::ffi::c_void));
+            result
+        }
+    }
+
+    pub fn desktop_shortcut_path() -> Option<PathBuf> {
+        known_folder_path(&FOLDERID_Desktop).map(|p| p.join("SinoRAG.lnk"))
+    }
+
+    pub fn start_menu_shortcut_path() -> Option<PathBuf> {
+        known_folder_path(&FOLDERID_Programs).map(|p| p.join("SinoRAG").join("SinoRAG.lnk"))
+    }
+
+    pub fn default_install_path() -> PathBuf {
+        known_folder_path(&FOLDERID_LocalAppData)
+            .map(|p| p.join("Programs").join("SinoRAG"))
+            .unwrap_or_else(|| PathBuf::from(r"C:\SinoRAG"))
+    }
+
+    // ── Registry: uninstall entry ─────────────────────────────────────────
+
+    /// Write (or overwrite) the HKCU uninstall entry so the install appears
+    /// in Settings → Apps. Errors are silently ignored; the entry is cosmetic.
+    pub fn write_uninstall_entry(install_path: &std::path::Path, version: &str) {
+        let _ = try_write_uninstall_entry(install_path, version);
+    }
+
+    fn try_write_uninstall_entry(
+        install_path: &std::path::Path,
+        version: &str,
+    ) -> windows::core::Result<()> {
+        let subkey = to_wide_str(UNINSTALL_SUBKEY);
+        let mut hkey = HKEY::default();
+        unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR::from_raw(subkey.as_ptr()),
+                0,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                None,
+                &mut hkey,
+                None,
+            )
+            .ok()?;
+        }
+
+        let display_name = format!("SinoRAG {version}");
+        let icon_path = install_path.join("SinoRAG.ico").display().to_string();
+        let uninstall_str = install_path
+            .join("sinorag-uninstaller.exe")
+            .display()
+            .to_string();
+        let install_loc = install_path.display().to_string();
+
+        set_reg_sz(hkey, "DisplayName", &display_name);
+        set_reg_sz(hkey, "DisplayVersion", version);
+        set_reg_sz(hkey, "DisplayIcon", &icon_path);
+        set_reg_sz(hkey, "Publisher", "SinoRAG");
+        set_reg_sz(hkey, "InstallLocation", &install_loc);
+        set_reg_sz(hkey, "UninstallString", &uninstall_str);
+        set_reg_dword(hkey, "NoModify", 1);
+        set_reg_dword(hkey, "NoRepair", 1);
+
+        unsafe { RegCloseKey(hkey).ok() }
+    }
+
+    fn set_reg_sz(hkey: HKEY, name: &str, value: &str) {
+        let name_w = to_wide_str(name);
+        let value_w: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        let bytes =
+            unsafe { std::slice::from_raw_parts(value_w.as_ptr() as *const u8, value_w.len() * 2) };
+        unsafe {
+            let _ = RegSetValueExW(
+                hkey,
+                PCWSTR::from_raw(name_w.as_ptr()),
+                0,
+                REG_SZ,
+                Some(bytes),
+            );
+        }
+    }
+
+    fn set_reg_dword(hkey: HKEY, name: &str, value: u32) {
+        let name_w = to_wide_str(name);
+        let bytes = value.to_le_bytes();
+        unsafe {
+            let _ = RegSetValueExW(
+                hkey,
+                PCWSTR::from_raw(name_w.as_ptr()),
+                0,
+                REG_DWORD,
+                Some(&bytes),
+            );
+        }
+    }
+
+    /// Delete the HKCU uninstall entry. No-op if the key doesn't exist.
+    pub fn delete_uninstall_entry() {
+        let subkey = to_wide_str(UNINSTALL_SUBKEY);
+        unsafe {
+            let _ = RegDeleteKeyW(
+                HKEY_CURRENT_USER,
+                PCWSTR::from_raw(subkey.as_ptr()),
+            );
+        }
+    }
+
+    /// Read the InstallLocation value from the HKCU uninstall key.
+    pub fn read_install_location() -> Option<PathBuf> {
+        let subkey = to_wide_str(UNINSTALL_SUBKEY);
+        let mut hkey = HKEY::default();
+        let opened = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR::from_raw(subkey.as_ptr()),
+                0,
+                KEY_READ,
+                &mut hkey,
+            )
+        };
+        if opened != ERROR_SUCCESS {
+            return None;
+        }
+
+        let value_name = to_wide_str("InstallLocation");
+        let mut buf = vec![0u16; 520];
+        let mut data_size = (buf.len() * 2) as u32;
+        let mut kind = REG_VALUE_TYPE::default();
+        let queried = unsafe {
+            RegQueryValueExW(
+                hkey,
+                PCWSTR::from_raw(value_name.as_ptr()),
+                None,
+                Some(&mut kind),
+                Some(buf.as_mut_ptr() as *mut u8),
+                Some(&mut data_size),
+            )
+        };
+        unsafe { let _ = RegCloseKey(hkey); }
+
+        if queried != ERROR_SUCCESS {
+            return None;
+        }
+
+        // data_size is in bytes; strip the trailing null code unit.
+        let char_count = (data_size as usize / 2).saturating_sub(1);
+        let s = String::from_utf16_lossy(&buf[..char_count]);
+        if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    }
+
+    // ── Single-instance mutex ─────────────────────────────────────────────
+
+    /// Acquire a named mutex so only one installer window runs at a time.
+    /// Returns an opaque guard; drop it to release. Returns None if another
+    /// instance already holds the mutex.
+    pub fn try_single_instance() -> Option<SingleInstanceGuard> {
+        use windows::Win32::Foundation::BOOL;
+        use windows::Win32::System::Threading::CreateMutexW;
+
+        let name = to_wide_str("Local\\SinoRAGInstaller");
+        let handle = unsafe {
+            CreateMutexW(
+                None,
+                BOOL(1), // bInitialOwner = TRUE
+                PCWSTR::from_raw(name.as_ptr()),
+            )
+        }
+        .ok()?;
+
+        // If the mutex already existed we got it back but don't own it.
+        let last_err = unsafe { windows::Win32::Foundation::GetLastError() };
+        if last_err == ERROR_ALREADY_EXISTS {
+            return None;
+        }
+        Some(SingleInstanceGuard(handle))
+    }
+
+    pub struct SingleInstanceGuard(windows::Win32::Foundation::HANDLE);
+
+    impl Drop for SingleInstanceGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+}
