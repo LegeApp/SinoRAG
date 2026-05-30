@@ -4,7 +4,7 @@
 //! Designed so first-time users (or agents) can answer "what do I have,
 //! what's missing, and what should I run next?" in a single command.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,7 +22,7 @@ pub fn check_index_prerequisites(parquet: &Path, doc_table: &Path) -> Result<()>
     if !doc_table.exists() {
         anyhow::bail!(
             "Document table not found at {}.\n\
-             Run `sinorag doc-table-build` first (it reads from the passage store).\n\
+             Run `sinorag init` to build all required indexes.\n\
              Run `sinorag status` to see what's been built.",
             doc_table.display()
         );
@@ -31,7 +31,17 @@ pub fn check_index_prerequisites(parquet: &Path, doc_table: &Path) -> Result<()>
 }
 
 pub fn run(data: PathBuf) -> Result<()> {
+    // Auto-heal: if ingest wrote (or pack-prep renamed) to passages-raw.parquet
+    // and the canonical passages.parquet doesn't exist yet, rename it now.
     let parquet_root = data.join("passages.parquet");
+    if crate::storage::heal_raw_parquet(&parquet_root)
+        .context("renaming passages-raw.parquet → passages.parquet")?
+    {
+        eprintln!(
+            "Note: found passages-raw.parquet but not passages.parquet — renamed automatically."
+        );
+    }
+
     let derived = data.join("derived");
     let doc_table = derived.join("doc_table.bin");
     let catalog_index = derived.join("catalog.index");
@@ -93,6 +103,14 @@ pub fn run(data: PathBuf) -> Result<()> {
         println!("  1. Ingest a corpus: `sinorag ingest cbeta <PATH>`");
         return Ok(());
     }
+    if !doc_table.exists() {
+        println!("  • Build all required indexes (doc_table, catalog, phrase, tf-idf):");
+        println!("      sinorag init");
+        println!();
+        println!("  Then add semantic search (takes 1–2 hours):");
+        println!("      sinorag index vector-update --model bge-small-zh-v1.5");
+        return Ok(());
+    }
     let parquet_bytes = super::estimate::dir_size(&parquet_root);
     let mut shown_any = false;
     if !phrase_index.exists() && !tfidf_index.exists() {
@@ -119,7 +137,7 @@ pub fn run(data: PathBuf) -> Result<()> {
     println!("  • Interactive agent: `sinorag setup opencode` then `sinorag agent`");
     if !vector_index.exists() {
         println!(
-            "  • Semantic discovery: `sinorag indexes semantic` with a local-embeddings build, or `sinorag index vector-export` + external embeddings + `sinorag index vector-build`"
+            "  • Semantic search (slow, 1–2 h): `sinorag index vector-update --model bge-small-zh-v1.5`"
         );
     }
     println!(

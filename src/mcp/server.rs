@@ -23,9 +23,7 @@ use rmcp::{
 };
 use serde_json::Value;
 
-use crate::tools::{
-    audience_for_tool, call_tool_enveloped, tool_defs, EngineConfig, ToolAudience, ToolEngine,
-};
+use crate::tools::{call_tool_enveloped, tool_defs, EngineConfig, ToolAudience, ToolEngine};
 
 /// Embedded doctrine shown to the model as the MCP server's `instructions`
 /// string. The wrapping `agent` launcher uses the same fragments to build
@@ -45,7 +43,7 @@ impl SinoragMcpServer {
     fn build_tools() -> Vec<Tool> {
         tool_defs()
             .into_iter()
-            .filter(|def| audience_for_tool(def.spec.name) != ToolAudience::InternalDebug)
+            .filter(|def| def.spec.audience != ToolAudience::InternalDebug)
             .map(|def| {
                 let input_schema = Arc::new(json_value_to_object(&def.spec.input_schema));
                 let output_schema = json_value_to_object(&def.spec.output_schema);

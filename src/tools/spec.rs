@@ -40,6 +40,7 @@ pub struct ToolExample {
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
     pub name: &'static str,
+    pub audience: ToolAudience,
     pub description: &'static str,
     pub input_schema: Value,
     pub output_schema: Value,

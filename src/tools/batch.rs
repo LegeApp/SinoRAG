@@ -202,7 +202,6 @@ async fn run_jobs_with_dependencies<W: std::io::Write>(
     continue_on_error: bool,
 ) -> Result<()> {
     use std::collections::HashMap;
-    use std::io::Write;
 
     let mut completed: HashMap<String, bool> = HashMap::new();
 

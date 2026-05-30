@@ -30,8 +30,7 @@ use std::sync::OnceLock;
 /// compile time. Sourced from `CBETA-Translator/CBETA_Sorting_Data/` and
 /// copied to `assets/cbeta/` in this repo so a built `sinorag` runs with
 /// zero external setup. Refresh by overwriting that file and rebuilding.
-const EMBEDDED_BYTES: &[u8] =
-    include_bytes!("../assets/cbeta/buddhist_metadata_analysis.json");
+const EMBEDDED_BYTES: &[u8] = include_bytes!("../assets/cbeta/buddhist_metadata_analysis.json");
 
 static EMBEDDED: OnceLock<SidecarIndex> = OnceLock::new();
 
@@ -341,6 +340,92 @@ fn parse_catalog_fields(rest: &str) -> (String, Option<u32>, String) {
 }
 
 // ---------------------------------------------------------------------------
+// Catalog translator parsing: shared by tei.rs and patch_metadata.rs
+// ---------------------------------------------------------------------------
+
+/// Parse `translator_field` from sutra_sch.lst into (author, period, period_rank).
+///
+/// Format examples:
+///   "後秦 佛陀耶舍共竺佛念譯"  →  dynasty="後秦", author="佛陀耶舍共竺佛念"
+///   "唐 不空譯"               →  dynasty="唐", author="不空"
+///   "失譯"                    →  no dynasty, author="失譯"
+///   "黃謹良譯"                →  no dynasty (modern), author="黃謹良"
+///   ""                        →  nothing
+pub fn parse_catalog_translator(field: &str) -> (Option<String>, Option<String>, i32) {
+    let field = field.trim();
+    if field.is_empty() {
+        return (None, None, 99);
+    }
+
+    // Conventional "no known translator" strings — preserve as-is.
+    const ANONYMOUS: &[&str] = &["失譯", "佚名", "失名", "不詳"];
+    if ANONYMOUS.contains(&field) {
+        return (Some(field.to_string()), None, 99);
+    }
+
+    let (dynasty_raw, translator_raw) = if let Some(sp) = field.find(' ') {
+        (&field[..sp], field[sp + 1..].trim())
+    } else {
+        ("", field)
+    };
+
+    let (period, rank) = dynasty_to_english(dynasty_raw);
+    let dynasty_known = period.is_some();
+
+    let translator_str = if dynasty_known { translator_raw } else { field };
+
+    let author = strip_translation_verb(translator_str);
+    let author = if author.is_empty() {
+        None
+    } else {
+        Some(author.to_string())
+    };
+
+    (author, period, rank)
+}
+
+/// Map a Chinese dynasty name to an English period string + sort rank.
+pub fn dynasty_to_english(d: &str) -> (Option<String>, i32) {
+    let (p, r) = match d {
+        "前漢" | "後漢" | "東漢" | "漢" => ("Han", 1),
+        "吳" | "曹魏" | "蜀" | "魏" => ("Three Kingdoms", 2),
+        "晉" | "晉世" | "西晉" | "東晉" => ("Jin", 3),
+        "劉宋" | "南齊" | "蕭齊" | "梁" | "陳" | "南北朝" | "北涼" | "北魏" | "元魏" | "後魏"
+        | "東魏" | "西魏" | "北齊" | "高齊" | "北周" | "宇文周" | "後秦" | "姚秦" | "前秦"
+        | "符秦" | "乞伏秦" | "西秦" | "前涼" | "後趙" | "後燕" | "前燕" | "南涼" | "胡" => {
+            ("Northern and Southern", 4)
+        }
+        "隋" => ("Sui", 5),
+        "唐" | "南唐" => ("Tang", 6),
+        "五代" | "後唐" | "後梁" | "後晉" | "後周" | "南漢" | "吳越" => {
+            ("Five Dynasties", 7)
+        }
+        "宋" | "北宋" | "南宋" | "唐宋" | "遼" | "金" => ("Song", 8),
+        "元" => ("Yuan", 9),
+        "明" => ("Ming", 10),
+        "清" => ("Qing", 11),
+        "民國" | "近代" | "現代" => ("Modern", 99),
+        _ => return (None, 99),
+    };
+    (Some(p.to_string()), r)
+}
+
+/// Strip trailing translation/authorship verb characters.
+pub fn strip_translation_verb(s: &str) -> &str {
+    const VERBS: &[char] = &[
+        '譯', '撰', '著', '編', '纂', '記', '錄', '疏', '注', '解', '造', '集', '製', '述', '說',
+        '釋',
+    ];
+    let s = s.trim_end_matches(|c| VERBS.contains(&c));
+    let s = if s.ends_with('等') {
+        &s[..s.len() - '等'.len_utf8()]
+    } else {
+        s
+    };
+    s.trim()
+}
+
+// ---------------------------------------------------------------------------
 // Cross-canon parallel works: cmp.lst
 // Source: https://github.com/zhaowenping/cbeta (idx/cmp.lst)
 // ---------------------------------------------------------------------------
@@ -485,9 +570,15 @@ mod tests {
     #[test]
     fn parallel_works_loads() {
         let pw = parallel_works();
-        assert!(pw.len() > 50, "expected >50 entries with parallels, got {}", pw.len());
+        assert!(
+            pw.len() > 50,
+            "expected >50 entries with parallels, got {}",
+            pw.len()
+        );
         // T01n0005 (佛般泥洹經) has parallels T01n0006, T01n0007, etc.
-        let refs = pw.parallels("T01n0005").expect("T01n0005 should have parallels");
+        let refs = pw
+            .parallels("T01n0005")
+            .expect("T01n0005 should have parallels");
         assert!(refs.contains(&"T01n0006".to_string()));
         assert!(refs.contains(&"T01n0007".to_string()));
     }

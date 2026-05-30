@@ -231,12 +231,12 @@ fn strip_markdown(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::pdf_report;
-    use serde_json::json;
-
     #[cfg(target_os = "windows")]
     #[test]
     fn pdf_report_writes_basic_pdf_from_json() {
+        use super::pdf_report;
+        use serde_json::json;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let input = dir.path().join("report.json");
         let out = dir.path().join("report.pdf");

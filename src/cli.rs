@@ -9,8 +9,6 @@ pub enum IngestSource {
     Cbeta,
     /// CBETA Buddhist canon from the official ISO distribution (xml-iso layout, one file per fascicle).
     CbetaIso,
-    /// Kanripo plain-text classical Chinese repository.
-    Kanripo,
     /// CEF (Corpus Exchange Format) JSON-lines file.
     Cef,
     /// Terebess.hu Zen biography pages (SingleFile-saved HTML).
@@ -22,9 +20,10 @@ pub enum IngestSource {
 #[command(version)]
 #[command(about = "SinoRAGD — Buddhist corpus research engine.\n\n\
 User flow:\n  \
-  1. sinorag ingest <source> <path>     # build the corpus (one-time, slow)\n  \
-  2. sinorag status                     # see what's built / what's next\n  \
-  3. sinorag indexes lexical            # phrase + TF-IDF indexes\n  \
+  1. sinorag init                       # Stage 1 (fast, <20 min): corpus + all fast indexes\n  \
+  2. sinorag index vector-update \\      # Stage 2 (slow, 1–2 h): semantic search\n     \
+     --model bge-small-zh-v1.5\n  \
+  3. sinorag status                     # see what's built / what's next\n  \
   4. sinorag tools-manifest             # discover JSON tool schemas\n  \
   5. sinorag setup opencode && \\\n     \
      sinorag agent                      # talk to the corpus from a TUI\n\n\
@@ -56,8 +55,7 @@ pub enum IndexCommand {
     /// Build the phrase (n-gram) index for exact CJK phrase lookup.
     ///
     /// Required for canonical-anchor / first-attestation / phrase-history
-    /// tools. Slow on large corpora — expect 1–3 hours on CBETA and
-    /// multiple GB on disk. Not required for basic search/passage tools.
+    /// tools.
     Phrase {
         #[arg(long, default_value = "data/passages.parquet", hide = true)]
         parquet: PathBuf,
@@ -75,8 +73,7 @@ pub enum IndexCommand {
 
     /// Build the TF-IDF index for similarity / frontier discovery.
     ///
-    /// Required for `similar`, `frontier`, and related tools. Slow on
-    /// large corpora — expect 1–2 hours on CBETA and multiple GB on disk.
+    /// Required for `similar`, `frontier`, and related tools.
     /// Not required for basic search/passage tools.
     Tfidf {
         #[arg(long, default_value = "data/passages.parquet", hide = true)]
@@ -193,20 +190,24 @@ pub enum IndexCommand {
     /// REQUIREMENTS
     ///
     /// Build flags:
-    ///   cargo build --release --features local-embeddings-tensorrt
+    ///   cargo build --release --features tensorrt
     ///
-    /// Runtime DLLs (all must be on PATH or in --tensorrt-root/bin):
-    ///   onnxruntime.dll          — ONNX Runtime (set ORT_DYLIB_PATH to override)
-    ///   ORTTensorRTEp.dll        — TensorRT execution-provider plugin for ORT
-    ///   nvinfer_10.dll           — TensorRT inference library (from TensorRT install)
-    ///   nvonnxparser_10.dll      — TensorRT ONNX parser (from TensorRT install)
-    ///   cudart64_12.dll          — CUDA runtime (from CUDA toolkit)
-    ///   cublas64_12.dll          — cuBLAS (from CUDA toolkit)
-    ///   cublasLt64_12.dll        — cuBLAS-Lt (from CUDA toolkit)
+    /// Runtime libraries:
+    ///   ONNX Runtime shared lib  — set ORT_DYLIB_PATH if it is not next to the executable
+    ///   TensorRT ORT EP plugin   — set SINORAG_TENSORRT_EP_DLL / ORT_TENSORRT_EP_DLL if needed
+    ///   TensorRT + CUDA libs     — visible via --tensorrt-root, SINORAG_TENSORRT_ROOT, or linker path
+    ///
+    /// Linux examples include libonnxruntime_providers_tensorrt.so,
+    /// libnvinfer.so, libnvinfer_plugin.so, libnvonnxparser.so, libcudart.so,
+    /// libcublas.so, and libcublasLt.so.
+    ///
+    /// Windows examples include ORTTensorRTEp.dll, nvinfer_10.dll,
+    /// nvonnxparser_10.dll, cudart64_12.dll, cublas64_12.dll, and
+    /// cublasLt64_12.dll.
     ///
     /// Environment variables:
-    ///   ORT_DYLIB_PATH           — path to onnxruntime.dll
-    ///   SINORAG_TENSORRT_EP_DLL  — path to ORTTensorRTEp.dll
+    ///   ORT_DYLIB_PATH           — path to ONNX Runtime shared library
+    ///   SINORAG_TENSORRT_EP_DLL  — path to TensorRT ORT EP plugin
     ///   SINORAG_TENSORRT_ROOT    — TensorRT install root (bin/ and lib/ added to PATH)
     ///
     /// First run builds TensorRT engines (slow). Subsequent runs load cached
@@ -244,6 +245,9 @@ pub enum IndexCommand {
         /// Show download progress bar when fetching model weights.
         #[arg(long, default_value_t = true)]
         show_download_progress: bool,
+        /// Allow building an index when doc_table contains passages absent from parquet.
+        #[arg(long, default_value_t = false)]
+        allow_partial_vector_index: bool,
         /// HNSW max_nb_connection (graph connectivity).
         #[arg(long, default_value_t = 32)]
         max_nb_connection: usize,
@@ -253,6 +257,18 @@ pub enum IndexCommand {
         /// HNSW nb_layer.
         #[arg(long, default_value_t = 16)]
         nb_layer: usize,
+    },
+
+    /// Build the semantic vector index with the default Chinese model.
+    ///
+    /// Alias for: sinorag index vector-update --model bge-small-zh-v1.5
+    ///
+    /// Expects the ORT + TensorRT libraries to be present next to the
+    /// executable (set up automatically on Linux by setup_tensorrt_linux.sh).
+    Semantic {
+        /// Allow building an index when doc_table contains passages absent from parquet.
+        #[arg(long, default_value_t = false)]
+        allow_partial_vector_index: bool,
     },
 }
 
@@ -306,6 +322,9 @@ pub struct SemanticIndexArgs {
     pub tensorrt_cache_dir: Option<PathBuf>,
     #[arg(long, default_value_t = true)]
     pub show_download_progress: bool,
+    /// Allow building an index when doc_table contains passages absent from parquet.
+    #[arg(long, default_value_t = false)]
+    pub allow_partial_vector_index: bool,
     #[arg(long, default_value_t = 32)]
     pub max_nb_connection: usize,
     #[arg(long, default_value_t = 200)]
@@ -362,17 +381,18 @@ pub enum Command {
         dry_run: bool,
     },
 
-    /// Bootstrap the CBETA corpus from the official pre-built pack.
+    /// Bootstrap or re-index the CBETA corpus.
     ///
-    /// Downloads cbeta-pack.7z from GitHub Releases, decompresses it with
-    /// LZMA2, and builds the doc_table and catalog index locally.
-    /// This is the recommended first step for most users.
+    /// If the corpus is not yet downloaded, fetches cbeta-pack.7z from GitHub
+    /// Releases and decompresses it. Then builds all fast indexes:
+    /// doc_table, catalog, phrase index, and TF-IDF index (total: under 20 min).
     ///
-    /// Phrase and TF-IDF indexes are NOT included in the pack (too large).
-    /// Build them separately with `sinorag indexes lexical`.
+    /// Run this once after the corpus is available. Afterward, add semantic
+    /// search with:
     ///
-    /// To build from your own CBETA source files instead (GitHub xml-p5 or
-    /// ISO xml-iso layout):
+    ///   sinorag index vector-update --model bge-small-zh-v1.5
+    ///
+    /// To build from your own CBETA source files instead:
     ///
     ///   sinorag init --from-raw /path/to/cbeta
     Init {
@@ -430,27 +450,23 @@ pub enum Command {
     /// Usage:
     ///   sinorag ingest cbeta      <PATH>   # CBETA GitHub TEI (xml-p5, one file per work)
     ///   sinorag ingest cbeta-iso  <PATH>   # CBETA ISO (xml-iso, one file per fascicle)
-    ///   sinorag ingest kanripo    <PATH>   # Kanripo texts/ root directory
     ///   sinorag ingest cef        <FILE>   # CEF .jsonl file
     ///   sinorag ingest terebess   <DIR>    # Terebess HTML directory
     ///
     /// Both cbeta and cbeta-iso write to the same 'cbeta' partition.
     /// Use --resume auto to continue an interrupted run.
     Ingest {
-        /// Corpus type: cbeta, cbeta-iso, kanripo, cef, or terebess.
+        /// Corpus type: cbeta, cbeta-iso, cef, or terebess.
         source: IngestSource,
         /// Path to the corpus root directory or file.
         path: PathBuf,
         /// Resume from a staging dir or "auto" to pick the freshest one.
         #[arg(long)]
         resume: Option<PathBuf>,
-        /// Kanripo only: ingest Zen-lineage works only.
-        #[arg(long)]
-        zen_only: bool,
-        /// Build phrase index after ingestion (slow: several hours on large corpora).
+        /// Build phrase index after ingestion.
         #[arg(long, default_value = "false")]
         build_phrase_index: bool,
-        /// Build TF-IDF index after ingestion (slow: several hours on large corpora).
+        /// Build TF-IDF index after ingestion.
         #[arg(long, default_value = "false")]
         build_tfidf: bool,
         /// Phrase index output path.
@@ -477,13 +493,11 @@ pub enum Command {
         out_parquet: PathBuf,
     },
 
-    /// Ingest CBETA and/or Kanripo together, then build doc_table, catalog,
+    /// Ingest CBETA corpus, then build doc_table, catalog,
     /// and (by default) the phrase + TF-IDF lexical indexes in one run.
     ///
-    /// At least one of `--cbeta` or `--kanripo` is required. Runs both
-    /// corpora through a single atomic staging dir so doc_table and the
-    /// catalog index are built once over the combined passage store
-    /// instead of twice (once per `sinorag ingest`).
+    /// Runs the corpus through a single atomic staging dir so doc_table and the
+    /// catalog index are built once over the combined passage store.
     ///
     /// Use `--no-lexical` to skip both phrase and TF-IDF, `--no-phrase` /
     /// `--no-tfidf` to skip one. `--parallel-lexical` runs phrase + TF-IDF
@@ -493,16 +507,10 @@ pub enum Command {
     IngestAll {
         /// CBETA TEI xml-p5 root directory.
         #[arg(long)]
-        cbeta: Option<PathBuf>,
-        /// Kanripo `texts/` root directory.
-        #[arg(long)]
-        kanripo: Option<PathBuf>,
+        cbeta: PathBuf,
         /// Resume from a staging dir or "auto" to pick the freshest one.
         #[arg(long)]
         resume: Option<PathBuf>,
-        /// Kanripo only: ingest Zen-lineage works only.
-        #[arg(long)]
-        zen_only: bool,
         /// Skip both phrase and TF-IDF index builds.
         #[arg(long)]
         no_lexical: bool,
@@ -659,6 +667,21 @@ pub enum Command {
         pack_id: Option<String>,
     },
 
+    /// Fill blank author/period/main_title in passages-raw.parquet from the
+    /// embedded sutra_sch.lst catalog. One-time step before pack-create.
+    ///
+    /// Only overwrites values that are empty or "Unknown Period" — existing
+    /// non-blank data is never changed.  Run with --dry-run first to preview.
+    #[command(name = "patch-metadata", hide = true)]
+    PatchMetadata {
+        /// Parquet directory to patch (default: data/passages-raw.parquet).
+        #[arg(long, default_value = "data/passages-raw.parquet")]
+        parquet: PathBuf,
+        /// Preview what would change without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     // -----------------------------------------------------------------------
     // Index build commands — run by users but not shown in top-level help.
     // Use `sinorag help <command>` for details.
@@ -770,7 +793,7 @@ pub enum Command {
     },
 
     // -----------------------------------------------------------------------
-    // CEF / Kanripo format-conversion utilities (hidden from help).
+    // CEF format-conversion utilities (hidden from help).
     // -----------------------------------------------------------------------
     /// Validate a CEF JSON-lines file.
     #[command(hide = true)]
@@ -837,26 +860,6 @@ pub enum Command {
         input: PathBuf,
         #[arg(long, default_value = "data/passages.parquet")]
         out_parquet: PathBuf,
-    },
-
-    /// Convert a Kanripo plain-text repository to TEI/XML.
-    #[command(hide = true)]
-    KanripoToTei {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long, value_name = "DIR")]
-        out_corpus: PathBuf,
-        #[arg(long)]
-        snapshot_id: Option<String>,
-    },
-
-    /// Generate a manifest JSON for a Kanripo repository.
-    #[command(hide = true)]
-    KanripoManifest {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long)]
-        out: PathBuf,
     },
 
     /// Ingest Terebess Zen biography HTML pages.
@@ -1673,6 +1676,39 @@ pub enum Command {
         continue_on_error: bool,
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        #[arg(long)]
+        output_root: Option<PathBuf>,
+        #[arg(long)]
+        passages_parquet: Option<PathBuf>,
+        #[arg(long)]
+        phrase_index: Option<PathBuf>,
+        #[arg(long)]
+        tfidf_index: Option<PathBuf>,
+        #[arg(long)]
+        vector_index: Option<PathBuf>,
+        #[arg(long)]
+        catalog_index: Option<PathBuf>,
+        #[arg(long)]
+        doc_table: Option<PathBuf>,
+        #[arg(long)]
+        registry: Option<PathBuf>,
+    },
+
+    /// Run fixture-based tool evaluations and write a compact pass/fail report.
+    ///
+    /// Fixture schema:
+    /// {"schema":"sinorag-tool-eval-v1","cases":[{"id":"status","tool":"status","args":{},"expect":{"ok":true}}]}
+    ToolEval {
+        #[arg(long)]
+        cases: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        pack: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        readonly: bool,
+        #[arg(long, default_value_t = false)]
+        allow_admin_tools: bool,
         #[arg(long)]
         output_root: Option<PathBuf>,
         #[arg(long)]

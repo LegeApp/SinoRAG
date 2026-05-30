@@ -31,12 +31,12 @@
 //     [21..24]  reserved
 //   postings blob — concatenation of per-gram encoded postings.
 
+use crate::arrow_helpers::extract_passage_columns;
 use crate::datafusion_store::{sql_literal, DataFusionStore};
 use crate::document_table::DocumentTable;
 use crate::normalize::normalize_zh;
 use crate::parquet_metadata::global_cache;
 use anyhow::Result;
-use arrow::array::{Array, StringArray};
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
@@ -832,7 +832,7 @@ pub(crate) fn build_from_table(
             let reader = builder.build()?;
             for batch in reader {
                 let batch = batch?;
-                let (passage_ids, text_arr) = extract_columns(&batch)?;
+                let (passage_ids, text_arr) = extract_passage_columns(&batch)?;
                 for i in 0..batch.num_rows() {
                     let pid = passage_ids.value(i);
                     let text = text_arr.value(i);
@@ -1204,36 +1204,6 @@ pub async fn load_passage_texts_from_store(
     limit: Option<usize>,
 ) -> Result<Vec<(String, String)>> {
     store.passage_texts(limit).await
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-fn extract_columns(
-    batch: &arrow::record_batch::RecordBatch,
-) -> Result<(&StringArray, &StringArray)> {
-    let passage_col = batch
-        .schema()
-        .column_with_name("passage_id")
-        .ok_or_else(|| anyhow::anyhow!("missing passage_id column"))?
-        .0;
-    let text_col = batch
-        .schema()
-        .column_with_name("zh_text_normalized")
-        .ok_or_else(|| anyhow::anyhow!("missing zh_text_normalized column"))?
-        .0;
-    let pids = batch
-        .column(passage_col)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| anyhow::anyhow!("passage_id is not StringArray"))?;
-    let texts = batch
-        .column(text_col)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| anyhow::anyhow!("zh_text_normalized is not StringArray"))?;
-    Ok((pids, texts))
 }
 
 fn write_padded_string(field: &mut [u8], value: &str) {

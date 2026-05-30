@@ -107,6 +107,13 @@ pub struct ToolDocsResponse {
     pub docs: serde_json::Value,
 }
 
+/// Response from the tool-log-summary tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ToolLogSummaryResponse {
+    pub schema: &'static str,
+    pub summary: serde_json::Value,
+}
+
 /// Response from the passage tool
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PassageResponse {
@@ -309,6 +316,7 @@ pub struct SearchStrategyInfo {
     pub candidates_verified: usize,
     pub after_scope_and_sort: usize,
     pub limit: usize,
+    pub max_candidates: usize,
 }
 
 /// Response from the phrase-history tool
@@ -395,6 +403,7 @@ pub struct TermUsageSearchStrategy {
     pub total_hits: usize,
     pub limit_total: usize,
     pub limit_per_group: usize,
+    pub max_candidates: usize,
 }
 
 /// Response from the query-expand-terms tool
@@ -595,6 +604,7 @@ pub struct ClusterHitsSearchStrategy {
     pub phrase: serde_json::Value,
     pub limit_total: usize,
     pub limit_per_cluster: usize,
+    pub max_candidates: usize,
 }
 
 /// Response from the absence-check tool
@@ -622,6 +632,7 @@ pub struct AbsenceCheckScope {
 pub struct AbsenceCheckSearchStrategy {
     pub phrase: serde_json::Value,
     pub limit: usize,
+    pub max_candidates: usize,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -753,7 +764,6 @@ pub struct SourceInvestigateResponse {
     pub workflow: &'static str,
     pub seed_passage_id: String,
     pub seed: PassageResponse,
-    pub summary: SourceInvestigationSummary,
     pub context: Option<ExpandContextAdaptiveResponse>,
     pub frontier: Option<FrontierResponse>,
     pub similar: Option<SimilarResponse>,
@@ -761,13 +771,6 @@ pub struct SourceInvestigateResponse {
     pub phrase_histories: Vec<PhraseHistoryResponse>,
     pub components: Vec<WorkflowComponent>,
     pub suggested_next_tools: Vec<SuggestedToolCall>,
-    pub risk_notes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct SourceInvestigationSummary {
-    pub seed: String,
-    pub best_next_actions: Vec<SuggestedToolCall>,
     pub risk_notes: Vec<String>,
 }
 

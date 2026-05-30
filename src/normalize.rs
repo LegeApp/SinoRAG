@@ -60,7 +60,8 @@ fn variant_map() -> &'static HashMap<char, char> {
         for line in JP_VARIANTS.lines() {
             let line = line.trim();
             if let Some((src, target)) = line.split_once('\t') {
-                if let (Some(s), Some(t)) = (src.trim().chars().next(), target.trim().chars().next())
+                if let (Some(s), Some(t)) =
+                    (src.trim().chars().next(), target.trim().chars().next())
                 {
                     if s != t && !map.contains_key(&s) && !map.contains_key(&t) {
                         map.insert(s, t);

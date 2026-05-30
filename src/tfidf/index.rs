@@ -32,6 +32,7 @@
 // Query side: `TfidfIndex::open` mmaps the file. Every accessor is a slice
 // into the mmap; weights are dequantized on the fly via per-term `w_max`.
 
+use crate::arrow_helpers::extract_passage_columns;
 use crate::document_table::DocumentTable;
 use crate::text_analyzer::{analyze_normalized, AnalyzeOptions, AnalyzeScratch, FilterMode};
 use crate::tfidf::ngram::{char_ngram_hashes, char_ngrams};
@@ -969,7 +970,7 @@ pub(crate) fn build_from_table(
             let reader = builder.build()?;
             for batch in reader {
                 let batch = batch?;
-                let (pids, texts) = extract_columns(&batch)?;
+                let (pids, texts) = extract_passage_columns(&batch)?;
                 for i in 0..batch.num_rows() {
                     if doc_table.doc_id(pids.value(i)).is_some() {
                         analyze_normalized(texts.value(i), &analyze_opts, &mut scratch);
@@ -1044,9 +1045,39 @@ pub(crate) fn build_from_table(
         eprintln!("  {} terms loaded", ve.len());
         (ve, iv, ti)
     } else {
+        // Guard: Phase 1 done but df_dir missing and no phase2 checkpoint means
+        // the previous run crashed mid-Phase-2 after df_dir was already deleted.
+        // Silently proceeding would build an empty vocabulary — bail instead.
+        if !df_dir.exists() {
+            anyhow::bail!(
+                "TF-IDF build is in a corrupted resume state: Phase 1 completed and \
+                 df_buckets/ was already removed, but the Phase 2 vocabulary checkpoint \
+                 (phase2.vocab.bin) was never written.\n\
+                 \n\
+                 Remove the work directory and start fresh:\n  \
+                   rm -rf {}\n  sinorag init",
+                temp_dir.display()
+            );
+        }
+
         eprintln!("\n[Phase 2] Building vocabulary...");
 
-        let bucket_dfs: Vec<Vec<(u64, u32)>> = (0..bucket_count)
+        // Gram hashes are partitioned across buckets by `hash % bucket_count`,
+        // so every DF record for a term lands in exactly one bucket and its
+        // global document frequency is fully known within that bucket. Apply the
+        // min_df/max_df cutoff inside each bucket so only vocabulary candidates
+        // (a few million terms at most) are ever held in memory — rather than
+        // materialising every distinct n-gram (hundreds of millions for a large
+        // corpus) into `bucket_dfs` plus a second full copy in a `term_df` map.
+        // That former double-buffer was a multi-GB spike that grew with the
+        // corpus and, with little/no swap, would silently OOM-kill the build.
+        let max_df_count = if params.max_df_ratio <= 0.0 {
+            doc_count as u32
+        } else {
+            ((doc_count as f32) * params.max_df_ratio).floor().max(1.0) as u32
+        };
+
+        let bucket_vocabs: Vec<Vec<(u64, u32)>> = (0..bucket_count)
             .into_par_iter()
             .map(|bucket_idx| -> Result<Vec<(u64, u32)>> {
                 let path = df_dir.join(format!("bucket-{:04}.bin", bucket_idx));
@@ -1062,6 +1093,7 @@ pub(crate) fn build_from_table(
                     let df_count = u32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
                     records.push((h, df_count));
                 }
+                drop(raw);
                 records.sort_unstable_by_key(|(h, _)| *h);
                 let mut local: Vec<(u64, u32)> = Vec::new();
                 let mut i = 0;
@@ -1073,32 +1105,23 @@ pub(crate) fn build_from_table(
                         df_sum += records[j].1 as u64;
                         j += 1;
                     }
-                    local.push((h, df_sum.min(u32::MAX as u64) as u32));
+                    let df = df_sum.min(u32::MAX as u64) as u32;
+                    // Filter here, while this term's full DF is known, so rare
+                    // and ubiquitous grams never accumulate in memory.
+                    if df >= params.min_df && df <= max_df_count {
+                        local.push((h, df));
+                    }
                     i = j;
                 }
                 Ok(local)
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let _ = fs::remove_dir_all(&df_dir);
-
-        let total_terms: usize = bucket_dfs.iter().map(|v| v.len()).sum();
-        let mut term_df: HashMap<u64, u32> = HashMap::with_capacity(total_terms);
-        for local in bucket_dfs {
-            term_df.extend(local);
-        }
-
-        let max_df_count = if params.max_df_ratio <= 0.0 {
-            doc_count as u32
-        } else {
-            ((doc_count as f32) * params.max_df_ratio).floor().max(1.0) as u32
-        };
-        let mut vocab: Vec<(u64, u32)> = term_df
-            .into_iter()
-            .filter(|(_, df)| *df >= params.min_df && *df <= max_df_count)
-            .collect();
+        let mut vocab: Vec<(u64, u32)> = bucket_vocabs.into_iter().flatten().collect();
         eprintln!("  {} terms pass filters", vocab.len());
-        vocab.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        // Sort by descending DF, breaking ties by hash so that the max_features
+        // truncation below is fully deterministic from one run to the next.
+        vocab.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         if params.max_features > 0 && vocab.len() > params.max_features {
             vocab.truncate(params.max_features);
         }
@@ -1135,6 +1158,8 @@ pub(crate) fn build_from_table(
         fs::write(&phase2_vocab, bincode::serialize(&vocab_entries)?)?;
         fs::write(&phase2_idf_f, bincode::serialize(&idf)?)?;
         fs::write(&phase2_termid, bincode::serialize(&term_to_id)?)?;
+        // df_dir is no longer needed now that the checkpoint is safely written.
+        let _ = fs::remove_dir_all(&df_dir);
 
         (vocab_entries, idf, term_to_id)
     };
@@ -1215,7 +1240,7 @@ pub(crate) fn build_from_table(
             let reader = builder.build()?;
             for batch in reader {
                 let batch = batch?;
-                let (pids, texts) = extract_columns(&batch)?;
+                let (pids, texts) = extract_passage_columns(&batch)?;
                 for i in 0..batch.num_rows() {
                     let pid = pids.value(i);
                     let Some(doc_id) = doc_table.doc_id(pid) else {
@@ -1321,57 +1346,52 @@ pub(crate) fn build_from_table(
 
     let w_max_arc: Arc<Vec<f32>> = Arc::new(w_max);
 
-    let bucket_results: Vec<Vec<(TermId, u32, Vec<u8>)>> = (0..bucket_count)
-        .into_par_iter()
-        .map(|bucket_idx| -> Result<Vec<(TermId, u32, Vec<u8>)>> {
-            if bucket_idx % 256 == 0 {
-                eprintln!("  bucket {}/{}", bucket_idx, bucket_count);
-            }
-            let path = post_dir.join(format!("bucket-{:04}.bin", bucket_idx));
-            if !path.exists() {
-                return Ok(Vec::new());
-            }
-            let raw = fs::read(&path)?;
-            let n = raw.len() / POSTING_BUCKET_RECORD_SIZE;
-            let mut records: Vec<(TermId, DocId, f32)> = Vec::with_capacity(n);
-            for k in 0..n {
-                let base = k * POSTING_BUCKET_RECORD_SIZE;
-                let tid = u32::from_le_bytes(raw[base..base + 4].try_into()?);
-                let did = u32::from_le_bytes(raw[base + 4..base + 8].try_into()?);
-                let w = f32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
-                records.push((tid, did, w));
-            }
-            records.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-            let mut out: Vec<(TermId, u32, Vec<u8>)> = Vec::new();
-            let mut i = 0;
-            while i < records.len() {
-                let tid = records[i].0;
-                let wm = w_max_arc[tid as usize];
-                let mut j = i;
-                while j < records.len() && records[j].0 == tid {
-                    j += 1;
-                }
-                let count = (j - i) as u32;
-                let mut bytes = Vec::with_capacity((j - i) * POSTING_ENTRY_SIZE);
-                for k in i..j {
-                    let (_, did, w) = records[k];
-                    bytes.extend_from_slice(&did.to_le_bytes());
-                    bytes.push(quantize_log_u8(w, wm));
-                }
-                out.push((tid, count, bytes));
-                i = j;
-            }
-            Ok(out)
-        })
-        .collect::<Result<Vec<_>>>()?;
-
+    // Process posting buckets one at a time, appending each term's posting list
+    // directly into the final blob. Buckets are disjoint by `term_id % bucket
+    // _count`, so a term's full posting list is contained in a single bucket and
+    // can be emitted in order. Reading one bucket at a time — rather than
+    // collecting every bucket's quantized output into `bucket_results` and then
+    // copying it all again into `postings_blob` — keeps peak memory near the
+    // final blob size plus one bucket, instead of roughly twice the blob. The
+    // per-bucket sort is parallelised so cores stay busy on the dominant cost.
     let mut postings_blob: Vec<u8> = Vec::new();
-    for bucket_data in bucket_results {
-        for (tid, count, bytes) in bucket_data {
+    for bucket_idx in 0..bucket_count {
+        if bucket_idx % 256 == 0 {
+            eprintln!("  bucket {}/{}", bucket_idx, bucket_count);
+        }
+        let path = post_dir.join(format!("bucket-{:04}.bin", bucket_idx));
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read(&path)?;
+        let n = raw.len() / POSTING_BUCKET_RECORD_SIZE;
+        let mut records: Vec<(TermId, DocId, f32)> = Vec::with_capacity(n);
+        for k in 0..n {
+            let base = k * POSTING_BUCKET_RECORD_SIZE;
+            let tid = u32::from_le_bytes(raw[base..base + 4].try_into()?);
+            let did = u32::from_le_bytes(raw[base + 4..base + 8].try_into()?);
+            let w = f32::from_le_bytes(raw[base + 8..base + 12].try_into()?);
+            records.push((tid, did, w));
+        }
+        drop(raw);
+        records.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        let mut i = 0;
+        while i < records.len() {
+            let tid = records[i].0;
+            let wm = w_max_arc[tid as usize];
+            let mut j = i;
+            while j < records.len() && records[j].0 == tid {
+                j += 1;
+            }
             vocab_entries[tid as usize].postings_offset = postings_blob.len() as u64;
-            vocab_entries[tid as usize].postings_count = count;
-            postings_blob.extend_from_slice(&bytes);
+            vocab_entries[tid as usize].postings_count = (j - i) as u32;
+            for k in i..j {
+                let (_, did, w) = records[k];
+                postings_blob.extend_from_slice(&did.to_le_bytes());
+                postings_blob.push(quantize_log_u8(w, wm));
+            }
+            i = j;
         }
     }
     let _ = fs::remove_dir_all(&post_dir);
@@ -1547,32 +1567,6 @@ fn write_index_file(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-fn extract_columns(
-    batch: &arrow::record_batch::RecordBatch,
-) -> Result<(&arrow::array::StringArray, &arrow::array::StringArray)> {
-    let passage_col = batch
-        .schema()
-        .column_with_name("passage_id")
-        .ok_or_else(|| anyhow::anyhow!("missing passage_id column"))?
-        .0;
-    let text_col = batch
-        .schema()
-        .column_with_name("zh_text_normalized")
-        .ok_or_else(|| anyhow::anyhow!("missing zh_text_normalized column"))?
-        .0;
-    let pids = batch
-        .column(passage_col)
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>()
-        .ok_or_else(|| anyhow::anyhow!("passage_id is not StringArray"))?;
-    let texts = batch
-        .column(text_col)
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>()
-        .ok_or_else(|| anyhow::anyhow!("zh_text_normalized is not StringArray"))?;
-    Ok((pids, texts))
-}
 
 fn round_f32(value: f32, places: i32) -> f32 {
     let factor = 10f32.powi(places);

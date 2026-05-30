@@ -66,7 +66,7 @@ pub fn render(payload: &Value, title: &str) -> Value {
     let nodes = evidence.iter().map(node_from_evidence).collect::<Vec<_>>();
     let edges = edges_from_accepted_claims(payload);
 
-    let mut graph = json!({
+    let graph = json!({
         "schema": "readzen-text-reuse-graph-draft-v1",
         "graph_id": stable_id("gd-graph", title),
         "name": title,

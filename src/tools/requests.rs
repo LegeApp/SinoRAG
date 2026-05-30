@@ -1,6 +1,28 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// Output verbosity for composite tools. Controls how much raw nested detail is
+/// attached to the response, independent of which sub-components actually run
+/// (the backend always does the full work; this only governs what is serialized
+/// back to the caller, to keep agent context lean).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Verbosity {
+    /// Headlines, counts, and next-step guidance only — no raw sub-responses.
+    Summary,
+    /// The integrated result, minus raw sub-responses that merely duplicate it
+    /// (default).
+    Standard,
+    /// Everything, including raw nested sub-responses. Use for debugging.
+    Full,
+}
+
+impl Default for Verbosity {
+    fn default() -> Self {
+        Verbosity::Standard
+    }
+}
+
 /// Request for the search tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct SearchRequest {
@@ -82,6 +104,23 @@ pub struct HeadingSearchRequest {
 pub struct ToolDocsRequest {
     #[serde(default)]
     pub tool: Option<String>,
+}
+
+/// Request for the tool-log-summary tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ToolLogSummaryRequest {
+    /// Optional path to a JSONL tool-call log. Defaults to SINORAG_TOOL_LOG or
+    /// `.sinorag/tool_calls.jsonl`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+
+    /// Number of recent compact records to include.
+    #[serde(default = "default_tool_log_recent")]
+    pub recent: usize,
+}
+
+fn default_tool_log_recent() -> usize {
+    20
 }
 
 fn default_search_mode() -> String {
@@ -312,6 +351,14 @@ pub struct FirstAttestationRequest {
 
     #[serde(default = "default_limit")]
     pub limit: usize,
+
+    /// Internal retrieval budget before chronological sort and output truncation.
+    #[serde(default = "default_attestation_max_candidates")]
+    pub max_candidates: usize,
+}
+
+fn default_attestation_max_candidates() -> usize {
+    10_000
 }
 
 /// Request for the phrase-history tool
@@ -374,6 +421,10 @@ pub struct TraceTermUsageRequest {
 
     #[serde(default = "default_limit_per_group")]
     pub limit_per_group: usize,
+
+    /// Internal retrieval budget before grouping and representative truncation.
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
 }
 
 fn default_group_by() -> String {
@@ -397,6 +448,10 @@ pub struct ClusterHitsRequest {
 
     #[serde(default = "default_limit_per_cluster")]
     pub limit_per_cluster: usize,
+
+    /// Internal retrieval budget before outline clustering and output truncation.
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
 }
 
 fn default_cluster_by() -> String {
@@ -426,6 +481,10 @@ pub struct AbsenceCheckRequest {
 
     #[serde(default = "default_absence_limit")]
     pub limit: usize,
+
+    /// Internal retrieval budget before returning compact sample hits.
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
 }
 
 fn default_absence_limit() -> usize {
@@ -726,6 +785,11 @@ pub struct EvidenceSearchRequest {
 
     #[serde(default = "default_max_candidates")]
     pub max_candidates: usize,
+
+    /// Output verbosity. `summary` returns exact hits only; `standard` (default)
+    /// also returns any requested analysis blocks; `full` keeps full snippets.
+    #[serde(default)]
+    pub verbosity: Verbosity,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -753,6 +817,12 @@ pub struct HybridDiscoverRequest {
 
     #[serde(default = "default_max_candidates")]
     pub max_candidates: usize,
+
+    /// Output verbosity. `standard` (default) returns the merged, scored hits but
+    /// drops the raw `vector_neighbors`/`tfidf_similar` blocks that duplicate
+    /// them; `summary` also drops snippets and context; `full` keeps everything.
+    #[serde(default)]
+    pub verbosity: Verbosity,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -788,6 +858,12 @@ pub struct SourceInvestigateRequest {
 
     #[serde(default)]
     pub max_component_ms: Option<u64>,
+
+    /// Output verbosity. `standard` (default) returns the included analysis
+    /// blocks; `summary` drops the raw blocks and returns only the seed,
+    /// next-step guidance, and risk notes; `full` is identical to `standard`.
+    #[serde(default)]
+    pub verbosity: Verbosity,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -898,7 +974,7 @@ pub struct PairProfileRequest {
     #[serde(default = "default_pair_profile_group_by")]
     pub group_by: String,
 
-    /// Co-occurrence unit: "passage", "window", or "sentence".
+    /// Co-occurrence unit: "passage", "window", "sentence", "section", or "work".
     #[serde(default = "default_pair_unit")]
     pub unit: String,
 

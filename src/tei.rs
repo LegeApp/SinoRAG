@@ -119,6 +119,7 @@ pub fn extract_metadata_from_xml(
     rel_path: &str,
     sidecar: Option<&SidecarIndex>,
     distribution: CbetaDistribution,
+    catalog: Option<&crate::cbeta_sidecar::WorkCatalog>,
 ) -> BuddhistMeta {
     let file = File::open(xml_path);
     let mut meta = BuddhistMeta::default();
@@ -265,6 +266,30 @@ pub fn extract_metadata_from_xml(
     };
     meta.period_rank = period_rank(&meta.period);
 
+    // Fill in any still-blank title/author/period from the work catalog.
+    if let Some(cat) = catalog {
+        if let Some(entry) = cat.get(&meta.source_work_id) {
+            if meta.main_title.is_empty() {
+                meta.main_title = entry.title.clone();
+            }
+            if meta.author.is_empty() || meta.period.is_empty() {
+                let (cat_author, cat_period, cat_rank) =
+                    crate::cbeta_sidecar::parse_catalog_translator(&entry.translator_field);
+                if meta.author.is_empty() {
+                    if let Some(a) = cat_author {
+                        meta.author = a;
+                    }
+                }
+                if meta.period.is_empty() {
+                    if let Some(p) = cat_period {
+                        meta.period = p;
+                        meta.period_rank = cat_rank;
+                    }
+                }
+            }
+        }
+    }
+
     // Stamp distribution + classification source on retrieval_method + quality_flags_json
     // so downstream catalog / dedup can distinguish github-p5 from ISO and audit
     // whether classification was authoritative or heuristic.
@@ -334,7 +359,8 @@ fn classify_tradition_fallback(text: &str, canon: &str, rel_path: &str) -> Vec<S
 
     // No primary school detected — fall through to secondary labels.
     let mut secondary: Vec<String> = Vec::new();
-    if text_lower.contains("律") || text_lower.contains("戒律") || text_lower.contains("毗奈耶") {
+    if text_lower.contains("律") || text_lower.contains("戒律") || text_lower.contains("毗奈耶")
+    {
         secondary.push("Vinaya".to_string());
     }
     if text_lower.contains("註") || text_lower.contains("疏") || text_lower.contains("論") {

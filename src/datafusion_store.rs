@@ -21,7 +21,7 @@ impl DataFusionStore {
 
         let ctx = SessionContext::new();
 
-        // Use recursive glob to handle partitioned parquet (source_corpus=cbeta/, source_corpus=kanripo/)
+        // Use recursive glob to handle partitioned parquet (source_corpus=cbeta/, etc.)
         let source = parquet_dir
             .join("**/*.parquet")
             .to_string_lossy()

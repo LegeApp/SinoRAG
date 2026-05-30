@@ -20,10 +20,10 @@ pub mod ingest_dict;
 pub mod ingest_terebess;
 pub mod init;
 pub mod merge_cbeta;
-pub mod kanripo;
 pub mod outline_search;
 pub mod pack;
 pub mod passage;
+pub mod patch_metadata;
 pub mod person_history;
 pub mod person_resolve;
 pub mod phrase_history;
@@ -39,6 +39,7 @@ pub mod taxonomy;
 pub mod tfidf;
 pub mod timeline;
 pub mod tool_call;
+pub mod tool_eval;
 pub mod tools_manifest;
 pub mod trace_term_usage;
 pub mod validate;
@@ -77,15 +78,16 @@ fn ingested_corpora(out_parquet: &std::path::Path) -> Vec<String> {
 fn cef_corpus_id(path: &std::path::Path) -> Result<String> {
     let corpus_dir = if path.is_file() {
         path.parent()
-            .ok_or_else(|| anyhow::anyhow!("cannot determine CEF corpus dir from {}", path.display()))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("cannot determine CEF corpus dir from {}", path.display())
+            })?
             .to_path_buf()
     } else {
         path.to_path_buf()
     };
-    let content = std::fs::read_to_string(corpus_dir.join("corpus.toml"))
-        .context("reading corpus.toml")?;
-    let corpus: crate::cef::CorpusToml =
-        toml::from_str(&content).context("parsing corpus.toml")?;
+    let content =
+        std::fs::read_to_string(corpus_dir.join("corpus.toml")).context("reading corpus.toml")?;
+    let corpus: crate::cef::CorpusToml = toml::from_str(&content).context("parsing corpus.toml")?;
     Ok(corpus.corpus_id)
 }
 
@@ -103,15 +105,29 @@ pub fn build_all_indexes(
     max_features: usize,
     buckets: usize,
     temp_dir: Option<std::path::PathBuf>,
+    progress: Option<&dyn init::InitProgress>,
 ) -> Result<()> {
     let phrase_temp = temp_dir.as_ref().map(|p| p.join("phrase.work"));
     let tfidf_temp = temp_dir.as_ref().map(|p| p.join("tfidf.work"));
     let doc_table_loaded = DocumentTable::load(&doc_table)?;
 
+    // Advance the GUI progress bar at each phase boundary. The builders run for
+    // a long time without sub-step reporting, so a moving label per phase is the
+    // most granular feedback available without instrumenting their inner loops.
+    let emit_step = |label: &str, fraction: f32| {
+        if let Some(progress) = progress {
+            progress.event(init::InitProgressEvent::Step {
+                label: label.to_string(),
+                progress: Some(fraction),
+            });
+        }
+    };
+
     eprintln!("=== Combined index build (phrase + tfidf) ===");
     if phrase_index_is_current(&phrase_out, &doc_table, &doc_table_loaded, phrase_gram_len)? {
         eprintln!("Phrase index is current; skipping.");
     } else {
+        emit_step("Building phrase index", 0.70);
         crate::phrase_index::build_from_table(
             parquet.clone(),
             doc_table_loaded.clone(),
@@ -134,6 +150,7 @@ pub fn build_all_indexes(
         eprintln!("TF-IDF index is current; skipping.");
         Ok(())
     } else {
+        emit_step("Building TF-IDF index", 0.85);
         crate::tfidf::index::build_from_table(
             parquet,
             doc_table_loaded,
@@ -254,6 +271,7 @@ fn build_lexical_indexes(args: LexicalIndexArgs) -> Result<()> {
         args.max_features,
         args.buckets,
         args.temp_dir,
+        None,
     )
 }
 
@@ -270,6 +288,7 @@ async fn build_semantic_index(args: SemanticIndexArgs) -> Result<()> {
         args.tensorrt_cache_dir,
         args.show_download_progress,
         true, // fail_if_feature_missing - explicit semantic command should error clearly
+        args.allow_partial_vector_index,
         args.max_nb_connection,
         args.ef_construction,
         args.nb_layer,
@@ -392,6 +411,28 @@ pub async fn run(cli: Cli) -> Result<()> {
                 nb_layer,
             ),
             IndexCommand::VectorInfo { index } => vector_index::info(index),
+            IndexCommand::Semantic {
+                allow_partial_vector_index,
+            } => {
+                vector_embed::update(
+                    "data/passages.parquet".into(),
+                    "data/derived/doc_table.bin".into(),
+                    crate::embedding::models::LocalEmbeddingProfile::BgeSmallZhV15,
+                    None,
+                    "data/derived/vector.index".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    true,
+                    true,
+                    allow_partial_vector_index,
+                    32,
+                    200,
+                    16,
+                )
+                .await
+            }
             IndexCommand::VectorUpdate {
                 parquet,
                 doc_table,
@@ -403,6 +444,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 tensorrt_root,
                 tensorrt_cache_dir,
                 show_download_progress,
+                allow_partial_vector_index,
                 max_nb_connection,
                 ef_construction,
                 nb_layer,
@@ -419,6 +461,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     tensorrt_cache_dir,
                     show_download_progress,
                     true, // fail_if_feature_missing — explicit command should error clearly
+                    allow_partial_vector_index,
                     max_nb_connection,
                     ef_construction,
                     nb_layer,
@@ -436,7 +479,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             path,
             out_jsonl,
             out_parquet,
-            zen_only,
             resume,
             build_phrase_index,
             phrase_index_out,
@@ -458,7 +500,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             // check whether it is already present as a partition dir.
             let incoming_corpus: String = match &source {
                 IngestSource::Cbeta | IngestSource::CbetaIso => "cbeta".to_string(),
-                IngestSource::Kanripo => "kanripo".to_string(),
                 IngestSource::Terebess => "terebess".to_string(),
                 IngestSource::Cef => cef_corpus_id(&path)?,
             };
@@ -476,9 +517,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             // If other corpora are already present the JSONL must be appended.
             let append = !already.is_empty() && out_jsonl.exists();
 
-            let (corpus, kanripo_input) = match source {
-                IngestSource::Cbeta | IngestSource::CbetaIso => (Some(path), None),
-                IngestSource::Kanripo => (None, Some(path)),
+            let corpus = match source {
+                IngestSource::Cbeta | IngestSource::CbetaIso => path,
                 IngestSource::Cef => {
                     cef::ingest(path, out_parquet.clone()).await?;
                     return ingest::post_ingest(ingest::PostIngestOptions {
@@ -511,10 +551,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             ingest::run(
                 corpus,
-                kanripo_input,
                 out_jsonl,
                 out_parquet,
-                zen_only,
                 resume,
                 append,
                 build_phrase_index,
@@ -531,9 +569,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::IngestAll {
             cbeta,
-            kanripo,
             resume,
-            zen_only,
             no_lexical,
             no_phrase,
             no_tfidf,
@@ -552,20 +588,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 crate::storage::ParquetCompression::Zstd
             };
-            if cbeta.is_none() && kanripo.is_none() {
-                anyhow::bail!("ingest-all requires at least one of --cbeta or --kanripo");
-            }
             let already = ingested_corpora(&out_parquet);
-            for (flag, name) in [(cbeta.is_some(), "cbeta"), (kanripo.is_some(), "kanripo")] {
-                if flag && already.iter().any(|c| c == name) {
-                    anyhow::bail!(
-                        "corpus '{}' is already ingested at {}/source_corpus={}. \
-                         Delete that partition directory to re-ingest it.",
-                        name,
-                        out_parquet.display(),
-                        name
-                    );
-                }
+            if already.iter().any(|c| c == "cbeta") {
+                anyhow::bail!(
+                    "corpus 'cbeta' is already ingested at {}/source_corpus=cbeta. \
+                     Delete that partition directory to re-ingest it.",
+                    out_parquet.display()
+                );
             }
             let append = !already.is_empty() && out_jsonl.exists();
 
@@ -574,10 +603,8 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             ingest::run(
                 cbeta,
-                kanripo,
                 out_jsonl,
                 out_parquet,
-                zen_only,
                 resume,
                 append,
                 build_phrase_index,
@@ -606,7 +633,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         }),
         Command::CefInit { out } => cef::init(out),
         Command::CefStats { input } => cef::stats(input),
-        Command::IngestAuthority { path, persons_out, places_out, no_parquet_compression } => {
+        Command::IngestAuthority {
+            path,
+            persons_out,
+            places_out,
+            no_parquet_compression,
+        } => {
             let parquet_compression = if no_parquet_compression {
                 crate::storage::ParquetCompression::Uncompressed
             } else {
@@ -614,7 +646,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             ingest_authority::run(path, persons_out, places_out, parquet_compression)
         }
-        Command::IngestDict { path, out_parquet, no_parquet_compression } => {
+        Command::IngestDict {
+            path,
+            out_parquet,
+            no_parquet_compression,
+        } => {
             let parquet_compression = if no_parquet_compression {
                 crate::storage::ParquetCompression::Uncompressed
             } else {
@@ -636,12 +672,6 @@ pub async fn run(cli: Cli) -> Result<()> {
                 parallel_lexical: false,
             })
         }
-        Command::KanripoToTei {
-            input,
-            out_corpus,
-            snapshot_id,
-        } => kanripo::run(input, out_corpus, snapshot_id),
-        Command::KanripoManifest { input, out } => kanripo::manifest(input, out),
         Command::Search {
             parquet,
             phrase,
@@ -927,6 +957,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::PackCreate { data, out } => pack::run(data, out),
         Command::BuildPack { pack, pack_id } => build_pack::run(pack, pack_id),
+        Command::PatchMetadata { parquet, dry_run } => patch_metadata::run(parquet, dry_run),
         Command::ExpandContextAdaptive {
             parquet,
             catalog,
@@ -1335,6 +1366,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 scope_period: vec![],
                 scope_source_work_id: None,
                 limit,
+                max_candidates: limit.max(10_000),
             };
 
             let res = engine.first_attestation_impl(req).await?;
@@ -1740,6 +1772,38 @@ pub async fn run(cli: Cli) -> Result<()> {
                 allow_admin_tools,
                 continue_on_error,
                 jobs,
+                output_root,
+                passages_parquet,
+                phrase_index,
+                tfidf_index,
+                vector_index,
+                catalog_index,
+                doc_table,
+                registry,
+            })
+            .await
+        }
+        Command::ToolEval {
+            cases,
+            out,
+            pack,
+            readonly,
+            allow_admin_tools,
+            output_root,
+            passages_parquet,
+            phrase_index,
+            tfidf_index,
+            vector_index,
+            catalog_index,
+            doc_table,
+            registry,
+        } => {
+            tool_eval::run(tool_eval::ToolEvalArgs {
+                cases,
+                out,
+                pack,
+                readonly,
+                allow_admin_tools,
                 output_root,
                 passages_parquet,
                 phrase_index,

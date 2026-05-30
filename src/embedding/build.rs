@@ -25,6 +25,7 @@ pub struct VectorUpdateConfig {
     pub tensorrt_cache_dir: Option<PathBuf>,
     pub show_download_progress: bool,
     pub hnsw: HnswParams,
+    pub allow_partial_vector_index: bool,
     /// When true, bail if the binary was built without the local-embeddings feature.
     /// When false, print a notice and return Ok.
     pub fail_if_feature_missing: bool,
@@ -55,9 +56,16 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
         )
         .await?;
 
-    // Build passage_id -> (embedding_text, input_hash)
-    let mut passage_meta: rustc_hash::FxHashMap<String, (String, String)> =
-        rustc_hash::FxHashMap::default();
+    // doc_id-indexed metadata avoids a multi-million-entry passage_id HashMap.
+    #[derive(Debug)]
+    struct PassageEmbeddingMeta {
+        embedding_text: String,
+        input_hash: String,
+    }
+    let mut passage_meta: Vec<Option<PassageEmbeddingMeta>> = std::iter::repeat_with(|| None)
+        .take(doc_table.passage_ids.len())
+        .collect();
+    let mut parquet_rows_not_in_doc_table = 0usize;
     for row in rows {
         let Some(passage_id) = row
             .get("passage_id")
@@ -83,9 +91,26 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
             text,
         );
         let input_hash = compute_input_hash(&embedding_text, DOCUMENT_TEMPLATE_ID);
-        passage_meta.insert(passage_id.to_string(), (embedding_text, input_hash));
+        if let Some(doc_id) = doc_table.doc_id(passage_id) {
+            passage_meta[doc_id as usize] = Some(PassageEmbeddingMeta {
+                embedding_text,
+                input_hash,
+            });
+        } else {
+            parquet_rows_not_in_doc_table += 1;
+        }
     }
-    eprintln!("       {} passages read from parquet", passage_meta.len());
+    let parquet_rows_in_doc_table = passage_meta.iter().filter(|meta| meta.is_some()).count();
+    eprintln!(
+        "       {} passages read from parquet",
+        parquet_rows_in_doc_table
+    );
+    if parquet_rows_not_in_doc_table > 0 {
+        eprintln!(
+            "       Warning: {} parquet rows are not present in doc_table",
+            parquet_rows_not_in_doc_table
+        );
+    }
 
     // 3. Load embedding cache
     eprintln!(
@@ -104,25 +129,35 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
     let mut missing_from_parquet = 0usize;
     for (doc_id, passage_id) in doc_table.passage_ids.iter().enumerate() {
         let doc_id = doc_id as u32;
-        let Some((embedding_text, input_hash)) = passage_meta.get(passage_id) else {
+        let Some(meta) = passage_meta[doc_id as usize].as_ref() else {
             missing_from_parquet += 1;
             continue;
         };
-        if embedding_cache.has_valid(doc_id, passage_id, input_hash) {
+        if embedding_cache.has_valid(doc_id, passage_id, &meta.input_hash) {
             continue;
         }
         pending.push(super::provider::EmbeddingInput {
             doc_id,
             passage_id: passage_id.clone(),
-            embedding_text: embedding_text.clone(),
-            input_hash: input_hash.clone(),
+            embedding_text: meta.embedding_text.clone(),
+            input_hash: meta.input_hash.clone(),
         });
     }
     if missing_from_parquet > 0 {
-        eprintln!(
-            "       Warning: {} doc_table passages have no parquet row",
+        let pct = missing_from_parquet as f64 * 100.0 / doc_table.passage_ids.len().max(1) as f64;
+        let message = format!(
+            "{} doc_table passages have no parquet row ({pct:.1}% missing)",
             missing_from_parquet
         );
+        if config.allow_partial_vector_index {
+            eprintln!("       Warning: {message}");
+        } else {
+            anyhow::bail!(
+                "{message}. Refusing to build a partial vector index by default.\n\
+                 Rebuild doc_table/catalog from the same parquet, or rerun with \
+                 --allow-partial-vector-index if this subset is intentional."
+            );
+        }
     }
     eprintln!(
         "[4/5] {} passages to embed ({} already cached)",
@@ -173,7 +208,7 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
                         dim: row.dim,
                         document_template_id: DOCUMENT_TEMPLATE_ID.to_string(),
                         document_prefix: provider.document_prefix().to_string(),
-                        embedding: row.vector.clone(),
+                        embedding: row.vector,
                     };
                     embedding_cache.records.insert(row.doc_id, rec.clone());
                     pending_cache_records.push(rec);
@@ -222,10 +257,10 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
     let mut index_rows: Vec<EmbeddingRecord> = Vec::new();
     for (doc_id, passage_id) in doc_table.passage_ids.iter().enumerate() {
         let doc_id = doc_id as u32;
-        let Some((_, input_hash)) = passage_meta.get(passage_id) else {
+        let Some(meta) = passage_meta[doc_id as usize].as_ref() else {
             continue;
         };
-        let Some(rec) = embedding_cache.valid_record(doc_id, passage_id, input_hash) else {
+        let Some(rec) = embedding_cache.valid_record(doc_id, passage_id, &meta.input_hash) else {
             continue;
         };
         index_rows.push(EmbeddingRecord {

@@ -36,7 +36,11 @@ impl RetrievalBudget {
         }
     }
 
-    pub fn with_time_limits(mut self, max_elapsed_ms: Option<u64>, max_component_ms: Option<u64>) -> Self {
+    pub fn with_time_limits(
+        mut self,
+        max_elapsed_ms: Option<u64>,
+        max_component_ms: Option<u64>,
+    ) -> Self {
         self.max_elapsed_ms = max_elapsed_ms;
         self.max_component_ms = max_component_ms;
         self

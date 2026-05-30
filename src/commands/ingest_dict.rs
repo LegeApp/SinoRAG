@@ -21,7 +21,11 @@ use std::path::{Path, PathBuf};
 
 const MAX_GLOSS_CHARS: usize = 1000;
 
-pub fn run(dict_dir: PathBuf, out_parquet: PathBuf, parquet_compression: crate::storage::ParquetCompression) -> Result<()> {
+pub fn run(
+    dict_dir: PathBuf,
+    out_parquet: PathBuf,
+    parquet_compression: crate::storage::ParquetCompression,
+) -> Result<()> {
     if !dict_dir.is_dir() {
         anyhow::bail!("dictionary directory not found: {}", dict_dir.display());
     }
@@ -54,7 +58,10 @@ pub fn run(dict_dir: PathBuf, out_parquet: PathBuf, parquet_compression: crate::
         total += count;
     }
 
-    eprintln!("\nDict ingest complete: {total} entries across {} sources", sources.len());
+    eprintln!(
+        "\nDict ingest complete: {total} entries across {} sources",
+        sources.len()
+    );
     eprintln!("Output: {}", out_parquet.display());
     Ok(())
 }
@@ -115,7 +122,13 @@ fn ingest_source(
     }
 
     if !batch.is_empty() {
-        storage::write_dict_parquet_partitioned(&batch, out_parquet, source_name, part_index, compression)?;
+        storage::write_dict_parquet_partitioned(
+            &batch,
+            out_parquet,
+            source_name,
+            part_index,
+            compression,
+        )?;
     }
 
     Ok(count)
@@ -142,10 +155,7 @@ fn parse_soothill(bytes: &[u8]) -> Result<Vec<EntryTuple>> {
         g: String,
     }
     let entries: Vec<E> = serde_json::from_slice(bytes)?;
-    Ok(entries
-        .into_iter()
-        .map(|e| (e.t, e.s, e.g, None))
-        .collect())
+    Ok(entries.into_iter().map(|e| (e.t, e.s, e.g, None)).collect())
 }
 
 /// 丁福保: map of term → array of {"usg": category, "def": definition}
@@ -181,13 +191,12 @@ fn parse_simple_map(bytes: &[u8]) -> Result<Vec<EntryTuple>> {
     for (term, val) in map {
         let gloss = match &val {
             Value::String(s) => s.clone(),
-            Value::Object(obj) => {
-                obj.get("def")
-                    .or_else(|| obj.get("content"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            }
+            Value::Object(obj) => obj
+                .get("def")
+                .or_else(|| obj.get("content"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             _ => continue,
         };
         if !gloss.is_empty() {
@@ -203,7 +212,10 @@ fn parse_pentaglot(bytes: &[u8]) -> Result<Vec<EntryTuple>> {
     let mut out = Vec::with_capacity(map.len());
     for (term, val) in map {
         if let Some(obj) = val.as_object() {
-            let san = obj.get("san").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let san = obj
+                .get("san")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let parts: Vec<String> = obj
                 .iter()
                 .map(|(k, v)| format!("{}: {}", k, v.as_str().unwrap_or("")))
@@ -216,4 +228,3 @@ fn parse_pentaglot(bytes: &[u8]) -> Result<Vec<EntryTuple>> {
     }
     Ok(out)
 }
-

@@ -17,6 +17,8 @@
 
 use anyhow::{bail, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -26,9 +28,43 @@ use std::time::Duration;
 /// Set to `None` until the first pack is built and uploaded to GitHub Releases.
 /// When ready, replace with the direct download URL to `cbeta-pack.7z`.
 ///
-const PACK_URL: Option<&str> = Some("https://github.com/LegeApp/SinoRAG/releases/download/corpus-release-1/cbeta-pack.7z");
+pub const PACK_URL: Option<&str> =
+    Some("https://github.com/LegeApp/SinoRAG/releases/download/corpus-release-1/cbeta-pack.7z");
 
 const PACK_FILENAME: &str = "cbeta-pack.7z";
+
+#[derive(Debug, Clone)]
+pub enum InitProgressEvent {
+    Step {
+        label: String,
+        progress: Option<f32>,
+    },
+    Download {
+        received: u64,
+        total: Option<u64>,
+    },
+    Log(String),
+    Done(Result<(), String>),
+}
+
+pub trait InitProgress: Send + Sync {
+    fn event(&self, event: InitProgressEvent);
+}
+
+impl<F> InitProgress for F
+where
+    F: Fn(InitProgressEvent) + Send + Sync,
+{
+    fn event(&self, event: InitProgressEvent) {
+        self(event);
+    }
+}
+
+fn emit(progress: Option<&dyn InitProgress>, event: InitProgressEvent) {
+    if let Some(progress) = progress {
+        progress.event(event);
+    }
+}
 
 pub async fn run(
     url_override: Option<String>,
@@ -44,17 +80,35 @@ pub async fn run(
     let cbeta_partition = out_parquet.join("source_corpus=cbeta");
 
     if cbeta_partition.exists() && !force {
+        // Corpus present. If all fast indexes already exist too, nothing to do.
+        let derived = data_root.join("derived");
+        let indexes_complete = [
+            "doc_table.bin",
+            "catalog.index",
+            "phrase.index",
+            "tfidf.index",
+        ]
+        .iter()
+        .all(|name| derived.join(name).exists());
+        if indexes_complete {
+            eprintln!(
+                "CBETA corpus and indexes are already present at {}.",
+                data_root.display()
+            );
+            eprintln!("Run `sinorag status` to inspect, or use --force to rebuild everything.");
+            eprintln!("For semantic search: sinorag index vector-update --model bge-small-zh-v1.5");
+            return Ok(());
+        }
+        // Corpus present but indexes are incomplete — rebuild indexes only (skip download).
         eprintln!(
-            "CBETA corpus is already present at {}.",
-            cbeta_partition.display()
+            "CBETA corpus found at {}. Rebuilding missing indexes...",
+            data_root.display()
         );
-        eprintln!(
-            "Run `sinorag status` to inspect it, or use --force to re-initialize."
-        );
-        eprintln!(
-            "To rebuild from a local CBETA source instead: sinorag init --from-raw <PATH>"
-        );
-        return Ok(());
+        return tokio::task::spawn_blocking(move || {
+            build_local_indexes(&data_root, &out_parquet, None)
+        })
+        .await
+        .context("index rebuild task panicked")?;
     }
 
     // --from-raw: bypass download and ingest from local corpus files.
@@ -63,12 +117,9 @@ pub async fn run(
     }
 
     // -- Download ----------------------------------------------------------
-    let url = url_override
-        .as_deref()
-        .or(PACK_URL)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No official CBETA pack is published yet for this release.\n\
+    let url = url_override.as_deref().or(PACK_URL).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No official CBETA pack is published yet for this release.\n\
                  \n\
                  To ingest from your own CBETA source files:\n\
                  \n  \
@@ -81,30 +132,77 @@ pub async fn run(
                  \n  \
                    sinorag init --url file:///path/to/cbeta-pack.7z\n\
                    sinorag init --url https://example.com/cbeta-pack.7z"
-            )
-        })?;
-
-    // Download into a subdirectory so we stay on the same filesystem as data/.
-    let tmp_dir = data_root.join(".init-download");
-    std::fs::create_dir_all(&tmp_dir).context("creating temporary download directory")?;
-    let arc_path = tmp_dir.join(PACK_FILENAME);
-
-    eprintln!("Downloading pack from {}", url);
+        )
+    })?;
 
     // download_with_curl, extract_7z, and build_local_indexes are all synchronous
     // and can block for minutes on large packs — run them on a dedicated blocking thread
     // so the Tokio runtime stays responsive.
     let url_owned = url.to_string();
     tokio::task::spawn_blocking(move || {
-        download_with_curl(&url_owned, &arc_path)?;
-        eprintln!("\nExtracting pack...");
-        extract_7z(&arc_path, &data_root)?;
-        let _ = std::fs::remove_file(&arc_path);
-        let _ = std::fs::remove_dir(&tmp_dir);
-        build_local_indexes(&data_root, &out_parquet)
+        run_from_pack_url_blocking(&url_owned, false, data_root, out_parquet, None)
     })
     .await
     .context("init blocking task panicked")?
+}
+
+pub fn run_from_pack_url_blocking(
+    url: &str,
+    force: bool,
+    data_root: PathBuf,
+    out_parquet: PathBuf,
+    progress: Option<&dyn InitProgress>,
+) -> Result<()> {
+    let cbeta_partition = out_parquet.join("source_corpus=cbeta");
+    if cbeta_partition.exists() && !force {
+        let message = format!(
+            "CBETA corpus is already present at {}.",
+            cbeta_partition.display()
+        );
+        eprintln!("{message}");
+        emit(progress, InitProgressEvent::Log(message));
+        return Ok(());
+    }
+
+    let tmp_dir = data_root.join(".init-download");
+    std::fs::create_dir_all(&tmp_dir).context("creating temporary download directory")?;
+    let arc_path = tmp_dir.join(PACK_FILENAME);
+
+    let result = (|| {
+        let message = format!("Downloading pack from {url}");
+        eprintln!("{message}");
+        emit(
+            progress,
+            InitProgressEvent::Step {
+                label: message,
+                progress: Some(0.10),
+            },
+        );
+        download_pack(url, &arc_path, progress)?;
+
+        eprintln!("\nExtracting pack...");
+        emit(
+            progress,
+            InitProgressEvent::Step {
+                label: "Extracting corpus pack".to_string(),
+                progress: Some(0.35),
+            },
+        );
+        extract_7z(&arc_path, &data_root, progress)?;
+
+        build_local_indexes(&data_root, &out_parquet, progress)
+    })();
+
+    let _ = std::fs::remove_file(&arc_path);
+    let _ = std::fs::remove_dir(&tmp_dir);
+    emit(
+        progress,
+        InitProgressEvent::Done(match &result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }),
+    );
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +231,113 @@ fn download_with_curl(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+fn download_pack(url: &str, dest: &Path, progress: Option<&dyn InitProgress>) -> Result<()> {
+    if progress.is_none() {
+        return download_with_curl(url, dest);
+    }
+
+    if let Some(path) = url.strip_prefix("file://") {
+        let source = PathBuf::from(path);
+        let total = std::fs::metadata(&source).ok().map(|m| m.len());
+        copy_with_progress(&source, dest, total, progress)
+    } else {
+        download_with_powershell(url, dest, progress).or_else(|_| download_with_curl(url, dest))
+    }
+}
+
+fn copy_with_progress(
+    source: &Path,
+    dest: &Path,
+    total: Option<u64>,
+    progress: Option<&dyn InitProgress>,
+) -> Result<()> {
+    let mut input =
+        File::open(source).with_context(|| format!("opening pack source {}", source.display()))?;
+    let mut output = File::create(dest)
+        .with_context(|| format!("creating pack destination {}", dest.display()))?;
+    let mut received = 0_u64;
+    let mut buf = vec![0_u8; 1024 * 1024];
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        output.write_all(&buf[..n])?;
+        received += n as u64;
+        emit(progress, InitProgressEvent::Download { received, total });
+    }
+    Ok(())
+}
+
+fn download_with_powershell(
+    url: &str,
+    dest: &Path,
+    progress: Option<&dyn InitProgress>,
+) -> Result<()> {
+    let script = r#"
+param([string]$Url, [string]$Dest)
+$ErrorActionPreference = 'Stop'
+$request = [System.Net.HttpWebRequest]::Create($Url)
+$request.AllowAutoRedirect = $true
+$response = $request.GetResponse()
+try {
+  $total = $response.ContentLength
+  $stream = $response.GetResponseStream()
+  $file = [System.IO.File]::Create($Dest)
+  try {
+    $buffer = New-Object byte[] 1048576
+    [Int64]$received = 0
+    while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+      $file.Write($buffer, 0, $read)
+      $received += $read
+      Write-Output "SINORAG_DOWNLOAD $received $total"
+    }
+  } finally {
+    $file.Dispose()
+    $stream.Dispose()
+  }
+} finally {
+  $response.Dispose()
+}
+"#;
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+            url,
+            dest.to_str().context("non-UTF-8 destination path")?,
+        ])
+        .output()
+        .context("failed to invoke PowerShell for download")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("SINORAG_DOWNLOAD ") {
+            let mut parts = rest.split_whitespace();
+            let received = parts.next().and_then(|v| v.parse::<u64>().ok());
+            let total = parts.next().and_then(|v| v.parse::<i64>().ok());
+            if let Some(received) = received {
+                emit(
+                    progress,
+                    InitProgressEvent::Download {
+                        received,
+                        total: total.and_then(|v| (v > 0).then_some(v as u64)),
+                    },
+                );
+            }
+        }
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("PowerShell download failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Extraction
 // ---------------------------------------------------------------------------
@@ -142,7 +347,11 @@ fn download_with_curl(url: &str, dest: &Path) -> Result<()> {
 /// After extraction, `passages-raw.parquet/` is renamed to `passages.parquet/`
 /// if present — this handles archives built from the raw (uncompressed) source
 /// directory before the canonical name was established.
-fn extract_7z(arc_path: &Path, data_root: &Path) -> Result<()> {
+fn extract_7z(
+    arc_path: &Path,
+    data_root: &Path,
+    progress: Option<&dyn InitProgress>,
+) -> Result<()> {
     std::fs::create_dir_all(data_root)
         .with_context(|| format!("creating {}", data_root.display()))?;
 
@@ -175,7 +384,9 @@ fn extract_7z(arc_path: &Path, data_root: &Path) -> Result<()> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .count();
-    eprintln!("Extracted {file_count} files.");
+    let message = format!("Extracted {file_count} files.");
+    eprintln!("{message}");
+    emit(progress, InitProgressEvent::Log(message));
     Ok(())
 }
 
@@ -183,7 +394,11 @@ fn extract_7z(arc_path: &Path, data_root: &Path) -> Result<()> {
 // Local index build (doc_table + catalog + phrase + tfidf; vector left for user)
 // ---------------------------------------------------------------------------
 
-fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
+fn build_local_indexes(
+    data_root: &Path,
+    out_parquet: &Path,
+    progress: Option<&dyn InitProgress>,
+) -> Result<()> {
     let doc_table_path = data_root.join("derived").join("doc_table.bin");
     let catalog_path = data_root.join("derived").join("catalog.index");
     let phrase_path = data_root.join("derived").join("phrase.index");
@@ -194,6 +409,13 @@ fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
     }
 
     eprintln!("\n=== Building doc_table ===");
+    emit(
+        progress,
+        InitProgressEvent::Step {
+            label: "Building document table".to_string(),
+            progress: Some(0.48),
+        },
+    );
     crate::commands::document_table::build(
         out_parquet.to_path_buf(),
         doc_table_path.clone(),
@@ -201,6 +423,13 @@ fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
     )?;
 
     eprintln!("\n=== Building catalog index ===");
+    emit(
+        progress,
+        InitProgressEvent::Step {
+            label: "Building catalog index".to_string(),
+            progress: Some(0.56),
+        },
+    );
     crate::commands::catalog_index::build(
         out_parquet.to_path_buf(),
         catalog_path.clone(),
@@ -208,7 +437,14 @@ fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
         Some(doc_table_path.clone()),
     )?;
 
-    eprintln!("\n=== Building phrase + TF-IDF indexes (this may take several hours) ===");
+    eprintln!("\n=== Building phrase + TF-IDF indexes ===");
+    emit(
+        progress,
+        InitProgressEvent::Step {
+            label: "Building phrase and TF-IDF indexes".to_string(),
+            progress: Some(0.68),
+        },
+    );
     crate::commands::build_all_indexes(
         out_parquet.to_path_buf(),
         doc_table_path.clone(),
@@ -222,6 +458,7 @@ fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
         200_000, // max_features
         2048,    // buckets
         None,    // temp_dir
+        progress,
     )?;
 
     crate::commands::ingest::initialize_registry_after_ingest(
@@ -234,8 +471,15 @@ fn build_local_indexes(data_root: &Path, out_parquet: &Path) -> Result<()> {
 
     eprintln!("\nCorpus ready. All tools are available except semantic vector search.");
     eprintln!("  Check state:               sinorag status");
-    eprintln!("  Add semantic search:       sinorag indexes semantic --model bge-small-zh-v1.5");
+    eprintln!("  Add semantic search:       sinorag index vector-update --model bge-small-zh-v1.5");
     eprintln!("  Add a CEF corpus:          sinorag ingest cef <path>");
+    emit(
+        progress,
+        InitProgressEvent::Step {
+            label: "Corpus ready".to_string(),
+            progress: Some(1.0),
+        },
+    );
     Ok(())
 }
 
@@ -260,21 +504,19 @@ async fn ingest_from_raw(
     eprintln!("(phrase and TF-IDF indexes will NOT be built automatically)");
 
     crate::commands::ingest::run(
-        Some(corpus_path),
-        None,           // no kanripo
+        corpus_path,
         out_jsonl,
         out_parquet,
-        false,          // zen_only
-        None,           // resume
-        false,          // append (fresh init)
-        false,          // build_phrase_index
+        None,  // resume
+        false, // append (fresh init)
+        false, // build_phrase_index
         phrase_path,
-        4,              // phrase_gram_len default
-        false,          // build_tfidf
+        4,     // phrase_gram_len default
+        false, // build_tfidf
         Some(tfidf_path),
         Some(catalog_path),
-        None,           // phrase_max_memory
-        false,          // parallel_lexical
+        None,  // phrase_max_memory
+        false, // parallel_lexical
         crate::storage::ParquetCompression::Zstd,
     )
     .await

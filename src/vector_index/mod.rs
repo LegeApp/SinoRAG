@@ -601,17 +601,12 @@ fn build_and_dump_hnsw(
         params.ef_construction.max(8),
         DistL2 {},
     );
-    let row_vectors: Vec<Vec<f32>> = doc_ids
+    let data: Vec<(&[f32], usize)> = doc_ids
         .iter()
         .enumerate()
-        .map(|(row, _)| vectors[row * dim..(row + 1) * dim].to_vec())
+        .map(|(row, doc_id)| (&vectors[row * dim..(row + 1) * dim], *doc_id as usize))
         .collect();
-    let data: Vec<(&Vec<f32>, usize)> = row_vectors
-        .iter()
-        .zip(doc_ids.iter())
-        .map(|(v, doc_id)| (v, *doc_id as usize))
-        .collect();
-    hnsw.parallel_insert(&data);
+    hnsw.parallel_insert_slice(&data);
 
     let (dump_dir, basename) = hnsw_dump_location(index_path)?;
     // Remove stale dumps so file_dump (which uses overwrite-style unique-name

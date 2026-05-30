@@ -39,7 +39,9 @@ impl DictStore {
         ctx.register_parquet("dict", &source, ParquetReadOptions::default())
             .await?;
 
-        let df = ctx.sql("SELECT term, source, sanskrit, gloss FROM dict").await?;
+        let df = ctx
+            .sql("SELECT term, source, sanskrit, gloss FROM dict")
+            .await?;
         let batches = df.collect().await?;
 
         let mut entries: HashMap<String, Vec<DictEntry>> = HashMap::new();
@@ -175,7 +177,10 @@ pub struct EntityStore {
 }
 
 impl EntityStore {
-    pub async fn load(persons_dir: Option<&std::path::Path>, places_dir: Option<&std::path::Path>) -> anyhow::Result<Self> {
+    pub async fn load(
+        persons_dir: Option<&std::path::Path>,
+        places_dir: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
         use arrow::array::Array;
         use datafusion::prelude::*;
 
@@ -186,36 +191,68 @@ impl EntityStore {
         // Load persons
         if let Some(dir) = persons_dir {
             if dir.is_dir() {
-                let src = dir.join("**/*.parquet").to_string_lossy().replace('\\', "/");
-                if ctx.register_parquet("persons", &src, ParquetReadOptions::default()).await.is_ok() {
+                let src = dir
+                    .join("**/*.parquet")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if ctx
+                    .register_parquet("persons", &src, ParquetReadOptions::default())
+                    .await
+                    .is_ok()
+                {
                     let df = ctx.sql(
                         "SELECT person_id, primary_name, primary_name_lang, alt_names_json, dynasty, concise_bio FROM persons"
                     ).await?;
                     for batch in df.collect().await? {
-                        let ids = batch.column_by_name("person_id")
+                        let ids = batch
+                            .column_by_name("person_id")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let names = batch.column_by_name("primary_name")
+                        let names = batch
+                            .column_by_name("primary_name")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let langs = batch.column_by_name("primary_name_lang")
+                        let langs = batch
+                            .column_by_name("primary_name_lang")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let alts = batch.column_by_name("alt_names_json")
+                        let alts = batch
+                            .column_by_name("alt_names_json")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let dynasties = batch.column_by_name("dynasty")
+                        let dynasties = batch
+                            .column_by_name("dynasty")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let bios = batch.column_by_name("concise_bio")
+                        let bios = batch
+                            .column_by_name("concise_bio")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let (Some(ids), Some(names), Some(langs), Some(alts), Some(dynasties), Some(bios)) =
-                            (ids, names, langs, alts, dynasties, bios) else { continue };
+                        let (
+                            Some(ids),
+                            Some(names),
+                            Some(langs),
+                            Some(alts),
+                            Some(dynasties),
+                            Some(bios),
+                        ) = (ids, names, langs, alts, dynasties, bios)
+                        else {
+                            continue;
+                        };
 
                         for i in 0..batch.num_rows() {
                             let lang = langs.value(i);
                             let primary = names.value(i).to_string();
                             let id = ids.value(i).to_string();
-                            let dynasty = if dynasties.is_null(i) { None } else { Some(dynasties.value(i).trim().to_string()) };
-                            let summary = if bios.is_null(i) { String::new() } else { truncate_gloss(bios.value(i), 200) };
+                            let dynasty = if dynasties.is_null(i) {
+                                None
+                            } else {
+                                Some(dynasties.value(i).trim().to_string())
+                            };
+                            let summary = if bios.is_null(i) {
+                                String::new()
+                            } else {
+                                truncate_gloss(bios.value(i), 200)
+                            };
 
                             // Index CJK primary name if present
-                            if (lang.starts_with("zho") || lang.starts_with("jpn")) && primary.chars().count() >= 2 {
+                            if (lang.starts_with("zho") || lang.starts_with("jpn"))
+                                && primary.chars().count() >= 2
+                            {
                                 let entry = EntityEntry {
                                     entity_type: "person",
                                     id: id.clone(),
@@ -228,7 +265,8 @@ impl EntityStore {
                             }
 
                             // Always index CJK alt names (covers entries with non-CJK primary)
-                            if let Ok(alts_vec) = serde_json::from_str::<Vec<String>>(alts.value(i)) {
+                            if let Ok(alts_vec) = serde_json::from_str::<Vec<String>>(alts.value(i))
+                            {
                                 for alt in alts_vec {
                                     let ch = alt.chars().count();
                                     if ch >= 2 && crate::normalize::contains_cjk(&alt) {
@@ -253,36 +291,68 @@ impl EntityStore {
         // Load places
         if let Some(dir) = places_dir {
             if dir.is_dir() {
-                let src = dir.join("**/*.parquet").to_string_lossy().replace('\\', "/");
-                if ctx.register_parquet("places", &src, ParquetReadOptions::default()).await.is_ok() {
+                let src = dir
+                    .join("**/*.parquet")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if ctx
+                    .register_parquet("places", &src, ParquetReadOptions::default())
+                    .await
+                    .is_ok()
+                {
                     let df = ctx.sql(
                         "SELECT place_id, primary_name, primary_name_lang, alt_names_json, category, description FROM places"
                     ).await?;
                     for batch in df.collect().await? {
-                        let ids = batch.column_by_name("place_id")
+                        let ids = batch
+                            .column_by_name("place_id")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let names = batch.column_by_name("primary_name")
+                        let names = batch
+                            .column_by_name("primary_name")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let langs = batch.column_by_name("primary_name_lang")
+                        let langs = batch
+                            .column_by_name("primary_name_lang")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let alts = batch.column_by_name("alt_names_json")
+                        let alts = batch
+                            .column_by_name("alt_names_json")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let cats = batch.column_by_name("category")
+                        let cats = batch
+                            .column_by_name("category")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let descs = batch.column_by_name("description")
+                        let descs = batch
+                            .column_by_name("description")
                             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-                        let (Some(ids), Some(names), Some(langs), Some(alts), Some(cats), Some(descs)) =
-                            (ids, names, langs, alts, cats, descs) else { continue };
+                        let (
+                            Some(ids),
+                            Some(names),
+                            Some(langs),
+                            Some(alts),
+                            Some(cats),
+                            Some(descs),
+                        ) = (ids, names, langs, alts, cats, descs)
+                        else {
+                            continue;
+                        };
 
                         for i in 0..batch.num_rows() {
                             let lang = langs.value(i);
                             let primary = names.value(i).to_string();
                             let id = ids.value(i).to_string();
-                            let category = if cats.is_null(i) { None } else { Some(cats.value(i).trim().to_string()) };
-                            let summary = if descs.is_null(i) { String::new() } else { truncate_gloss(descs.value(i), 200) };
+                            let category = if cats.is_null(i) {
+                                None
+                            } else {
+                                Some(cats.value(i).trim().to_string())
+                            };
+                            let summary = if descs.is_null(i) {
+                                String::new()
+                            } else {
+                                truncate_gloss(descs.value(i), 200)
+                            };
 
                             // Index CJK primary name if present
-                            if (lang.starts_with("zho") || lang.starts_with("jpn")) && primary.chars().count() >= 2 {
+                            if (lang.starts_with("zho") || lang.starts_with("jpn"))
+                                && primary.chars().count() >= 2
+                            {
                                 let entry = EntityEntry {
                                     entity_type: "place",
                                     id: id.clone(),
@@ -295,7 +365,8 @@ impl EntityStore {
                             }
 
                             // Always index CJK alt names (covers entries with non-CJK primary)
-                            if let Ok(alts_vec) = serde_json::from_str::<Vec<String>>(alts.value(i)) {
+                            if let Ok(alts_vec) = serde_json::from_str::<Vec<String>>(alts.value(i))
+                            {
                                 for alt in alts_vec {
                                     let ch = alt.chars().count();
                                     if ch >= 2 && crate::normalize::contains_cjk(&alt) {
@@ -317,8 +388,15 @@ impl EntityStore {
             }
         }
 
-        eprintln!("entity: {} distinct name keys, max_chars={}", entries.len(), max_chars);
-        Ok(EntityStore { entries, max_name_chars: max_chars })
+        eprintln!(
+            "entity: {} distinct name keys, max_chars={}",
+            entries.len(),
+            max_chars
+        );
+        Ok(EntityStore {
+            entries,
+            max_name_chars: max_chars,
+        })
     }
 
     /// Extract entity matches from `text`, up to `limit`. Returns all matching entities.
@@ -479,7 +557,10 @@ pub async fn annotate_response(response: &mut serde_json::Value) {
                 })
                 .collect();
             if let Some(obj) = response.as_object_mut() {
-                obj.insert("_term_context".to_string(), serde_json::Value::Array(annotations));
+                obj.insert(
+                    "_term_context".to_string(),
+                    serde_json::Value::Array(annotations),
+                );
             }
         }
     }
@@ -512,7 +593,10 @@ pub async fn annotate_response(response: &mut serde_json::Value) {
                 .collect();
             if !annotations.is_empty() {
                 if let Some(obj) = response.as_object_mut() {
-                    obj.insert("_entity_context".to_string(), serde_json::Value::Array(annotations));
+                    obj.insert(
+                        "_entity_context".to_string(),
+                        serde_json::Value::Array(annotations),
+                    );
                 }
             }
         }

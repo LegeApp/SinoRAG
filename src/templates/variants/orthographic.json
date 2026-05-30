@@ -1,6 +1,6 @@
 {
   "schema": "sinorag-orthographic-v1",
-  "description": "Hand-seeded traditional ↔ simplified Han pairs that appear frequently in CBETA / kanripo. Each pair generates two-way variants. Extend over time.",
+  "description": "Hand-seeded traditional ↔ simplified Han pairs that appear frequently in CBETA. Each pair generates two-way variants. Extend over time.",
   "pairs": [
     ["佛", "佛"],
     ["經", "经"],

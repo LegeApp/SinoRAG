@@ -86,55 +86,50 @@ pub async fn call_tool_enveloped(
 ) -> ToolCallEnvelope {
     let started = std::time::Instant::now();
 
-    match call_tool(engine, &tool, args).await {
-        Ok(result) => ToolCallEnvelope {
-            id,
-            ok: true,
-            tool,
-            result: Some(result),
-            error: None,
-            meta: ToolCallMeta {
-                elapsed_ms: started.elapsed().as_millis(),
-                started_utc: None,
-                finished_utc: None,
-            },
-        },
+    match call_tool(engine, &tool, args.clone()).await {
+        Ok(result) => {
+            let elapsed_ms = started.elapsed().as_millis();
+            crate::tools::log::append_call(&tool, &args, Some(&result), None, elapsed_ms);
+            ToolCallEnvelope {
+                id,
+                ok: true,
+                tool,
+                result: Some(result),
+                error: None,
+                meta: ToolCallMeta {
+                    elapsed_ms,
+                    started_utc: None,
+                    finished_utc: None,
+                },
+            }
+        }
 
-        Err(err) => ToolCallEnvelope {
-            id,
-            ok: false,
-            tool,
-            result: None,
-            error: Some(classify_tool_error(&err)),
-            meta: ToolCallMeta {
-                elapsed_ms: started.elapsed().as_millis(),
-                started_utc: None,
-                finished_utc: None,
-            },
-        },
+        Err(err) => {
+            let elapsed_ms = started.elapsed().as_millis();
+            let error = classify_tool_error(&err);
+            crate::tools::log::append_call(&tool, &args, None, Some(&error), elapsed_ms);
+            ToolCallEnvelope {
+                id,
+                ok: false,
+                tool,
+                result: None,
+                error: Some(error),
+                meta: ToolCallMeta {
+                    elapsed_ms,
+                    started_utc: None,
+                    finished_utc: None,
+                },
+            }
+        }
     }
 }
 
 pub fn audience_for_tool(name: &str) -> ToolAudience {
-    match name {
-        "status"
-        | "plan-tools"
-        | "evidence-search"
-        | "source-investigate"
-        | "hybrid-discover"
-        | "source-read"
-        | "scope-profile"
-        | "pair-appearance"
-        | "pair-profile"
-        | "citation-verify"
-        | "person-resolve"
-        | "place-resolve"
-        | "person-history"
-        | "report-from-evidence"
-        | "pdf-build" => ToolAudience::DefaultAgent,
-        "phrase-index-search" | "catalog-index-info" | "vector-info" => ToolAudience::InternalDebug,
-        _ => ToolAudience::Specialist,
-    }
+    tool_defs()
+        .into_iter()
+        .find(|def| def.spec.name == name)
+        .map(|def| def.spec.audience)
+        .unwrap_or(ToolAudience::Specialist)
 }
 
 /// Get all tool definitions
@@ -144,6 +139,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "status",
+                audience: ToolAudience::DefaultAgent,
                 description: "Show what's been ingested and which indexes are built under the data root.",
                 input_schema: schema_for::<StatusRequest>(),
                 output_schema: schema_for::<StatusResponse>(),
@@ -166,6 +162,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "tool-docs",
+                audience: ToolAudience::Specialist,
                 description: "Return compiled-in documentation for all tools or one named tool.",
                 input_schema: schema_for::<ToolDocsRequest>(),
                 output_schema: schema_for::<ToolDocsResponse>(),
@@ -189,10 +186,35 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
 
+        // Tool log summary tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "tool-log-summary",
+                audience: ToolAudience::Specialist,
+                description: "Summarize local cross-session tool-call logs with compact performance and success/failure aggregates. Specialist: use when deciding which tools have worked reliably in this environment.",
+                input_schema: schema_for::<ToolLogSummaryRequest>(),
+                output_schema: schema_for::<ToolLogSummaryResponse>(),
+                requires: vec![],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Summarize recent local tool calls",
+                        args: serde_json::json!({ "recent": 20 }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: ToolLogSummaryRequest = serde_json::from_value(args)?;
+                let res = engine.tool_log_summary_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // Passage tool
         ToolDef {
             spec: ToolSpec {
                 name: "passage",
+                audience: ToolAudience::Specialist,
                 description: "Retrieve one passage by passage_id.",
                 input_schema: schema_for::<PassageRequest>(),
                 output_schema: schema_for::<PassageResponse>(),
@@ -218,6 +240,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "source-read",
+                audience: ToolAudience::DefaultAgent,
                 description: "Read an ordered source stream in cursor-based, citation-aware chunks.",
                 input_schema: schema_for::<SourceReadRequest>(),
                 output_schema: schema_for::<SourceReadResponse>(),
@@ -254,6 +277,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "search",
+                audience: ToolAudience::Specialist,
                 description: "Exact phrase search across loaded passage text. Uses the phrase index when available, verifies candidates against parquet text, and falls back to a parquet scan if no index/doc table is available. Optional modes add work/division clusters or term-usage traces.",
                 input_schema: schema_for::<SearchRequest>(),
                 output_schema: schema_for::<SearchResponse>(),
@@ -289,6 +313,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "heading-search",
+                audience: ToolAudience::Specialist,
                 description: "Search heading and section metadata by title/path, with passage-text fallback.",
                 input_schema: schema_for::<HeadingSearchRequest>(),
                 output_schema: schema_for::<HeadingSearchResponse>(),
@@ -316,6 +341,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "canonical-source",
+                audience: ToolAudience::Specialist,
                 description: "Find canon-side source passages for a phrase.",
                 input_schema: schema_for::<CanonicalSourceRequest>(),
                 output_schema: schema_for::<CanonicalSourceResponse>(),
@@ -342,6 +368,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "validate-adjudication",
+                audience: ToolAudience::Specialist,
                 description: "Validate an adjudication JSON file for structural correctness.",
                 input_schema: schema_for::<ValidateAdjudicationRequest>(),
                 output_schema: schema_for::<ValidateAdjudicationResponse>(),
@@ -367,6 +394,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "graph-build",
+                audience: ToolAudience::Specialist,
                 description: "Build evidence graph from adjudication JSON.",
                 input_schema: schema_for::<GraphBuildRequest>(),
                 output_schema: schema_for::<GraphBuildResponse>(),
@@ -395,6 +423,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "report-build",
+                audience: ToolAudience::Specialist,
                 description: "Build markdown report from adjudication and graph files.",
                 input_schema: schema_for::<ReportBuildRequest>(),
                 output_schema: schema_for::<ReportBuildResponse>(),
@@ -424,6 +453,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "pdf-build",
+                audience: ToolAudience::DefaultAgent,
                 description: "Build a PDF with the built-in Lopdf renderer from either Markdown or structured report/evidence JSON. Use input_json for the basic report template; no external PDF tools are required.",
                 input_schema: schema_for::<PdfBuildRequest>(),
                 output_schema: schema_for::<PdfBuildResponse>(),
@@ -459,6 +489,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "works",
+                audience: ToolAudience::Specialist,
                 description: "List works in the catalog, optionally filtered by tradition/period/canon/author.",
                 input_schema: schema_for::<WorksRequest>(),
                 output_schema: schema_for::<WorksResponse>(),
@@ -491,6 +522,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "catalog-index-info",
+                audience: ToolAudience::InternalDebug,
                 description: "Show catalog index metadata.",
                 input_schema: schema_for::<CatalogIndexInfoRequest>(),
                 output_schema: schema_for::<CatalogIndexInfoResponse>(),
@@ -514,6 +546,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "vector-info",
+                audience: ToolAudience::InternalDebug,
                 description: "Show vector index metadata and doc-table compatibility.",
                 input_schema: schema_for::<VectorInfoRequest>(),
                 output_schema: schema_for::<VectorInfoResponse>(),
@@ -537,7 +570,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "vector-neighbors",
-                description: "Find semantic neighbor candidates from a seed passage or external query embedding. Results are discovery candidates, not exact evidence.",
+                audience: ToolAudience::Specialist,
+                description: "Find semantic neighbor candidates from a seed passage or external query embedding. Results are discovery candidates, not exact evidence. Specialist: prefer hybrid-discover, which merges and rank-normalizes these with lexical parallels — call directly only when you want raw vector neighbors.",
                 input_schema: schema_for::<VectorNeighborsRequest>(),
                 output_schema: schema_for::<VectorNeighborsResponse>(),
                 requires: vec!["vector.index", "doc_table.bin", "passages.parquet"],
@@ -563,7 +597,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "similar",
-                description: "Find TF-IDF similar passages to a seed passage.",
+                audience: ToolAudience::Specialist,
+                description: "Find TF-IDF similar passages to a seed passage. Specialist lexical primitive: prefer hybrid-discover, which merges this with semantic neighbors and rank-normalizes — call directly only when you want TF-IDF parallels alone.",
                 input_schema: schema_for::<SimilarRequest>(),
                 output_schema: schema_for::<SimilarResponse>(),
                 requires: vec!["passages.parquet", "tfidf.index", "doc_table.bin"],
@@ -589,7 +624,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "frontier",
-                description: "Generate a discovery frontier packet for an agent session.",
+                audience: ToolAudience::Specialist,
+                description: "Generate a discovery frontier packet for an agent session. Specialist: source-investigate wraps this — call directly only when you want the raw discovery-frontier packet.",
                 input_schema: schema_for::<FrontierRequest>(),
                 output_schema: schema_for::<FrontierResponse>(),
                 requires: vec!["passages.parquet", "tfidf.index", "doc_table.bin"],
@@ -616,7 +652,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "first-attestation",
-                description: "Find the earliest attestation of a phrase, ordered by period_rank.",
+                audience: ToolAudience::Specialist,
+                description: "Find the earliest attestation of a phrase, ordered by period_rank. Specialist: evidence-search runs this as its `include_attestation` step — call directly only when the phrase is already verified and you need just the earliest attestation.",
                 input_schema: schema_for::<FirstAttestationRequest>(),
                 output_schema: schema_for::<FirstAttestationResponse>(),
                 requires: vec!["passages.parquet", "doc_table.bin"],
@@ -642,7 +679,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "phrase-history",
-                description: "Analyze the historical distribution of a phrase across periods, canons, and traditions.",
+                audience: ToolAudience::Specialist,
+                description: "Analyze the historical distribution of a phrase across periods, canons, and traditions. Specialist: evidence-search (`include_history`) and source-investigate wrap this — call directly only for a standalone distribution.",
                 input_schema: schema_for::<PhraseHistoryRequest>(),
                 output_schema: schema_for::<PhraseHistoryResponse>(),
                 requires: vec!["passages.parquet"],
@@ -668,6 +706,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "phrase-index-search",
+                audience: ToolAudience::InternalDebug,
                 description: "Search for a phrase using the phrase index for fast lookup.",
                 input_schema: schema_for::<PhraseIndexSearchRequest>(),
                 output_schema: schema_for::<PhraseIndexSearchResponse>(),
@@ -694,6 +733,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "seed-pick",
+                audience: ToolAudience::Specialist,
                 description: "Pick unworked seed passages for research, filtered by tradition and period.",
                 input_schema: schema_for::<SeedPickRequest>(),
                 output_schema: schema_for::<SeedPickResponse>(),
@@ -721,7 +761,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "expand-context-adaptive",
-                description: "Expand context around a passage by climbing the catalog tree to fit a character budget.",
+                audience: ToolAudience::Specialist,
+                description: "Expand context around a passage by climbing the catalog tree to fit a character budget. Specialist: source-read is the preferred way to read around a passage — use this when you specifically need catalog-tree context expansion to a char budget.",
                 input_schema: schema_for::<ExpandContextAdaptiveRequest>(),
                 output_schema: schema_for::<ExpandContextAdaptiveResponse>(),
                 requires: vec!["passages.parquet", "catalog.index", "doc_table.bin"],
@@ -747,7 +788,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "trace-term-usage",
-                description: "Trace term usage across periods, canons, authors, or works with hit counts and representative passages.",
+                audience: ToolAudience::Specialist,
+                description: "Trace term usage across periods, canons, authors, or works with hit counts and representative passages. Specialist: prefer evidence-search or scope-profile for a full workup — call directly when you only need the usage breakdown.",
                 input_schema: schema_for::<TraceTermUsageRequest>(),
                 output_schema: schema_for::<TraceTermUsageResponse>(),
                 requires: vec!["passages.parquet", "doc_table.bin"],
@@ -775,7 +817,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "query-expand-terms",
-                description: "Produce variants/orthographic flips/aliases for a seed phrase using bundled lookup tables.",
+                audience: ToolAudience::Specialist,
+                description: "Produce variants/orthographic flips/aliases for a seed phrase using bundled lookup tables. Specialist: evidence-search runs this internally — call directly only to inspect candidate variants before searching.",
                 input_schema: schema_for::<QueryExpandTermsRequest>(),
                 output_schema: schema_for::<QueryExpandTermsResponse>(),
                 requires: vec![],
@@ -802,7 +845,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "compare-usage",
-                description: "Compare two sub-corpora and return distinctive terms using log-odds ratio scoring.",
+                audience: ToolAudience::Specialist,
+                description: "Compare two sub-corpora and return distinctive terms using log-odds ratio scoring. Specialist: scope-profile wraps this — call directly only for a bare two-corpus distinctive-term comparison.",
                 input_schema: schema_for::<CompareUsageRequest>(),
                 output_schema: schema_for::<CompareUsageResponse>(),
                 requires: vec!["passages.parquet", "catalog.index", "doc_table.bin"],
@@ -831,6 +875,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "collocation-search",
+                audience: ToolAudience::Specialist,
                 description: "Find terms that co-occur near a seed phrase more often than expected by chance.",
                 input_schema: schema_for::<CollocationSearchRequest>(),
                 output_schema: schema_for::<CollocationSearchResponse>(),
@@ -860,6 +905,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "pair-appearance",
+                audience: ToolAudience::DefaultAgent,
                 description: "Find passages where two specified terms both appear, optionally constrained to a character window or sentence.",
                 input_schema: schema_for::<PairAppearanceRequest>(),
                 output_schema: schema_for::<PairAppearanceResponse>(),
@@ -898,6 +944,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "outline-search",
+                audience: ToolAudience::Specialist,
                 description: "Search for a phrase within a catalog outline node and return hits grouped by child outline nodes.",
                 input_schema: schema_for::<OutlineSearchRequest>(),
                 output_schema: schema_for::<OutlineSearchResponse>(),
@@ -927,7 +974,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "cluster-hits",
-                description: "Cluster phrase search hits by catalog outline (work/division), returning hit counts per cluster with representative passages.",
+                audience: ToolAudience::Specialist,
+                description: "Cluster phrase search hits by catalog outline (work/division), returning hit counts per cluster with representative passages. Specialist: evidence-search wraps this as `include_clusters` — call directly only to cluster hits without the rest of an evidence workup.",
                 input_schema: schema_for::<ClusterHitsRequest>(),
                 output_schema: schema_for::<ClusterHitsResponse>(),
                 requires: vec!["passages.parquet", "catalog.index", "doc_table.bin"],
@@ -955,7 +1003,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "absence-check",
-                description: "Check whether a phrase is absent from a specific catalog scope (work, canon, period).",
+                audience: ToolAudience::Specialist,
+                description: "Check whether a phrase is absent from a specific catalog scope (work, canon, period). Specialist: evidence-search wraps this as `include_absence_check` — call directly only for a standalone absence test in one scope.",
                 input_schema: schema_for::<AbsenceCheckRequest>(),
                 output_schema: schema_for::<AbsenceCheckResponse>(),
                 requires: vec!["passages.parquet", "catalog.index", "doc_table.bin"],
@@ -982,6 +1031,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "plan-tools",
+                audience: ToolAudience::DefaultAgent,
                 description: "Recommend an agent workflow and concrete next tool calls for a research task.",
                 input_schema: schema_for::<PlanToolsRequest>(),
                 output_schema: schema_for::<PlanToolsResponse>(),
@@ -1008,6 +1058,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "evidence-search",
+                audience: ToolAudience::DefaultAgent,
                 description: "Run exact phrase evidence search plus optional attestation/history/usage/cluster summaries.",
                 input_schema: schema_for::<EvidenceSearchRequest>(),
                 output_schema: schema_for::<EvidenceSearchResponse>(),
@@ -1036,6 +1087,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "hybrid-discover",
+                audience: ToolAudience::DefaultAgent,
                 description: "Combine vector and TF-IDF discovery candidates when both indexes are available, or degrade to explicit lexical-only/semantic-only discovery mode.",
                 input_schema: schema_for::<HybridDiscoverRequest>(),
                 output_schema: schema_for::<HybridDiscoverResponse>(),
@@ -1062,6 +1114,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "source-investigate",
+                audience: ToolAudience::DefaultAgent,
                 description: "Gather seed passage context, frontier, similarity, vector neighbors, and phrase histories for source investigation.",
                 input_schema: schema_for::<SourceInvestigateRequest>(),
                 output_schema: schema_for::<SourceInvestigateResponse>(),
@@ -1089,6 +1142,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "scope-profile",
+                audience: ToolAudience::DefaultAgent,
                 description: "Compare two corpus scopes and optionally trace a phrase inside the same profile.",
                 input_schema: schema_for::<ScopeProfileRequest>(),
                 output_schema: schema_for::<ScopeProfileResponse>(),
@@ -1117,6 +1171,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "batch-evidence-search",
+                audience: ToolAudience::Specialist,
                 description: "Search for multiple phrases and return compact per-phrase summaries.",
                 input_schema: schema_for::<BatchEvidenceSearchRequest>(),
                 output_schema: schema_for::<BatchEvidenceSearchResponse>(),
@@ -1143,7 +1198,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "pair-profile",
-                description: "Summarise how often two terms appear together versus separately, grouped by period, canon, work, or author. Use for analytical questions like 'does term A appear with term B more in Song than Tang sources?'",
+                audience: ToolAudience::DefaultAgent,
+                description: "Summarise how often two terms appear together versus separately, grouped by period, canon, work, or author. Supports passage/window/sentence/section/work co-occurrence units. Use for analytical questions like 'does term A appear with term B more in Song than Tang sources?'",
                 input_schema: schema_for::<PairProfileRequest>(),
                 output_schema: schema_for::<PairProfileResponse>(),
                 requires: vec!["passages.parquet", "doc_table.bin"],
@@ -1184,6 +1240,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "person-resolve",
+                audience: ToolAudience::DefaultAgent,
                 description: "Resolve a person's name to candidate forms and show corpus presence. Use before person-history to confirm spelling and aliases are present in the corpus.",
                 input_schema: schema_for::<PersonResolveRequest>(),
                 output_schema: schema_for::<PersonResolveResponse>(),
@@ -1210,6 +1267,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "place-resolve",
+                audience: ToolAudience::DefaultAgent,
                 description: "Resolve a place name to its DDBC authority record (coordinates, category, alternate names) and show corpus presence. Use to disambiguate historical place names and find geographic context.",
                 input_schema: schema_for::<PlaceResolveRequest>(),
                 output_schema: schema_for::<PlaceResolveResponse>(),
@@ -1236,6 +1294,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "person-history",
+                audience: ToolAudience::DefaultAgent,
                 description: "Retrieve passages mentioning a person, ordered by period. Returns mention-class labels (lineage_relation, attributed_saying, case_appearance, commentarial_reference, name_mention). Run person-resolve first to confirm name forms.",
                 input_schema: schema_for::<PersonHistoryRequest>(),
                 output_schema: schema_for::<PersonHistoryResponse>(),
@@ -1263,6 +1322,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "citation-verify",
+                audience: ToolAudience::DefaultAgent,
                 description: "Verify whether a claimed quotation appears in the corpus, optionally scoped to a specific work, canon, or node. Returns exact hits and near-matches when the exact quote is not found. Use for provenance questions like 'is this saying really from the Diamond Sutra?'",
                 input_schema: schema_for::<CitationVerifyRequest>(),
                 output_schema: schema_for::<CitationVerifyResponse>(),
@@ -1301,6 +1361,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             spec: ToolSpec {
                 name: "report-from-evidence",
+                audience: ToolAudience::DefaultAgent,
                 description: "Validate adjudication, build evidence graph, and build the markdown report in one workflow.",
                 input_schema: schema_for::<ReportFromEvidenceRequest>(),
                 output_schema: schema_for::<ReportFromEvidenceResponse>(),
@@ -1331,7 +1392,10 @@ pub fn tool_defs() -> Vec<ToolDef> {
     // strict JSON-Schema validators do not reject annotated responses.
     for def in &mut defs {
         if let Some(obj) = def.spec.output_schema.as_object_mut() {
-            obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(true));
+            obj.insert(
+                "additionalProperties".to_string(),
+                serde_json::Value::Bool(true),
+            );
         }
     }
 
@@ -1339,3 +1403,32 @@ pub fn tool_defs() -> Vec<ToolDef> {
 }
 
 // Implementations will be added to engine.rs
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guard the public surface: the default manifest should stay compact and
+    /// debug-only tools should remain hidden unless explicitly requested.
+    #[test]
+    fn audience_labels_keep_manifest_shape() {
+        let defs = tool_defs();
+        let default_count = defs
+            .iter()
+            .filter(|def| def.spec.audience == ToolAudience::DefaultAgent)
+            .count();
+        let internal_count = defs
+            .iter()
+            .filter(|def| def.spec.audience == ToolAudience::InternalDebug)
+            .count();
+        assert!(
+            default_count <= 18,
+            "default agent manifest grew to {default_count} tools; keep it compact"
+        );
+        assert!(
+            internal_count >= 3,
+            "debug tools lost their internal labels"
+        );
+        assert_eq!(audience_for_tool("missing-tool"), ToolAudience::Specialist);
+    }
+}

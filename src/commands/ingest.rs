@@ -6,7 +6,6 @@
 //!     passages.jsonl
 //!     passages.parquet/
 //!       source_corpus=cbeta/part-*.parquet
-//!       source_corpus=kanripo/part-*.parquet
 //!     .ingest_checkpoint.json
 //! ```
 //!
@@ -17,7 +16,7 @@
 
 use crate::cbeta_sidecar;
 use crate::models::PassageRecord;
-use crate::{ingest, storage, tei};
+use crate::{storage, tei};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -59,16 +58,13 @@ struct Checkpoint {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CheckpointStats {
     cbeta: usize,
-    kanripo: usize,
     total: usize,
 }
 
 pub async fn run(
-    corpus: Option<PathBuf>,
-    kanripo_input: Option<PathBuf>,
+    corpus: PathBuf,
     out_jsonl: PathBuf,
     out_parquet: PathBuf,
-    zen_only: bool,
     resume: Option<PathBuf>,
     append: bool,
     build_phrase_index: bool,
@@ -82,10 +78,6 @@ pub async fn run(
     parquet_compression: storage::ParquetCompression,
 ) -> Result<()> {
     let out = PathBuf::from("data");
-
-    if corpus.is_none() && kanripo_input.is_none() {
-        anyhow::bail!("ingest requires at least one of --corpus or --kanripo-input");
-    }
 
     // -- Resolve / set up staging dir + checkpoint -----------------------
     let (staging_root, mut checkpoint, resuming) = match resume {
@@ -172,20 +164,13 @@ pub async fn run(
 
     // -- Per-corpus batches + part counters ------------------------------
     let mut cbeta_batch = storage::PassageBatch::default();
-    let mut kanripo_batch = storage::PassageBatch::default();
     let mut cbeta_part_index = checkpoint
         .next_part_index
         .get("cbeta")
         .copied()
         .unwrap_or(0);
-    let mut kanripo_part_index = checkpoint
-        .next_part_index
-        .get("kanripo")
-        .copied()
-        .unwrap_or(0);
     let mut total = checkpoint.stats.total;
     let mut cbeta_count = checkpoint.stats.cbeta;
-    let mut kanripo_count = checkpoint.stats.kanripo;
 
     let processed_files = std::mem::take(&mut checkpoint.processed_files);
     let mut processed_files = processed_files;
@@ -216,9 +201,7 @@ pub async fn run(
 
     let save_checkpoint = |processed: &HashSet<String>,
                            cbeta_idx: usize,
-                           kanripo_idx: usize,
                            cbeta_c: usize,
-                           kanripo_c: usize,
                            tot: usize,
                            cp: &Checkpoint|
      -> Result<()> {
@@ -230,12 +213,10 @@ pub async fn run(
             next_part_index: {
                 let mut m = HashMap::new();
                 m.insert("cbeta".to_string(), cbeta_idx);
-                m.insert("kanripo".to_string(), kanripo_idx);
                 m
             },
             stats: CheckpointStats {
                 cbeta: cbeta_c,
-                kanripo: kanripo_c,
                 total: tot,
             },
         };
@@ -246,7 +227,8 @@ pub async fn run(
     eprintln!("staging at {}", staging_root.display());
 
     // -- CBETA -----------------------------------------------------------
-    if let Some(corpus_root) = corpus.as_ref() {
+    {
+        let corpus_root = &corpus;
         let scan = tei::scan_cbeta_corpus(corpus_root)?;
         let distribution = scan.distribution;
         let paths = scan.files;
@@ -298,11 +280,8 @@ pub async fn run(
                 &rel_path,
                 sidecar_ref,
                 distribution,
+                Some(cbeta_sidecar::work_catalog()),
             );
-            if zen_only && !meta.traditions.iter().any(|t| t == "Chan/Zen") {
-                pb.inc(1);
-                continue;
-            }
             for passage in tei::extract_passages_from_file(&xml_path, &rel_path, &meta)? {
                 emit(
                     &passage,
@@ -320,9 +299,7 @@ pub async fn run(
                 save_checkpoint(
                     &processed_files,
                     cbeta_part_index,
-                    kanripo_part_index,
                     cbeta_count,
-                    kanripo_count,
                     total,
                     &checkpoint,
                 )?;
@@ -330,93 +307,6 @@ pub async fn run(
             pb.inc(1);
         }
         pb.finish_with_message("CBETA ingest complete");
-    }
-
-    // -- Kanripo ---------------------------------------------------------
-    if let Some(kanripo_root) = kanripo_input.as_ref() {
-        let scan_root = if kanripo_root.join("texts").is_dir() {
-            kanripo_root.join("texts")
-        } else {
-            kanripo_root.to_path_buf()
-        };
-        let repos = ingest::discover_work_repos(&scan_root)?;
-        let mut total_sections = 0usize;
-        for repo in &repos {
-            if let Some(work_id) = ingest::work_id_for_repo(repo) {
-                if let Ok(sections) = ingest::section_files(repo, &work_id) {
-                    total_sections += sections.len();
-                }
-            }
-        }
-        let pb = ProgressBar::new(total_sections as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
-                )
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        pb.set_message("Processing Kanripo sections");
-
-        for repo in repos {
-            let work_id = match ingest::work_id_for_repo(&repo) {
-                Some(v) => v,
-                None => continue,
-            };
-            let title = ingest::read_title(&repo).unwrap_or_else(|| work_id.clone());
-            let (edition_siglum, edition_label) = ingest::read_edition(&repo);
-            let snapshot = ingest::git_head(&repo).unwrap_or_default();
-            let rel_repo = repo
-                .strip_prefix(&scan_root)?
-                .to_string_lossy()
-                .replace('\\', "/");
-            let sections = ingest::section_files(&repo, &work_id)?;
-            for section in sections {
-                let section_rel = section.to_string_lossy().into_owned();
-                if resuming && processed_files.contains(&section_rel) {
-                    pb.inc(1);
-                    continue;
-                }
-                let mut section_passages = Vec::new();
-                ingest::extract_section_passages(
-                    &section,
-                    &work_id,
-                    &title,
-                    &edition_siglum,
-                    &edition_label,
-                    &snapshot,
-                    &rel_repo,
-                    &mut section_passages,
-                )?;
-                for passage in section_passages {
-                    emit(
-                        &passage,
-                        &mut kanripo_batch,
-                        &mut kanripo_part_index,
-                        parquet_compression,
-                        &mut jsonl,
-                        "kanripo",
-                    )?;
-                    kanripo_count += 1;
-                    total += 1;
-                }
-                processed_files.insert(section_rel);
-                pb.inc(1);
-                if kanripo_count % 1000 == 0 {
-                    save_checkpoint(
-                        &processed_files,
-                        cbeta_part_index,
-                        kanripo_part_index,
-                        cbeta_count,
-                        kanripo_count,
-                        total,
-                        &checkpoint,
-                    )?;
-                }
-            }
-        }
-        pb.finish_with_message("Kanripo ingest complete");
     }
 
     // -- Final flush -----------------------------------------------------
@@ -430,23 +320,11 @@ pub async fn run(
         )?;
         cbeta_part_index += 1;
     }
-    if !kanripo_batch.is_empty() {
-        storage::write_parquet_part_partitioned(
-            &kanripo_batch,
-            &staging_parquet,
-            "kanripo",
-            kanripo_part_index,
-            parquet_compression,
-        )?;
-        kanripo_part_index += 1;
-    }
     jsonl.flush()?;
     save_checkpoint(
         &processed_files,
         cbeta_part_index,
-        kanripo_part_index,
         cbeta_count,
-        kanripo_count,
         total,
         &checkpoint,
     )?;
@@ -466,7 +344,6 @@ pub async fn run(
     println!("wrote {}/", out_parquet.display());
     println!("passages {total}");
     println!("  cbeta {cbeta_count}");
-    println!("  kanripo {kanripo_count}");
 
     post_ingest(PostIngestOptions {
         out_parquet,
@@ -749,7 +626,11 @@ fn promote_staging(
                 .open(out_jsonl)
                 .with_context(|| format!("open {} for append", out_jsonl.display()))?;
             copy(&mut src, &mut dst).with_context(|| {
-                format!("append {} → {}", staging_jsonl.display(), out_jsonl.display())
+                format!(
+                    "append {} → {}",
+                    staging_jsonl.display(),
+                    out_jsonl.display()
+                )
             })?;
             let _ = std::fs::remove_file(staging_jsonl);
         } else {

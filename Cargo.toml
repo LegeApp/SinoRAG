@@ -1,6 +1,6 @@
 [package]
 name = "sinorag"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 
 [[bin]]
@@ -10,13 +10,15 @@ path = "src/main.rs"
 [features]
 default = []
 local-embeddings = ["dep:fastembed", "dep:ort"]
-local-embeddings-tensorrt = ["local-embeddings", "ort/api-22"]
+tensorrt = ["local-embeddings", "ort/api-22"]
+# Backward-compatible alias for older build scripts.
+local-embeddings-tensorrt = ["tensorrt"]
 
 [dependencies]
 # fastembed: enabled by --features local-embeddings.
 # ONNX Runtime is loaded dynamically at startup — provide a matching onnxruntime.dll
 # (and its provider DLLs) either next to the executable or via the ORT_DYLIB_PATH env var.
-# TensorRT acceleration is gated by local-embeddings-tensorrt and uses ORT's plugin
+# TensorRT acceleration is gated by the `tensorrt` feature and uses ORT's plugin
 # EP registration API. It expects ORTTensorRTEp.dll plus NVIDIA/TensorRT DLLs at runtime.
 # On Windows the MSVC toolchain is still required to build the ort wrapper crate.
 fastembed = { git = "https://github.com/LegeApp/fastembed-rs", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }

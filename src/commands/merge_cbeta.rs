@@ -120,9 +120,8 @@ pub fn run(
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("create dir for {}", dest.display()))?;
                 }
-                std::fs::copy(abs_path, &dest).with_context(|| {
-                    format!("copy {} → {}", abs_path.display(), dest.display())
-                })?;
+                std::fs::copy(abs_path, &dest)
+                    .with_context(|| format!("copy {} → {}", abs_path.display(), dest.display()))?;
             }
             total_files_written += 1;
         }
@@ -139,8 +138,7 @@ pub fn run(
 
     // Coverage check against the embedded work catalog.
     let catalog = crate::cbeta_sidecar::work_catalog();
-    let merged_ids: std::collections::BTreeSet<&String> =
-        all_work_ids.keys().copied().collect();
+    let merged_ids: std::collections::BTreeSet<&String> = all_work_ids.keys().copied().collect();
     let mut missing: Vec<&str> = Vec::new();
     for cat_id in catalog.work_ids() {
         if !merged_ids.contains(cat_id) {
@@ -149,7 +147,10 @@ pub fn run(
     }
     missing.sort();
     if missing.is_empty() {
-        eprintln!("\nCoverage: all {} catalog works are present.", catalog.len());
+        eprintln!(
+            "\nCoverage: all {} catalog works are present.",
+            catalog.len()
+        );
     } else {
         eprintln!(
             "\nCoverage: {}/{} catalog works present ({} missing).",
@@ -157,12 +158,13 @@ pub fn run(
             catalog.len(),
             missing.len()
         );
-        let preview = if missing.len() > 20 { 20 } else { missing.len() };
+        let preview = if missing.len() > 20 {
+            20
+        } else {
+            missing.len()
+        };
         for id in &missing[..preview] {
-            let label = catalog
-                .get(id)
-                .map(|e| e.title.as_str())
-                .unwrap_or("?");
+            let label = catalog.get(id).map(|e| e.title.as_str()).unwrap_or("?");
             eprintln!("    missing: {id}  {label}");
         }
         if missing.len() > 20 {
@@ -206,9 +208,7 @@ fn build_work_map(
             .unwrap_or("");
         let work_id = tei::strip_fascicle_suffix(stem).to_string();
 
-        let size = std::fs::metadata(abs_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = std::fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0);
 
         let entry = map.entry(work_id).or_insert_with(|| WorkFiles {
             files: Vec::new(),

@@ -11,9 +11,10 @@
 //!   change — existing on-disk indexes built against the predecessor remain
 //!   loadable as long as the validator accepts the base fingerprint.
 
+use crate::arrow_helpers::{col_i32, col_str};
 use crate::phrase_index::parquet_files;
 use anyhow::{anyhow, Result};
-use arrow::array::{Array, StringArray};
+use arrow::array::Array;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -370,21 +371,9 @@ fn scan_parquet_rows(parquet_path: &Path) -> Result<Vec<DocRow>> {
                 .column_with_name("period_rank")
                 .ok_or_else(|| anyhow!("Column 'period_rank' missing"))?
                 .0;
-            let pid_arr = batch
-                .column(passage_col)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| anyhow!("passage_id not StringArray"))?;
-            let work_arr = batch
-                .column(work_col)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| anyhow!("source_work_id not StringArray"))?;
-            let period_arr = batch
-                .column(period_col)
-                .as_any()
-                .downcast_ref::<arrow::array::Int32Array>()
-                .ok_or_else(|| anyhow!("period_rank not Int32Array"))?;
+            let pid_arr = col_str(&batch, passage_col)?;
+            let work_arr = col_str(&batch, work_col)?;
+            let period_arr = col_i32(&batch, period_col)?;
             for i in 0..batch.num_rows() {
                 if pid_arr.is_null(i) {
                     continue;

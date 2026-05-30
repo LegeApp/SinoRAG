@@ -10,7 +10,12 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::path::{Path, PathBuf};
 
-pub fn run(dict_dir: PathBuf, persons_out: PathBuf, places_out: PathBuf, parquet_compression: crate::storage::ParquetCompression) -> Result<()> {
+pub fn run(
+    dict_dir: PathBuf,
+    persons_out: PathBuf,
+    places_out: PathBuf,
+    parquet_compression: crate::storage::ParquetCompression,
+) -> Result<()> {
     if !dict_dir.is_dir() {
         anyhow::bail!("directory not found: {}", dict_dir.display());
     }
@@ -24,7 +29,10 @@ pub fn run(dict_dir: PathBuf, persons_out: PathBuf, places_out: PathBuf, parquet
             .with_context(|| format!("parsing {}", person_xml.display()))?;
         eprintln!("  {count} persons → {}", persons_out.display());
     } else {
-        eprintln!("skip: person authority XML not found at {}", person_xml.display());
+        eprintln!(
+            "skip: person authority XML not found at {}",
+            person_xml.display()
+        );
     }
 
     if place_xml.exists() {
@@ -33,7 +41,10 @@ pub fn run(dict_dir: PathBuf, persons_out: PathBuf, places_out: PathBuf, parquet
             .with_context(|| format!("parsing {}", place_xml.display()))?;
         eprintln!("  {count} places → {}", places_out.display());
     } else {
-        eprintln!("skip: place authority XML not found at {}", place_xml.display());
+        eprintln!(
+            "skip: place authority XML not found at {}",
+            place_xml.display()
+        );
     }
 
     Ok(())
@@ -43,7 +54,11 @@ pub fn run(dict_dir: PathBuf, persons_out: PathBuf, places_out: PathBuf, parquet
 // Person parser
 // ---------------------------------------------------------------------------
 
-fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::ParquetCompression) -> Result<usize> {
+fn ingest_persons(
+    xml_path: &Path,
+    out_dir: &Path,
+    compression: crate::storage::ParquetCompression,
+) -> Result<usize> {
     let data = std::fs::read(xml_path)?;
     let mut reader = Reader::from_reader(data.as_slice());
     reader.config_mut().trim_text(true);
@@ -99,7 +114,9 @@ fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::
                 match local {
                     b"person" => {
                         in_person = true;
-                        person_id = attr_val(e, b"xml:id").or_else(|| attr_val(e, b"id")).unwrap_or_default();
+                        person_id = attr_val(e, b"xml:id")
+                            .or_else(|| attr_val(e, b"id"))
+                            .unwrap_or_default();
                         primary_name.clear();
                         primary_name_lang.clear();
                         alt_names.clear();
@@ -139,21 +156,17 @@ fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::
                     b"occupation" if in_person => {
                         ctx = Context::Occupation;
                     }
-                    b"note" if in_person => {
-                        match attr_val(e, b"type").as_deref() {
-                            Some("dynasty") => ctx = Context::NoteDynasty,
-                            Some("concise") => ctx = Context::NoteConcise,
-                            Some("placeOfOrigin") => ctx = Context::NotePlaceOfOrigin,
-                            _ => ctx = Context::None,
-                        }
-                    }
-                    b"idno" if in_person => {
-                        match attr_val(e, b"type").as_deref() {
-                            Some("Wikidata") => ctx = Context::IdnoWikidata,
-                            Some("CBDB") => ctx = Context::IdnoCbdb,
-                            _ => ctx = Context::None,
-                        }
-                    }
+                    b"note" if in_person => match attr_val(e, b"type").as_deref() {
+                        Some("dynasty") => ctx = Context::NoteDynasty,
+                        Some("concise") => ctx = Context::NoteConcise,
+                        Some("placeOfOrigin") => ctx = Context::NotePlaceOfOrigin,
+                        _ => ctx = Context::None,
+                    },
+                    b"idno" if in_person => match attr_val(e, b"type").as_deref() {
+                        Some("Wikidata") => ctx = Context::IdnoWikidata,
+                        Some("CBDB") => ctx = Context::IdnoCbdb,
+                        _ => ctx = Context::None,
+                    },
                     b"relation" if in_person => {
                         let rel_type = attr_val(e, b"type").unwrap_or_default();
                         let name = attr_val(e, b"n").unwrap_or_default();
@@ -237,7 +250,9 @@ fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::
                             continue;
                         }
                         // Truncate concise bio
-                        let bio = concise_bio.as_deref().map(|s| crate::dict::truncate_gloss(s, 800));
+                        let bio = concise_bio
+                            .as_deref()
+                            .map(|s| crate::dict::truncate_gloss(s, 800));
                         let alt_json = serde_json::to_string(&alt_names).unwrap_or_default();
                         let teachers_json = serde_json::to_string(&teachers).unwrap_or_default();
                         let students_json = serde_json::to_string(&students).unwrap_or_default();
@@ -262,7 +277,12 @@ fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::
                         total += 1;
 
                         if batch.len() >= storage::AUTHORITY_BATCH_SIZE {
-                            storage::write_person_parquet(&batch, out_dir, part_index, compression)?;
+                            storage::write_person_parquet(
+                                &batch,
+                                out_dir,
+                                part_index,
+                                compression,
+                            )?;
                             batch.clear();
                             part_index += 1;
                         }
@@ -293,7 +313,11 @@ fn ingest_persons(xml_path: &Path, out_dir: &Path, compression: crate::storage::
 // Place parser
 // ---------------------------------------------------------------------------
 
-fn ingest_places(xml_path: &Path, out_dir: &Path, compression: crate::storage::ParquetCompression) -> Result<usize> {
+fn ingest_places(
+    xml_path: &Path,
+    out_dir: &Path,
+    compression: crate::storage::ParquetCompression,
+) -> Result<usize> {
     let data = std::fs::read(xml_path)?;
     let mut reader = Reader::from_reader(data.as_slice());
     reader.config_mut().trim_text(true);
@@ -391,13 +415,11 @@ fn ingest_places(xml_path: &Path, out_dir: &Path, compression: crate::storage::P
                     b"district" if in_place => {
                         ctx = PlaceCtx::District;
                     }
-                    b"note" if in_place => {
-                        match attr_val(e, b"type").as_deref() {
-                            Some("category") => ctx = PlaceCtx::NoteCategory,
-                            None => ctx = PlaceCtx::NoteGeneral,
-                            _ => ctx = PlaceCtx::None,
-                        }
-                    }
+                    b"note" if in_place => match attr_val(e, b"type").as_deref() {
+                        Some("category") => ctx = PlaceCtx::NoteCategory,
+                        None => ctx = PlaceCtx::NoteGeneral,
+                        _ => ctx = PlaceCtx::None,
+                    },
                     b"location" if in_place => {
                         // parent reference is extracted from nested <place key=...> inside location
                     }
@@ -524,7 +546,11 @@ fn attr_val(e: &quick_xml::events::BytesStart, name: &[u8]) -> Option<String> {
     for attr in e.attributes().flatten() {
         let key = attr.key.as_ref();
         // Match "name" or "prefix:name"
-        if key == name || key.ends_with(name) && key.len() > name.len() && key[key.len() - name.len() - 1] == b':' {
+        if key == name
+            || key.ends_with(name)
+                && key.len() > name.len()
+                && key[key.len() - name.len() - 1] == b':'
+        {
             return String::from_utf8(attr.value.to_vec()).ok();
         }
     }
@@ -541,12 +567,19 @@ fn extract_year(s: &str) -> String {
     } else {
         (false, s.strip_prefix('+').unwrap_or(s))
     };
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .take(4)
+        .collect();
     let year = if digits.len() == 4 {
         digits
     } else {
         s.split_whitespace().next().unwrap_or("").to_string()
     };
-    if bce { format!("-{year}") } else { year }
+    if bce {
+        format!("-{year}")
+    } else {
+        year
+    }
 }
-

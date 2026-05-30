@@ -2,6 +2,7 @@ pub mod batch;
 pub mod docs;
 pub mod engine;
 pub mod errors;
+pub mod log;
 pub mod registry;
 pub mod requests;
 pub mod responses;

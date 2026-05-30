@@ -17,6 +17,7 @@ pub async fn update(
     tensorrt_cache_dir: Option<PathBuf>,
     show_download_progress: bool,
     fail_if_feature_missing: bool,
+    allow_partial_vector_index: bool,
     max_nb_connection: usize,
     ef_construction: usize,
     nb_layer: usize,
@@ -54,6 +55,7 @@ pub async fn update(
         tensorrt_cache_dir,
         show_download_progress,
         fail_if_feature_missing,
+        allow_partial_vector_index,
         hnsw: HnswParams {
             max_nb_connection,
             ef_construction,

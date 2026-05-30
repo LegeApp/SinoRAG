@@ -1,14 +1,14 @@
 //! `sinorag pack-create` — build a distribution .7z file for GitHub Releases.
 //!
 //! Packs these directories from data_root into a single LZMA2 .7z file:
-//!   passages.parquet/       (from passages-raw.parquet/ on disk)
+//!   passages.parquet/
 //!   dict.parquet/
 //!   persons.parquet/
 //!   places.parquet/
 //!
-//! The on-disk source for passages is `passages-raw.parquet/` (uncompressed,
-//! produced by `ingest --no-parquet-compression`), stored in the archive as
-//! `passages.parquet/` so `sinorag init` extracts to the expected location.
+//! Run `sinorag ingest --no-parquet-compression` first to produce an
+//! uncompressed passages.parquet; the LZMA2 pass below compresses far better
+//! on uncompressed source data.
 //!
 //! Requires `7z` (7-Zip) to be installed and on PATH.
 //! Recommended flags used: lzma2, level 9, multithreaded, 512 MB dictionary.
@@ -27,7 +27,7 @@ struct DatasetSpec {
 
 const DATASETS: &[DatasetSpec] = &[
     DatasetSpec {
-        source_dir: "passages-raw.parquet",
+        source_dir: "passages.parquet",
         archive_name: "passages.parquet",
         optional: false,
     },
@@ -69,10 +69,7 @@ pub fn run(data_root: PathBuf, out: PathBuf) -> Result<()> {
             );
             present.push(spec);
         } else if spec.optional {
-            eprintln!(
-                "  Warning: {} not found — skipping",
-                src.display()
-            );
+            eprintln!("  Warning: {} not found — skipping", src.display());
         } else {
             bail!(
                 "Required dataset not found: {}\n\
@@ -129,9 +126,7 @@ pub fn run(data_root: PathBuf, out: PathBuf) -> Result<()> {
         "-mmt=on".to_string(),
         "-md=512m".to_string(),
         "-ms=on".to_string(),
-        out.to_str()
-            .context("non-UTF-8 output path")?
-            .to_string(),
+        out.to_str().context("non-UTF-8 output path")?.to_string(),
     ];
     // Add each staged entry by name (not the staging dir itself, so 7z
     // stores `passages.parquet/…` not `.pack-staging/passages.parquet/…`).

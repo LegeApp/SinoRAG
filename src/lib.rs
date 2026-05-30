@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod arrow_helpers;
 pub mod catalog_index;
 pub mod cbeta_sidecar;
 pub mod cef;
@@ -8,7 +9,6 @@ pub mod datafusion_store;
 pub mod dict;
 pub mod document_table;
 pub mod embedding;
-pub mod ingest;
 pub mod jsonout;
 pub mod mcp;
 pub mod memory;

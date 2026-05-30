@@ -264,6 +264,45 @@ fn pair_term_variants(term: &str, allow_variants: bool) -> Vec<String> {
     terms
 }
 
+fn pair_profile_unit_key(
+    row: &serde_json::Value,
+    unit: &str,
+    doc_table: &DocumentTable,
+    catalog: Option<&CorpusCatalogIndex>,
+) -> Option<String> {
+    match unit {
+        "work" => opt_str(row, "source_work_id"),
+        "section" => {
+            let catalog = catalog?;
+            let pid = row.get("passage_id").and_then(|v| v.as_str())?;
+            let doc_id = doc_table.doc_id(pid)?;
+            let mut node_id = *catalog.doc_parent.get(&doc_id)?;
+            let mut fallback = node_id;
+            while let Some(node) = catalog.get_node(node_id) {
+                fallback = node.node_id;
+                if matches!(
+                    node.node_kind,
+                    crate::catalog_index::OutlineNodeKind::Section
+                        | crate::catalog_index::OutlineNodeKind::Chapter
+                        | crate::catalog_index::OutlineNodeKind::Division
+                        | crate::catalog_index::OutlineNodeKind::Fascicle
+                ) {
+                    return Some(format!("section:{}", node.node_id));
+                }
+                let Some(parent) = node.parent_id else {
+                    break;
+                };
+                node_id = parent;
+            }
+            Some(format!("section:{fallback}"))
+        }
+        _ => row
+            .get("passage_id")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+    }
+}
+
 fn split_heading_path(value: Option<&str>) -> Vec<String> {
     value
         .unwrap_or("")
@@ -297,7 +336,9 @@ fn optional_one(value: &Option<String>) -> Option<Vec<String>> {
         .map(|v| vec![v.clone()])
 }
 
-fn evidence_scope_spec(req: &crate::tools::requests::EvidenceSearchRequest) -> crate::retrieval::ScopeSpec {
+fn evidence_scope_spec(
+    req: &crate::tools::requests::EvidenceSearchRequest,
+) -> crate::retrieval::ScopeSpec {
     crate::retrieval::ScopeSpec {
         canon: optional_one(&req.scope_canon),
         period: optional_one(&req.scope_period),
@@ -308,7 +349,9 @@ fn evidence_scope_spec(req: &crate::tools::requests::EvidenceSearchRequest) -> c
     }
 }
 
-fn pair_scope_spec(req: &crate::tools::requests::PairAppearanceRequest) -> crate::retrieval::ScopeSpec {
+fn pair_scope_spec(
+    req: &crate::tools::requests::PairAppearanceRequest,
+) -> crate::retrieval::ScopeSpec {
     crate::retrieval::ScopeSpec {
         canon: optional_one(&req.scope_canon),
         period: optional_one(&req.scope_period),
@@ -652,6 +695,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pair_profile_work_unit_keys_by_source_work_id() {
+        let doc_table = DocumentTable::new();
+        let row = serde_json::json!({
+            "passage_id": "p1",
+            "source_work_id": "T01n0001"
+        });
+        assert_eq!(
+            pair_profile_unit_key(&row, "work", &doc_table, None),
+            Some("T01n0001".to_string())
+        );
+    }
+
+    #[test]
+    fn pair_profile_section_unit_climbs_catalog_parent() {
+        let mut doc_table = DocumentTable::new();
+        doc_table.passage_ids = vec!["p1".to_string()];
+        doc_table.passage_lookup_order = vec![0];
+
+        let mut catalog = CorpusCatalogIndex::new();
+        let section = catalog.push_node(crate::catalog_index::OutlineNode::leaf(
+            crate::catalog_index::OutlineNodeKind::Section,
+            None,
+            "test".to_string(),
+            "W1".to_string(),
+            "w1.xml".to_string(),
+            "Section".to_string(),
+        ));
+        let passage = catalog.push_node(crate::catalog_index::OutlineNode::leaf(
+            crate::catalog_index::OutlineNodeKind::PassageRange,
+            Some(section),
+            "test".to_string(),
+            "W1".to_string(),
+            "w1.xml".to_string(),
+            "Passage".to_string(),
+        ));
+        catalog.add_child(section, passage);
+        catalog.doc_parent.insert(0, passage);
+
+        let row = serde_json::json!({"passage_id": "p1"});
+        assert_eq!(
+            pair_profile_unit_key(&row, "section", &doc_table, Some(&catalog)),
+            Some(format!("section:{section}"))
+        );
+    }
 }
 
 impl ToolEngine {
@@ -661,9 +749,17 @@ impl ToolEngine {
         // Tell the dict/entity annotation layer where to find parquet stores.
         let dict_path = Self::resolve_dict_path_static(&config);
         crate::dict::set_dict_path(dict_path);
-        let person_path = Self::resolve_authority_path_static(&config, crate::pack::DEFAULT_PERSONS, "data/persons.parquet");
+        let person_path = Self::resolve_authority_path_static(
+            &config,
+            crate::pack::DEFAULT_PERSONS,
+            "data/persons.parquet",
+        );
         crate::dict::set_person_path(person_path);
-        let place_path = Self::resolve_authority_path_static(&config, crate::pack::DEFAULT_PLACES, "data/places.parquet");
+        let place_path = Self::resolve_authority_path_static(
+            &config,
+            crate::pack::DEFAULT_PLACES,
+            "data/places.parquet",
+        );
         crate::dict::set_place_path(place_path);
 
         Ok(Self {
@@ -693,7 +789,11 @@ impl ToolEngine {
         None
     }
 
-    fn resolve_authority_path_static(config: &EngineConfig, pack_rel: &str, default_rel: &str) -> Option<PathBuf> {
+    fn resolve_authority_path_static(
+        config: &EngineConfig,
+        pack_rel: &str,
+        default_rel: &str,
+    ) -> Option<PathBuf> {
         if let Some(ref pack) = config.pack {
             let p = pack.join(pack_rel);
             if p.is_dir() {
@@ -724,6 +824,19 @@ impl ToolEngine {
         let default = PathBuf::from("data/passages.parquet");
         if default.exists() {
             return Ok(default);
+        }
+
+        // Auto-heal: pack-prep workflow renames passages.parquet → passages-raw.parquet;
+        // rename it back so all tools work without manual intervention.
+        match crate::storage::heal_raw_parquet(&default) {
+            Ok(true) => {
+                eprintln!("[sinorag] Auto-renamed passages-raw.parquet → passages.parquet");
+                return Ok(default);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("[sinorag] WARNING: passages-raw.parquet found but rename failed: {e}")
+            }
         }
 
         Err(anyhow::anyhow!("Cannot resolve passages.parquet path"))
@@ -2251,6 +2364,19 @@ impl ToolEngine {
         })
     }
 
+    /// Implement the tool-log-summary tool.
+    pub async fn tool_log_summary_impl(
+        &self,
+        req: crate::tools::requests::ToolLogSummaryRequest,
+    ) -> Result<crate::tools::responses::ToolLogSummaryResponse> {
+        let path = req.path.unwrap_or_else(crate::tools::log::default_log_path);
+        let summary = crate::tools::log::summarize(&path, req.recent)?;
+        Ok(crate::tools::responses::ToolLogSummaryResponse {
+            schema: "sinorag-tool-log-summary-v1",
+            summary: serde_json::to_value(summary)?,
+        })
+    }
+
     /// Implement the validate-adjudication tool
     pub async fn validate_adjudication_impl(
         &self,
@@ -2561,13 +2687,13 @@ impl ToolEngine {
         let doc_table = self.doc_table().await?;
         let phrase_index_path = self.optional_phrase_path().await?;
 
-        let internal_limit = req.limit.max(10_000);
+        let candidate_limit = req.max_candidates.max(req.limit);
         let (raw_hits, _) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
             phrase_index_path.as_deref(),
             &req.phrase,
-            internal_limit,
+            candidate_limit,
             None,
             None,
             None,
@@ -2654,6 +2780,7 @@ impl ToolEngine {
                 candidates_verified: verified,
                 after_scope_and_sort: total,
                 limit: req.limit,
+                max_candidates: candidate_limit,
             },
         })
     }
@@ -2951,12 +3078,13 @@ impl ToolEngine {
             _ => "period",
         };
 
+        let candidate_limit = req.max_candidates.max(req.limit_total);
         let (hits, _) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
             phrase_index_path.as_deref(),
             &req.phrase,
-            req.limit_total,
+            candidate_limit,
             None,
             None,
             None,
@@ -3038,6 +3166,7 @@ impl ToolEngine {
                 total_hits,
                 limit_total: req.limit_total,
                 limit_per_group: req.limit_per_group,
+                max_candidates: candidate_limit,
             },
         })
     }
@@ -3432,7 +3561,8 @@ impl ToolEngine {
         let term2_variants = pair_term_variants(&req.term2, req.allow_variants);
         let output_limit = req.limit.max(1);
         let candidate_limit = req.max_candidates_per_term.max(output_limit);
-        let retrieval_budget = crate::retrieval::RetrievalBudget::new(output_limit, candidate_limit);
+        let retrieval_budget =
+            crate::retrieval::RetrievalBudget::new(output_limit, candidate_limit);
         let scope = pair_scope_spec(&req);
 
         let (term1_rows, term1_strategy) = self
@@ -3854,12 +3984,13 @@ impl ToolEngine {
             }
         };
 
+        let candidate_limit = req.max_candidates.max(req.limit_total);
         let (hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
             phrase_index_path.as_deref(),
             &req.phrase,
-            req.limit_total,
+            candidate_limit,
             None,
             None,
             None,
@@ -3934,6 +4065,7 @@ impl ToolEngine {
                 phrase: phrase_strategy,
                 limit_total: req.limit_total,
                 limit_per_cluster: req.limit_per_cluster,
+                max_candidates: candidate_limit,
             },
         })
     }
@@ -3971,12 +4103,13 @@ impl ToolEngine {
             None
         };
 
+        let candidate_limit = req.max_candidates.max(req.limit);
         let (scoped_hits, phrase_strategy) = phrase_rows_with_explicit_doc_table(
             &passages,
             &doc_table,
             phrase_index_path.as_deref(),
             &req.phrase,
-            req.limit,
+            candidate_limit,
             doc_range,
             if req.scope_canon.is_empty() {
                 None
@@ -4002,10 +4135,11 @@ impl ToolEngine {
             },
             found,
             hit_count,
-            sample_hits: scoped_hits.into_iter().take(5).collect(),
+            sample_hits: scoped_hits.into_iter().take(req.limit.min(5)).collect(),
             search_strategy: AbsenceCheckSearchStrategy {
                 phrase: phrase_strategy,
                 limit: req.limit,
+                max_candidates: candidate_limit,
             },
         })
     }
@@ -4190,8 +4324,10 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::EvidenceSearchRequest,
     ) -> Result<crate::tools::responses::EvidenceSearchResponse> {
+        use crate::tools::requests::Verbosity;
         use crate::tools::responses::{ComponentStatus, EvidenceSearchResponse};
 
+        let verbosity = req.verbosity;
         let mut components = Vec::new();
         let mut warnings = Vec::new();
         let output_limit = req.limit.max(1);
@@ -4250,7 +4386,8 @@ impl ToolEngine {
             group_by: "work".to_string(),
             include_variants: false,
             limit_per_group: 5,
-            brief: false,
+            // Brief snippets unless the caller explicitly asked for `full`.
+            brief: !matches!(verbosity, Verbosity::Full),
             canon: req.scope_canon.clone(),
             source_work_id: req.scope_source_work_id.clone(),
             tradition: None,
@@ -4320,6 +4457,7 @@ impl ToolEngine {
             let component_req = crate::tools::requests::AbsenceCheckRequest {
                 phrase: req.phrase.clone(),
                 limit: candidate_limit,
+                max_candidates: candidate_limit,
                 scope_work_id: req.scope_source_work_id.clone(),
                 scope_canon: req.scope_canon.clone().into_iter().collect(),
                 scope_period: req.scope_period.clone(),
@@ -4365,6 +4503,7 @@ impl ToolEngine {
                 scope_period: req.scope_period.clone().into_iter().collect(),
                 scope_source_work_id: req.scope_source_work_id.clone(),
                 limit: output_limit,
+                max_candidates: candidate_limit,
             };
             record_component_outcome(
                 run_budgeted_component(&budget, self.first_attestation_impl(component_req)).await,
@@ -4392,9 +4531,9 @@ impl ToolEngine {
                 first_attestation
                     .as_ref()
                     .map_or(0, |v| v.search_strategy.candidates_verified),
-                first_attestation.as_ref().map_or(0, |v| {
-                    usize::from(v.first.is_some()) + v.next_earlier.len()
-                }),
+                first_attestation
+                    .as_ref()
+                    .map_or(0, |v| usize::from(v.first.is_some()) + v.next_earlier.len()),
             )
             .with_verified_count(
                 first_attestation
@@ -4466,6 +4605,7 @@ impl ToolEngine {
                 group_by: "period".to_string(),
                 limit_total: candidate_limit.max(200),
                 limit_per_group: 5,
+                max_candidates: candidate_limit.max(200),
             };
             record_component_outcome(
                 run_budgeted_component(&budget, self.trace_term_usage_impl(component_req)).await,
@@ -4505,6 +4645,7 @@ impl ToolEngine {
                 cluster_by: "work".to_string(),
                 limit_total: candidate_limit.max(200),
                 limit_per_cluster: 20,
+                max_candidates: candidate_limit.max(200),
             };
             record_component_outcome(
                 run_budgeted_component(&budget, self.cluster_hits_impl(component_req)).await,
@@ -4571,6 +4712,9 @@ impl ToolEngine {
             ),
         ];
 
+        // At `summary` verbosity, keep the exact hits (the evidence) but drop the
+        // optional analysis blocks — their per-stage counts remain in `stages`.
+        let summary_only = matches!(verbosity, Verbosity::Summary);
         Ok(EvidenceSearchResponse {
             schema: "sinorag-evidence-search-v1",
             workflow: "exact_evidence",
@@ -4581,11 +4725,15 @@ impl ToolEngine {
             expanded_terms_used,
             variant_policy: req.variant_policy,
             exact,
-            absence_check,
-            first_attestation,
-            phrase_history,
-            usage,
-            clusters,
+            absence_check: if summary_only { None } else { absence_check },
+            first_attestation: if summary_only {
+                None
+            } else {
+                first_attestation
+            },
+            phrase_history: if summary_only { None } else { phrase_history },
+            usage: if summary_only { None } else { usage },
+            clusters: if summary_only { None } else { clusters },
             stages: trace.finish(),
             components,
             suggested_next_tools,
@@ -4600,10 +4748,12 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::HybridDiscoverRequest,
     ) -> Result<crate::tools::responses::HybridDiscoverResponse> {
+        use crate::tools::requests::Verbosity;
         use crate::tools::responses::{
             ComponentStatus, HybridDiscoverGroups, HybridDiscoverHit, HybridDiscoverResponse,
         };
 
+        let verbosity = req.verbosity;
         if req.seed_passage_id.is_none() && req.query_embedding.is_none() {
             return Err(ToolError::InvalidArgs(
                 "provide seed_passage_id or query_embedding".to_string(),
@@ -4960,6 +5110,24 @@ impl ToolEngine {
             "verify discovery candidates with exact phrase evidence before citing them",
         ));
 
+        // `merged_hits` already carries each candidate's per-source scores and
+        // ranks, so the raw `vector_neighbors`/`tfidf_similar` blocks are pure
+        // duplication outside of debugging. Drop them below `full`; at `summary`
+        // also drop context and the per-hit snippets, leaving counts + scored ids.
+        let full = matches!(verbosity, Verbosity::Full);
+        let summary_only = matches!(verbosity, Verbosity::Summary);
+        let merged_hits = if summary_only {
+            merged_hits
+                .into_iter()
+                .map(|mut h| {
+                    h.snippet = None;
+                    h
+                })
+                .collect()
+        } else {
+            merged_hits
+        };
+
         Ok(HybridDiscoverResponse {
             schema: "sinorag-hybrid-discover-v1",
             workflow: "semantic_discovery",
@@ -4970,9 +5138,9 @@ impl ToolEngine {
             merged_candidate_count,
             returned_count,
             seed_passage_id: req.seed_passage_id,
-            vector_neighbors,
-            tfidf_similar,
-            context,
+            vector_neighbors: if full { vector_neighbors } else { None },
+            tfidf_similar: if full { tfidf_similar } else { None },
+            context: if summary_only { None } else { context },
             groups,
             merged_hits,
             stages: trace.finish(),
@@ -4987,10 +5155,10 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::SourceInvestigateRequest,
     ) -> Result<crate::tools::responses::SourceInvestigateResponse> {
-        use crate::tools::responses::{
-            ComponentStatus, SourceInvestigateResponse, SourceInvestigationSummary,
-        };
+        use crate::tools::requests::Verbosity;
+        use crate::tools::responses::{ComponentStatus, SourceInvestigateResponse};
 
+        let verbosity = req.verbosity;
         let mut components = Vec::new();
         let mut risk_notes = vec![
             "vector neighbors are discovery candidates only".to_string(),
@@ -5200,23 +5368,24 @@ impl ToolEngine {
             serde_json::json!({"seed_passage_id": req.seed_passage_id.clone(), "limit": req.limit}),
             "expand the seed into discovery candidates",
         ));
-        let summary = SourceInvestigationSummary {
-            seed: req.seed_passage_id.clone(),
-            best_next_actions: suggested_next_tools.clone(),
-            risk_notes: risk_notes.clone(),
-        };
-
+        // At `summary` verbosity, drop the raw analysis blocks (they are the bulk
+        // of the payload); the next-step guidance and risk notes are enough to
+        // decide where to go next. `standard`/`full` keep whatever was requested.
+        let summary_only = matches!(verbosity, Verbosity::Summary);
         Ok(SourceInvestigateResponse {
             schema: "sinorag-source-investigate-v1",
             workflow: "source_investigation",
             seed_passage_id: req.seed_passage_id,
             seed,
-            summary,
-            context,
-            frontier,
-            similar,
-            vector_neighbors,
-            phrase_histories,
+            context: if summary_only { None } else { context },
+            frontier: if summary_only { None } else { frontier },
+            similar: if summary_only { None } else { similar },
+            vector_neighbors: if summary_only { None } else { vector_neighbors },
+            phrase_histories: if summary_only {
+                Vec::new()
+            } else {
+                phrase_histories
+            },
             components,
             suggested_next_tools,
             risk_notes,
@@ -5270,6 +5439,7 @@ impl ToolEngine {
                     group_by: "period".to_string(),
                     limit_total: req.limit_passages,
                     limit_per_group: 5,
+                    max_candidates: req.limit_passages,
                 })
                 .await
             {
@@ -5347,9 +5517,9 @@ impl ToolEngine {
                 report: None,
                 components,
                 suggested_next_tools: vec![suggested_tool(
-                    "validate-adjudication",
-                    serde_json::json!({"path": "<corrected adjudication path>"}),
-                    "fix validation issues before graph/report build",
+                    "report-from-evidence",
+                    serde_json::json!({"adjudication": "<corrected adjudication path>", "graph_out": "<graph.json>", "report_out": "<report.md>"}),
+                    "fix the validation issues listed in `validation`, then re-run this tool — it re-validates and proceeds to graph/report build in one call",
                 )],
                 warnings,
             });
@@ -5796,9 +5966,9 @@ impl ToolEngine {
         use crate::tools::responses::{PairAppearanceHit, PairProfileGroup, PairProfileResponse};
 
         let unit = match req.unit.as_str() {
-            "passage" | "window" | "sentence" => req.unit.clone(),
+            "passage" | "window" | "sentence" | "section" | "work" => req.unit.clone(),
             other => anyhow::bail!(
-                "unsupported pair-profile unit '{other}'; use passage, window, or sentence"
+                "unsupported pair-profile unit '{other}'; use passage, window, sentence, section, or work"
             ),
         };
 
@@ -5890,45 +6060,120 @@ impl ToolEngine {
         }
 
         let mut total_pair_hits = 0usize;
-        for row in &term1_rows {
-            let Some(pid) = row.get("passage_id").and_then(|v| v.as_str()) else {
-                continue;
+        if matches!(unit.as_str(), "section" | "work") {
+            let catalog_for_unit = if unit == "section" {
+                Some(catalog.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("pair-profile unit=section requires catalog.index")
+                })?)
+            } else {
+                catalog.as_deref()
             };
-            if !term2_by_pid.contains_key(pid) {
-                continue;
+            let mut term1_by_unit: std::collections::BTreeMap<String, Vec<&serde_json::Value>> =
+                Default::default();
+            let mut term2_by_unit: std::collections::BTreeMap<String, Vec<&serde_json::Value>> =
+                Default::default();
+            for row in &term1_rows {
+                if let Some(key) = pair_profile_unit_key(row, &unit, &doc_table, catalog_for_unit) {
+                    term1_by_unit.entry(key).or_default().push(row);
+                }
             }
-            let norm = row
-                .get("zh_text_normalized")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let t1_off = find_offsets_for_terms(norm, &term1_variants);
-            let t2_off = find_offsets_for_terms(norm, &term2_variants);
-            if t1_off.is_empty() || t2_off.is_empty() {
-                continue;
+            for row in &term2_rows {
+                if let Some(key) = pair_profile_unit_key(row, &unit, &doc_table, catalog_for_unit) {
+                    term2_by_unit.entry(key).or_default().push(row);
+                }
             }
-            let distance = min_pair_distance(&t1_off, &t2_off, false);
-            let keep = match unit.as_str() {
-                "passage" => distance.is_some(),
-                "window" => distance.map(|d| d <= req.window_chars).unwrap_or(false),
-                "sentence" => has_sentence_pair(norm, &t1_off, &t2_off, false),
-                _ => false,
-            };
-            if !keep {
-                continue;
+            for (unit_key, term1_unit_rows) in term1_by_unit {
+                let Some(term2_unit_rows) = term2_by_unit.get(&unit_key) else {
+                    continue;
+                };
+                let Some(row) = term1_unit_rows.first().copied() else {
+                    continue;
+                };
+                let label = opt_str(row, group_field).unwrap_or_default();
+                let norm = row
+                    .get("zh_text_normalized")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let t1_off = find_offsets_for_terms(norm, &term1_variants);
+                let same_passage_term2 = row
+                    .get("passage_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|pid| term2_by_pid.get(pid));
+                let t2_off = same_passage_term2
+                    .map(|_| find_offsets_for_terms(norm, &term2_variants))
+                    .unwrap_or_default();
+                let distance = if t1_off.is_empty() || t2_off.is_empty() {
+                    None
+                } else {
+                    min_pair_distance(&t1_off, &t2_off, false)
+                };
+                let pid = row.get("passage_id").and_then(|v| v.as_str()).unwrap_or("");
+                let quote = if distance.is_some() {
+                    pair_snippet(norm, &t1_off, &t2_off, req.window_chars.max(40))
+                } else {
+                    let sample2 = term2_unit_rows
+                        .first()
+                        .and_then(|r| r.get("passage_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    format!("{unit} co-occurrence: term1 at {pid}; term2 at {sample2}")
+                };
+                group_pairs
+                    .entry(label)
+                    .or_default()
+                    .push(PairAppearanceHit {
+                        passage_id: pid.to_string(),
+                        source_work_id: opt_str(row, "source_work_id"),
+                        main_title: opt_str(row, "main_title"),
+                        heading: opt_str(row, "heading"),
+                        distance_chars: distance,
+                        term1_offsets: t1_off,
+                        term2_offsets: t2_off,
+                        zh_quote: quote,
+                    });
+                total_pair_hits += 1;
             }
-            let label = opt_str(row, group_field).unwrap_or_default();
-            let hit = PairAppearanceHit {
-                passage_id: pid.to_string(),
-                source_work_id: opt_str(row, "source_work_id"),
-                main_title: opt_str(row, "main_title"),
-                heading: opt_str(row, "heading"),
-                distance_chars: distance,
-                term1_offsets: t1_off,
-                term2_offsets: t2_off,
-                zh_quote: pair_snippet(norm, &[], &[], req.window_chars.max(40)),
-            };
-            group_pairs.entry(label).or_default().push(hit);
-            total_pair_hits += 1;
+        } else {
+            for row in &term1_rows {
+                let Some(pid) = row.get("passage_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !term2_by_pid.contains_key(pid) {
+                    continue;
+                }
+                let norm = row
+                    .get("zh_text_normalized")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let t1_off = find_offsets_for_terms(norm, &term1_variants);
+                let t2_off = find_offsets_for_terms(norm, &term2_variants);
+                if t1_off.is_empty() || t2_off.is_empty() {
+                    continue;
+                }
+                let distance = min_pair_distance(&t1_off, &t2_off, false);
+                let keep = match unit.as_str() {
+                    "passage" => distance.is_some(),
+                    "window" => distance.map(|d| d <= req.window_chars).unwrap_or(false),
+                    "sentence" => has_sentence_pair(norm, &t1_off, &t2_off, false),
+                    _ => false,
+                };
+                if !keep {
+                    continue;
+                }
+                let label = opt_str(row, group_field).unwrap_or_default();
+                let hit = PairAppearanceHit {
+                    passage_id: pid.to_string(),
+                    source_work_id: opt_str(row, "source_work_id"),
+                    main_title: opt_str(row, "main_title"),
+                    heading: opt_str(row, "heading"),
+                    distance_chars: distance,
+                    term1_offsets: t1_off,
+                    term2_offsets: t2_off,
+                    zh_quote: pair_snippet(norm, &[], &[], req.window_chars.max(40)),
+                };
+                group_pairs.entry(label).or_default().push(hit);
+                total_pair_hits += 1;
+            }
         }
 
         // Build groups, sorted by pair_count descending
@@ -5975,6 +6220,7 @@ impl ToolEngine {
                 "term1": term1_strategy,
                 "term2": term2_strategy,
                 "max_candidates_per_term": candidate_limit,
+                "supported_units": ["passage", "window", "sentence", "section", "work"],
             }),
         })
     }
@@ -6017,7 +6263,9 @@ impl ToolEngine {
 
         let mut caveats = vec!["Supply all known aliases explicitly.".to_string()];
         if authority.is_none() {
-            caveats.push("Name not found in DDBC authority database; corpus-local search only.".to_string());
+            caveats.push(
+                "Name not found in DDBC authority database; corpus-local search only.".to_string(),
+            );
         }
 
         Ok(PersonResolveResponse {
@@ -6034,7 +6282,8 @@ impl ToolEngine {
             evidence,
             caveats,
             suggested_next: vec![
-                "Run person-history with the same aliases to classify mention contexts.".to_string(),
+                "Run person-history with the same aliases to classify mention contexts."
+                    .to_string(),
             ],
         })
     }
@@ -6076,7 +6325,9 @@ impl ToolEngine {
 
         let mut caveats = vec!["Supply all known alternate names explicitly.".to_string()];
         if authority.is_none() {
-            caveats.push("Place not found in DDBC authority database; corpus-local search only.".to_string());
+            caveats.push(
+                "Place not found in DDBC authority database; corpus-local search only.".to_string(),
+            );
         }
 
         Ok(PlaceResolveResponse {
@@ -6090,9 +6341,7 @@ impl ToolEngine {
             ],
             evidence,
             caveats,
-            suggested_next: vec![
-                "Search corpus passages for contextual mentions.".to_string(),
-            ],
+            suggested_next: vec!["Search corpus passages for contextual mentions.".to_string()],
         })
     }
 
@@ -6429,8 +6678,13 @@ async fn query_person_authority(name: &str, aliases: &[String]) -> Option<serde_
     }
 
     let ctx = SessionContext::new();
-    let src = dir.join("**/*.parquet").to_string_lossy().replace('\\', "/");
-    ctx.register_parquet("persons", &src, ParquetReadOptions::default()).await.ok()?;
+    let src = dir
+        .join("**/*.parquet")
+        .to_string_lossy()
+        .replace('\\', "/");
+    ctx.register_parquet("persons", &src, ParquetReadOptions::default())
+        .await
+        .ok()?;
 
     // Try all forms: primary name + aliases
     let mut all_forms: Vec<&str> = vec![name];
@@ -6451,9 +6705,13 @@ async fn query_person_authority(name: &str, aliases: &[String]) -> Option<serde_
         if let Ok(df) = ctx.sql(&sql).await {
             if let Ok(batches) = df.collect().await {
                 for batch in &batches {
-                    if batch.num_rows() == 0 { continue; }
+                    if batch.num_rows() == 0 {
+                        continue;
+                    }
                     let row = authority_person_row(batch, 0);
-                    if row.is_some() { return row; }
+                    if row.is_some() {
+                        return row;
+                    }
                 }
             }
         }
@@ -6461,13 +6719,23 @@ async fn query_person_authority(name: &str, aliases: &[String]) -> Option<serde_
     None
 }
 
-fn authority_person_row(batch: &arrow::record_batch::RecordBatch, i: usize) -> Option<serde_json::Value> {
+fn authority_person_row(
+    batch: &arrow::record_batch::RecordBatch,
+    i: usize,
+) -> Option<serde_json::Value> {
     #[allow(unused_imports)]
     use arrow::array::{Array, StringArray};
     let get = |name: &str| -> Option<String> {
-        batch.column_by_name(name)
+        batch
+            .column_by_name(name)
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i).to_string()) })
+            .and_then(|a| {
+                if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_string())
+                }
+            })
     };
 
     let person_id = get("person_id")?;
@@ -6477,15 +6745,33 @@ fn authority_person_row(batch: &arrow::record_batch::RecordBatch, i: usize) -> O
         "primary_name": primary_name,
     });
     let m = obj.as_object_mut().unwrap();
-    if let Some(v) = get("gender") { m.insert("gender".into(), v.into()); }
-    if let Some(v) = get("dynasty") { m.insert("dynasty".into(), v.trim().to_string().into()); }
-    if let Some(v) = get("birth_year") { m.insert("birth_year".into(), v.into()); }
-    if let Some(v) = get("death_year") { m.insert("death_year".into(), v.into()); }
-    if let Some(v) = get("occupation") { m.insert("occupation".into(), v.into()); }
-    if let Some(v) = get("place_of_origin") { m.insert("place_of_origin".into(), v.into()); }
-    if let Some(v) = get("concise_bio") { m.insert("concise_bio".into(), v.into()); }
-    if let Some(v) = get("wikidata_id") { m.insert("wikidata_id".into(), v.into()); }
-    if let Some(v) = get("cbdb_id") { m.insert("cbdb_id".into(), v.into()); }
+    if let Some(v) = get("gender") {
+        m.insert("gender".into(), v.into());
+    }
+    if let Some(v) = get("dynasty") {
+        m.insert("dynasty".into(), v.trim().to_string().into());
+    }
+    if let Some(v) = get("birth_year") {
+        m.insert("birth_year".into(), v.into());
+    }
+    if let Some(v) = get("death_year") {
+        m.insert("death_year".into(), v.into());
+    }
+    if let Some(v) = get("occupation") {
+        m.insert("occupation".into(), v.into());
+    }
+    if let Some(v) = get("place_of_origin") {
+        m.insert("place_of_origin".into(), v.into());
+    }
+    if let Some(v) = get("concise_bio") {
+        m.insert("concise_bio".into(), v.into());
+    }
+    if let Some(v) = get("wikidata_id") {
+        m.insert("wikidata_id".into(), v.into());
+    }
+    if let Some(v) = get("cbdb_id") {
+        m.insert("cbdb_id".into(), v.into());
+    }
     // Parse teacher/student JSON arrays
     if let Some(v) = get("teachers_json") {
         if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&v) {
@@ -6518,8 +6804,13 @@ async fn query_place_authority(name: &str, aliases: &[String]) -> Option<serde_j
     }
 
     let ctx = SessionContext::new();
-    let src = dir.join("**/*.parquet").to_string_lossy().replace('\\', "/");
-    ctx.register_parquet("places", &src, ParquetReadOptions::default()).await.ok()?;
+    let src = dir
+        .join("**/*.parquet")
+        .to_string_lossy()
+        .replace('\\', "/");
+    ctx.register_parquet("places", &src, ParquetReadOptions::default())
+        .await
+        .ok()?;
 
     let mut all_forms: Vec<&str> = vec![name];
     for a in aliases {
@@ -6538,14 +6829,24 @@ async fn query_place_authority(name: &str, aliases: &[String]) -> Option<serde_j
         if let Ok(df) = ctx.sql(&sql).await {
             if let Ok(batches) = df.collect().await {
                 for batch in &batches {
-                    if batch.num_rows() == 0 { continue; }
+                    if batch.num_rows() == 0 {
+                        continue;
+                    }
                     let get_str = |col: &str| -> Option<String> {
-                        batch.column_by_name(col)
+                        batch
+                            .column_by_name(col)
                             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                            .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0).to_string()) })
+                            .and_then(|a| {
+                                if a.is_null(0) {
+                                    None
+                                } else {
+                                    Some(a.value(0).to_string())
+                                }
+                            })
                     };
                     let get_f64 = |col: &str| -> Option<f64> {
-                        batch.column_by_name(col)
+                        batch
+                            .column_by_name(col)
                             .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
                             .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0)) })
                     };
@@ -6557,13 +6858,27 @@ async fn query_place_authority(name: &str, aliases: &[String]) -> Option<serde_j
                         "primary_name": primary_name,
                     });
                     let m = obj.as_object_mut().unwrap();
-                    if let Some(lat) = get_f64("latitude") { m.insert("latitude".into(), lat.into()); }
-                    if let Some(lon) = get_f64("longitude") { m.insert("longitude".into(), lon.into()); }
-                    if let Some(v) = get_str("geo_confidence") { m.insert("geo_confidence".into(), v.into()); }
-                    if let Some(v) = get_str("district") { m.insert("district".into(), v.into()); }
-                    if let Some(v) = get_str("category") { m.insert("category".into(), v.trim().to_string().into()); }
-                    if let Some(v) = get_str("description") { m.insert("description".into(), v.into()); }
-                    if let Some(v) = get_str("parent_place_id") { m.insert("parent_place_id".into(), v.into()); }
+                    if let Some(lat) = get_f64("latitude") {
+                        m.insert("latitude".into(), lat.into());
+                    }
+                    if let Some(lon) = get_f64("longitude") {
+                        m.insert("longitude".into(), lon.into());
+                    }
+                    if let Some(v) = get_str("geo_confidence") {
+                        m.insert("geo_confidence".into(), v.into());
+                    }
+                    if let Some(v) = get_str("district") {
+                        m.insert("district".into(), v.into());
+                    }
+                    if let Some(v) = get_str("category") {
+                        m.insert("category".into(), v.trim().to_string().into());
+                    }
+                    if let Some(v) = get_str("description") {
+                        m.insert("description".into(), v.into());
+                    }
+                    if let Some(v) = get_str("parent_place_id") {
+                        m.insert("parent_place_id".into(), v.into());
+                    }
                     if let Some(v) = get_str("alt_names_json") {
                         if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&v) {
                             m.insert("alt_names".into(), arr);

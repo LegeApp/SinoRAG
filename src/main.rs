@@ -1,41 +1,6 @@
-mod agent;
-mod catalog_index;
-mod cbeta_sidecar;
-mod cef;
-mod cli;
-mod commands;
-mod datafusion_store;
-mod dict;
-mod document_table;
-mod embedding;
-mod ingest;
-mod jsonout;
-mod mcp;
-mod memory;
-mod models;
-mod normalize;
-mod pack;
-mod parquet_metadata;
-mod phrase_index;
-mod registry;
-mod research;
-mod research_tools;
-mod retrieval;
-mod search_packet;
-mod setup;
-mod storage;
-mod taxonomy_legend;
-mod tei;
-mod templates;
-mod text_analyzer;
-mod tfidf;
-mod tools;
-mod vector_index;
-mod which;
-
 use anyhow::Result;
 use clap::Parser;
-use tracing::Level;
+use sinorag::{cli, commands};
 
 // Note: the Windows linker stack reserve is bumped to 32 MiB via
 // `.cargo/config.toml`, because debug builds generate very large stack

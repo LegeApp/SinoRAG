@@ -132,7 +132,7 @@ JSON CLI is the best fit for scripts, tests, repeatable batches, and audit trail
 sinorag indexes semantic --model bge-small-zh-v1.5
 ```
 
-Builds a vector index for semantic discovery. This can take many hours on large corpora and requires a binary built with `--features local-embeddings`. For TensorRT acceleration, build with `--features local-embeddings-tensorrt`.
+Builds a vector index for semantic discovery. This can take many hours on large corpora and requires a binary built with `--features local-embeddings`. For TensorRT acceleration, build with `--features tensorrt`.
 
 An external embedding flow is also available for provider-managed batches:
 

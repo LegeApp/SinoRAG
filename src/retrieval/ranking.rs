@@ -22,7 +22,10 @@ pub fn final_score(
     }
 }
 
-pub fn candidate_sources(vector_rank: Option<usize>, tfidf_rank: Option<usize>) -> Vec<CandidateSource> {
+pub fn candidate_sources(
+    vector_rank: Option<usize>,
+    tfidf_rank: Option<usize>,
+) -> Vec<CandidateSource> {
     let mut sources = Vec::new();
     if vector_rank.is_some() {
         sources.push(CandidateSource::Vector);
@@ -68,6 +71,9 @@ mod tests {
             candidate_sources(Some(1), Some(2)),
             vec![CandidateSource::Vector, CandidateSource::Tfidf]
         );
-        assert_eq!(candidate_sources(None, Some(1)), vec![CandidateSource::Tfidf]);
+        assert_eq!(
+            candidate_sources(None, Some(1)),
+            vec![CandidateSource::Tfidf]
+        );
     }
 }

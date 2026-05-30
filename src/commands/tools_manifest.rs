@@ -25,13 +25,10 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
     let tools: Vec<_> = tool_defs()
         .into_iter()
         .filter(|d| {
-            args.include_internal
-                || crate::tools::audience_for_tool(d.spec.name)
-                    != crate::tools::ToolAudience::InternalDebug
+            args.include_internal || d.spec.audience != crate::tools::ToolAudience::InternalDebug
         })
         .map(|d| {
             let requires = d.spec.requires.clone();
-            let audience = crate::tools::audience_for_tool(d.spec.name);
             let mut spec = serde_json::to_value(d.spec).unwrap();
 
             if !args.include_examples {
@@ -54,7 +51,6 @@ pub async fn run(args: ToolsManifestArgs) -> Result<()> {
                     serde_json::json!(missing.is_empty()),
                 );
                 obj.insert("missing".to_string(), serde_json::json!(missing));
-                obj.insert("audience".to_string(), serde_json::json!(audience));
                 if let Some(docs) = crate::tools::docs::doc_for_tool(
                     obj.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
                 ) {

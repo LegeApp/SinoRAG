@@ -33,6 +33,22 @@ impl From<ParquetCompression> for Compression {
     }
 }
 
+/// Auto-heal the pack-prep naming mismatch: that workflow can leave the passage
+/// store on disk as `passages-raw.parquet` (uncompressed source) instead of the
+/// canonical `passages.parquet`. If `canonical` is missing but its
+/// `passages-raw.parquet` sibling exists, rename the sibling into place.
+///
+/// Returns `Ok(true)` if a rename happened, `Ok(false)` if there was nothing to do.
+/// Callers own any user-facing messaging.
+pub fn heal_raw_parquet(canonical: &Path) -> std::io::Result<bool> {
+    let raw = canonical.with_file_name("passages-raw.parquet");
+    if canonical.exists() || !raw.exists() {
+        return Ok(false);
+    }
+    std::fs::rename(&raw, canonical)?;
+    Ok(true)
+}
+
 #[derive(Default)]
 pub struct PassageBatch {
     source_corpus: Vec<String>,
@@ -446,7 +462,12 @@ pub fn person_schema() -> Arc<Schema> {
     ]))
 }
 
-pub fn write_person_parquet(batch: &PersonBatch, out_dir: &Path, part_index: usize, compression: ParquetCompression) -> Result<PathBuf> {
+pub fn write_person_parquet(
+    batch: &PersonBatch,
+    out_dir: &Path,
+    part_index: usize,
+    compression: ParquetCompression,
+) -> Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     let path = out_dir.join(format!("part-{part_index:06}.parquet"));
     let file = File::create(&path)?;
@@ -555,7 +576,12 @@ pub fn place_schema() -> Arc<Schema> {
     ]))
 }
 
-pub fn write_place_parquet(batch: &PlaceBatch, out_dir: &Path, part_index: usize, compression: ParquetCompression) -> Result<PathBuf> {
+pub fn write_place_parquet(
+    batch: &PlaceBatch,
+    out_dir: &Path,
+    part_index: usize,
+    compression: ParquetCompression,
+) -> Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     let path = out_dir.join(format!("part-{part_index:06}.parquet"));
     let file = File::create(&path)?;
