@@ -77,7 +77,7 @@ pub mod win_utils {
             RegCreateKeyExW(
                 HKEY_CURRENT_USER,
                 PCWSTR::from_raw(subkey.as_ptr()),
-                0,
+                None,
                 PCWSTR::null(),
                 REG_OPTION_NON_VOLATILE,
                 KEY_WRITE,
@@ -117,7 +117,7 @@ pub mod win_utils {
             let _ = RegSetValueExW(
                 hkey,
                 PCWSTR::from_raw(name_w.as_ptr()),
-                0,
+                None,
                 REG_SZ,
                 Some(bytes),
             );
@@ -131,7 +131,7 @@ pub mod win_utils {
             let _ = RegSetValueExW(
                 hkey,
                 PCWSTR::from_raw(name_w.as_ptr()),
-                0,
+                None,
                 REG_DWORD,
                 Some(&bytes),
             );
@@ -157,7 +157,7 @@ pub mod win_utils {
             RegOpenKeyExW(
                 HKEY_CURRENT_USER,
                 PCWSTR::from_raw(subkey.as_ptr()),
-                0,
+                None,
                 KEY_READ,
                 &mut hkey,
             )
@@ -198,14 +198,13 @@ pub mod win_utils {
     /// Returns an opaque guard; drop it to release. Returns None if another
     /// instance already holds the mutex.
     pub fn try_single_instance() -> Option<SingleInstanceGuard> {
-        use windows::Win32::Foundation::BOOL;
         use windows::Win32::System::Threading::CreateMutexW;
 
         let name = to_wide_str("Local\\SinoRAGInstaller");
         let handle = unsafe {
             CreateMutexW(
                 None,
-                BOOL(1), // bInitialOwner = TRUE
+                true, // bInitialOwner
                 PCWSTR::from_raw(name.as_ptr()),
             )
         }

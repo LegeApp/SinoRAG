@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_System_Threading",
@@ -37,3 +38,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Drop debug symbols from the final exe. Skia (linked into freya) dominates the
+# binary, so stripping symbols is the single biggest size win available without
+# changing runtime behaviour. The installer's own feature use is already minimal
+# (freya pulls only `winit`; none of plot/webview/terminal/code-editor/skia
+# extras). For further size, `panic = "abort"` and `opt-level = "s"` help the
+# Rust side but change panic semantics / GUI responsiveness — left off by default.
+strip = true

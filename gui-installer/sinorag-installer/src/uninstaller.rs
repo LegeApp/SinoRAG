@@ -78,15 +78,21 @@ fn main() {
     println!("Removed uninstall registry entry.");
 
     // The install directory contains this running executable, so we can't
-    // delete it while it is in use. Spawn a background cmd that waits for
-    // this process to exit, then removes the directory tree.
+    // delete it while it is in use. Spawn a detached cmd that waits for this
+    // process to exit, then removes the directory tree. DETACHED_PROCESS frees
+    // the child from this console so it survives after the window closes; `ping`
+    // is a console-independent delay (unlike `timeout`, which needs console
+    // stdin and errors out when redirected).
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
     println!("Scheduling install directory removal...");
     let remove_cmd = format!(
-        "timeout /t 2 /nobreak >nul && rmdir /s /q \"{}\"",
+        "ping 127.0.0.1 -n 3 >nul & rmdir /s /q \"{}\"",
         install_dir.display()
     );
     match std::process::Command::new("cmd")
         .args(["/c", &remove_cmd])
+        .creation_flags(DETACHED_PROCESS)
         .spawn()
     {
         Ok(_) => println!("SinoRAG has been uninstalled."),

@@ -445,7 +445,10 @@ mod app {
         match event {
             InstallerEvent::Step(step, progress) => {
                 s.step = step.clone();
-                s.progress = progress.clamp(0.0, 1.0);
+                // Monotonic: the download band (<=0.35) and the indexing band
+                // (0.10..0.86) overlap, so clamp upward to stop the bar from
+                // jumping backwards. start_install resets progress to 0 directly.
+                s.progress = progress.clamp(0.0, 1.0).max(s.progress);
                 push_log(&mut s.logs, step);
             }
             InstallerEvent::Log(line) => push_log(&mut s.logs, line),
