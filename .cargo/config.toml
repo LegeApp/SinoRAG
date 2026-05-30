@@ -1,3 +1,22 @@
+# ── Installer build aliases ───────────────────────────────────────────────────
+# Run from the repo root. Outputs land in the crate's own target/release/.
+#
+#   cargo installer              → release build of the winsafe (native Win32) installer [default]
+#   cargo installer-winsafe      → same as above, explicit
+#   cargo installer-freya        → release build of the Freya (Skia-backed) installer
+#   cargo check-installer        → fast type-check of the winsafe installer
+#   cargo check-installer-winsafe→ same as above, explicit
+#   cargo check-installer-freya  → fast type-check of the Freya installer
+
+[alias]
+installer              = ["build", "--manifest-path", "gui-installer/sinorag-installer-winsafe/Cargo.toml", "--release"]
+installer-winsafe      = ["build", "--manifest-path", "gui-installer/sinorag-installer-winsafe/Cargo.toml", "--release"]
+installer-freya        = ["build", "--manifest-path", "gui-installer/sinorag-installer/Cargo.toml",         "--release"]
+check-installer        = ["check", "--manifest-path", "gui-installer/sinorag-installer-winsafe/Cargo.toml", "--bins"]
+check-installer-winsafe= ["check", "--manifest-path", "gui-installer/sinorag-installer-winsafe/Cargo.toml", "--bins"]
+check-installer-freya  = ["check", "--manifest-path", "gui-installer/sinorag-installer/Cargo.toml",         "--bins"]
+
+# ── Runtime stack (Windows) ───────────────────────────────────────────────────
 # Increase the default Windows main-thread stack to 32 MiB.
 # Debug builds generate very large stack frames (proc-macro-generated futures,
 # clap parser) that overflow the default 1 MiB stack at startup.

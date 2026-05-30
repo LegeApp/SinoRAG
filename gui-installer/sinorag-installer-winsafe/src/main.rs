@@ -5,7 +5,7 @@
 
 #[cfg(target_os = "windows")]
 mod app {
-    use sinorag_installer::win_utils::{
+    use sinorag_installer_winsafe::win_utils::{
         default_install_path, desktop_shortcut_path, start_menu_shortcut_path, to_wide,
         to_wide_str, try_single_instance, write_uninstall_entry,
     };

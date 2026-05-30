@@ -5,7 +5,7 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn main() {
-    use sinorag_installer::win_utils::{
+    use sinorag_installer_winsafe::win_utils::{
         delete_uninstall_entry, desktop_shortcut_path, read_install_location,
         start_menu_shortcut_path,
     };
