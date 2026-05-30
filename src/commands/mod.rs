@@ -36,6 +36,7 @@ pub mod seed_pick;
 pub mod similar_phrase;
 pub mod status;
 pub mod taxonomy;
+pub mod tensorrt_engine;
 pub mod tfidf;
 pub mod timeline;
 pub mod tool_call;
@@ -286,6 +287,7 @@ async fn build_semantic_index(args: SemanticIndexArgs) -> Result<()> {
         args.model_cache_dir,
         args.tensorrt_root,
         args.tensorrt_cache_dir,
+        args.cpu,
         args.show_download_progress,
         true, // fail_if_feature_missing - explicit semantic command should error clearly
         args.allow_partial_vector_index,
@@ -411,6 +413,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 nb_layer,
             ),
             IndexCommand::VectorInfo { index } => vector_index::info(index),
+            IndexCommand::VectorEngineBuild {
+                onnx,
+                engine_dir,
+                model,
+                batch_size,
+                trtexec,
+                force,
+            } => tensorrt_engine::build(onnx, engine_dir, model, batch_size, trtexec, force),
             IndexCommand::Semantic {
                 allow_partial_vector_index,
             } => {
@@ -424,6 +434,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     None,
                     None,
                     None,
+                    false,
                     true,
                     true,
                     allow_partial_vector_index,
@@ -443,6 +454,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 model_cache_dir,
                 tensorrt_root,
                 tensorrt_cache_dir,
+                cpu,
                 show_download_progress,
                 allow_partial_vector_index,
                 max_nb_connection,
@@ -459,6 +471,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     model_cache_dir,
                     tensorrt_root,
                     tensorrt_cache_dir,
+                    cpu,
                     show_download_progress,
                     true, // fail_if_feature_missing — explicit command should error clearly
                     allow_partial_vector_index,

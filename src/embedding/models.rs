@@ -12,8 +12,10 @@ pub enum LocalEmbeddingProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingExecutionProvider {
-    /// ONNX Runtime TensorRT execution provider (required; CPU and DirectML are not supported).
+    /// Direct TensorRT engine runtime.
     Tensorrt,
+    /// Explicit CPU embedding backend. Prefer Tract; may report unsupported model ops.
+    Cpu,
 }
 
 impl LocalEmbeddingProfile {

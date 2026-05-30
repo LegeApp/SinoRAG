@@ -1,5 +1,5 @@
 use crate::embedding::build::{run_vector_update, VectorUpdateConfig};
-use crate::embedding::models::LocalEmbeddingProfile;
+use crate::embedding::models::{EmbeddingExecutionProvider, LocalEmbeddingProfile};
 use crate::vector_index::HnswParams;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ pub async fn update(
     model_cache_dir: Option<PathBuf>,
     tensorrt_root: Option<PathBuf>,
     tensorrt_cache_dir: Option<PathBuf>,
+    cpu: bool,
     show_download_progress: bool,
     fail_if_feature_missing: bool,
     allow_partial_vector_index: bool,
@@ -26,12 +27,17 @@ pub async fn update(
     let batch_size = batch_size.unwrap_or_else(|| profile.default_batch_size());
     let tensorrt_cache_dir =
         tensorrt_cache_dir.or_else(|| default_tensorrt_cache_dir(&cache_path, profile));
+    let execution_provider = if cpu {
+        EmbeddingExecutionProvider::Cpu
+    } else {
+        EmbeddingExecutionProvider::Tensorrt
+    };
 
     eprintln!("=== vector-update ===");
     eprintln!("Model:      {}", profile.model_id());
     eprintln!("Dim:        {}", profile.dim());
     eprintln!("Batch size: {}", batch_size);
-    eprintln!("Provider:   TensorRT (required)");
+    eprintln!("Provider:   {:?}", execution_provider);
     eprintln!("Cache:      {}", cache_path.display());
     if let Some(root) = &tensorrt_root {
         eprintln!("TensorRT:   {}", root.display());
@@ -53,6 +59,7 @@ pub async fn update(
         model_cache_dir,
         tensorrt_root,
         tensorrt_cache_dir,
+        execution_provider,
         show_download_progress,
         fail_if_feature_missing,
         allow_partial_vector_index,

@@ -8,3 +8,5 @@ SinoRAG.zip
 cargo-checker.exe
 /terebess_zen_text_images/
 /terebess_zen_urls/
+/.codegraph/
+/vendor/

@@ -1,8 +1,6 @@
 #[cfg(feature = "local-embeddings")]
 use super::cache::{self, CacheRecord, CACHE_SCHEMA};
 use super::cache::{EmbeddingCache, DOCUMENT_TEMPLATE_ID};
-#[cfg(feature = "local-embeddings")]
-use super::models::EmbeddingExecutionProvider;
 use super::models::LocalEmbeddingProfile;
 use crate::datafusion_store::DataFusionStore;
 use crate::document_table::DocumentTable;
@@ -23,6 +21,7 @@ pub struct VectorUpdateConfig {
     pub model_cache_dir: Option<PathBuf>,
     pub tensorrt_root: Option<PathBuf>,
     pub tensorrt_cache_dir: Option<PathBuf>,
+    pub execution_provider: super::models::EmbeddingExecutionProvider,
     pub show_download_progress: bool,
     pub hnsw: HnswParams,
     pub allow_partial_vector_index: bool,
@@ -177,7 +176,7 @@ pub async fn run_vector_update(config: VectorUpdateConfig) -> Result<()> {
                 config.profile,
                 config.model_cache_dir.clone(),
                 config.batch_size,
-                EmbeddingExecutionProvider::Tensorrt,
+                config.execution_provider,
                 config.tensorrt_root.clone(),
                 config.tensorrt_cache_dir.clone(),
                 config.show_download_progress,

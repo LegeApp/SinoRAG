@@ -179,6 +179,28 @@ pub enum IndexCommand {
         index: PathBuf,
     },
 
+    /// Build a direct TensorRT engine with trtexec for local embeddings.
+    VectorEngineBuild {
+        /// ONNX model file to compile.
+        #[arg(long)]
+        onnx: PathBuf,
+        /// TensorRT engine directory; writes engine.plan and build.json.
+        #[arg(long, default_value = "data/derived/tensorrt/bge-small-zh-v1.5")]
+        engine_dir: PathBuf,
+        /// Embedding model profile.
+        #[arg(long, value_enum, default_value = "bge-small-zh-v1.5")]
+        model: LocalEmbeddingProfile,
+        /// TensorRT optimization/max batch size.
+        #[arg(long)]
+        batch_size: Option<usize>,
+        /// Path to trtexec.
+        #[arg(long, default_value = "trtexec")]
+        trtexec: PathBuf,
+        /// Rebuild even when engine.plan and build.json already exist.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+
     /// Embed passages with a local model and build the vector index.
     ///
     /// Build or update the vector (HNSW) index used for semantic search.
@@ -193,25 +215,17 @@ pub enum IndexCommand {
     ///   cargo build --release --features tensorrt
     ///
     /// Runtime libraries:
-    ///   ONNX Runtime shared lib  — set ORT_DYLIB_PATH if it is not next to the executable
-    ///   TensorRT ORT EP plugin   — set SINORAG_TENSORRT_EP_DLL / ORT_TENSORRT_EP_DLL if needed
     ///   TensorRT + CUDA libs     — visible via --tensorrt-root, SINORAG_TENSORRT_ROOT, or linker path
+    ///   TensorRT engine.plan     — build explicitly before indexing
     ///
-    /// Linux examples include libonnxruntime_providers_tensorrt.so,
-    /// libnvinfer.so, libnvinfer_plugin.so, libnvonnxparser.so, libcudart.so,
-    /// libcublas.so, and libcublasLt.so.
-    ///
-    /// Windows examples include ORTTensorRTEp.dll, nvinfer_10.dll,
-    /// nvonnxparser_10.dll, cudart64_12.dll, cublas64_12.dll, and
-    /// cublasLt64_12.dll.
+    /// Linux examples include libnvinfer.so, libnvinfer_plugin.so,
+    /// libnvonnxparser.so, libcudart.so, libcublas.so, and libcublasLt.so.
     ///
     /// Environment variables:
-    ///   ORT_DYLIB_PATH           — path to ONNX Runtime shared library
-    ///   SINORAG_TENSORRT_EP_DLL  — path to TensorRT ORT EP plugin
     ///   SINORAG_TENSORRT_ROOT    — TensorRT install root (bin/ and lib/ added to PATH)
     ///
-    /// First run builds TensorRT engines (slow). Subsequent runs load cached
-    /// engines from --tensorrt-cache-dir (default: data/derived/tensorrt/).
+    /// Build TensorRT engines first with `index vector-engine-build`. Embedding
+    /// runs load engine.plan from --tensorrt-cache-dir (default: data/derived/tensorrt/).
     VectorUpdate {
         /// Passages parquet directory.
         #[arg(long, default_value = "data/passages.parquet", hide = true)]
@@ -242,6 +256,9 @@ pub enum IndexCommand {
         /// cache so optimized engines are reused across runs.
         #[arg(long)]
         tensorrt_cache_dir: Option<PathBuf>,
+        /// Use the explicit CPU backend instead of TensorRT.
+        #[arg(long, default_value_t = false)]
+        cpu: bool,
         /// Show download progress bar when fetching model weights.
         #[arg(long, default_value_t = true)]
         show_download_progress: bool,
@@ -263,8 +280,7 @@ pub enum IndexCommand {
     ///
     /// Alias for: sinorag index vector-update --model bge-small-zh-v1.5
     ///
-    /// Expects the ORT + TensorRT libraries to be present next to the
-    /// executable (set up automatically on Linux by setup_tensorrt_linux.sh).
+    /// Expects a direct TensorRT engine built in data/derived/tensorrt/.
     Semantic {
         /// Allow building an index when doc_table contains passages absent from parquet.
         #[arg(long, default_value_t = false)]
@@ -320,6 +336,8 @@ pub struct SemanticIndexArgs {
     pub tensorrt_root: Option<PathBuf>,
     #[arg(long)]
     pub tensorrt_cache_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub cpu: bool,
     #[arg(long, default_value_t = true)]
     pub show_download_progress: bool,
     /// Allow building an index when doc_table contains passages absent from parquet.
