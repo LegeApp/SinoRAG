@@ -125,8 +125,8 @@ pub async fn run(config: EngineConfig) -> Result<()> {
     let engine = Arc::new(ToolEngine::open(config).await?);
 
     // Emit an early diagnostic on stderr if no passages parquet is reachable.
-    // The server still starts (tools that don't need a pack — `query-expand-terms`,
-    // `tool-docs`, `plan-tools` — remain useful), but the operator should see
+    // The server still starts (tools that don't need a pack — `query-expand-terms`
+    // and `tool-docs` — remain useful), but the operator should see
     // this before the model starts calling search tools that will all fail.
     match engine.resolve_passages_path() {
         Ok(path) if path.exists() => {

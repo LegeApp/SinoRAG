@@ -2,6 +2,7 @@ use crate::document_table::{match_index_fingerprint, DocumentTable};
 use anyhow::{anyhow, Context, Result};
 use hnsw_rs::prelude::{AnnT, DistL2, Hnsw, HnswIo};
 use memmap2::Mmap;
+use rayon;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,8 +18,8 @@ const MAGIC: &[u8; 8] = b"SINVEC2\0";
 // Filename suffixes used by hnsw_rs::file_dump. The graph dump is written next
 // to the .index file with basename = file_name(index_path) (e.g.
 // `vector.index.hnsw.graph` and `vector.index.hnsw.data`).
-const HNSW_GRAPH_SUFFIX: &str = ".hnsw.graph";
-const HNSW_DATA_SUFFIX: &str = ".hnsw.data";
+pub const HNSW_GRAPH_SUFFIX: &str = ".hnsw.graph";
+pub const HNSW_DATA_SUFFIX: &str = ".hnsw.data";
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorIndexHeader {
@@ -235,6 +236,7 @@ pub fn build_from_embeddings(
     model_revision: String,
     metadata: VectorBuildMetadata,
     hnsw: HnswParams,
+    hnsw_threads: Option<usize>,
 ) -> Result<VectorIndexHeader> {
     let doc_table = DocumentTable::load(doc_table_path)?;
     let (mut rows, embeddings_fingerprint) = read_embedding_rows(embeddings_path, &doc_table)?;
@@ -283,7 +285,31 @@ pub fn build_from_embeddings(
     };
 
     write_index(out_path, &header, &doc_ids, &vectors)?;
-    build_and_dump_hnsw(out_path, &vectors, &doc_ids, dim, &hnsw)?;
+    build_and_dump_hnsw(out_path, &vectors, &doc_ids, dim, &hnsw, hnsw_threads)?;
+    Ok(header)
+}
+
+/// Resume an interrupted vector-build by rebuilding only the HNSW dump from an
+/// existing `.index` file. The `.index` file is read, vectors decoded, HNSW
+/// params taken from the stored header, and the dump files written next to the
+/// index. The `.index` file itself is not modified.
+pub fn rebuild_hnsw_from_index(
+    index_path: &Path,
+    hnsw_threads: Option<usize>,
+) -> Result<VectorIndexHeader> {
+    let file =
+        File::open(index_path).with_context(|| format!("open index {}", index_path.display()))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    let (header, doc_ids, vectors) = decode_index(&mmap)?;
+    let dim = header.embedding_dim as usize;
+    build_and_dump_hnsw(
+        index_path,
+        &vectors,
+        &doc_ids,
+        dim,
+        &header.hnsw,
+        hnsw_threads,
+    )?;
     Ok(header)
 }
 
@@ -411,7 +437,7 @@ pub fn build_from_rows(
     };
 
     write_index(out_path, &header, &doc_ids, &vectors)?;
-    build_and_dump_hnsw(out_path, &vectors, &doc_ids, dim, &hnsw)?;
+    build_and_dump_hnsw(out_path, &vectors, &doc_ids, dim, &hnsw, None)?;
     Ok(header)
 }
 
@@ -570,7 +596,7 @@ fn decode_index(bytes: &[u8]) -> Result<(VectorIndexHeader, Vec<u32>, Vec<f32>)>
 /// files associated with `index_path`. The dump files live next to the
 /// .index file with basename equal to the .index filename, so the on-disk
 /// files are e.g. `vector.index.hnsw.graph` and `vector.index.hnsw.data`.
-fn hnsw_dump_location(index_path: &Path) -> Result<(PathBuf, String)> {
+pub fn hnsw_dump_location(index_path: &Path) -> Result<(PathBuf, String)> {
     let dir = index_path
         .parent()
         .map(Path::to_path_buf)
@@ -592,6 +618,7 @@ fn build_and_dump_hnsw(
     doc_ids: &[u32],
     dim: usize,
     params: &HnswParams,
+    hnsw_threads: Option<usize>,
 ) -> Result<()> {
     let nb_layer = params.nb_layer.min(16).max(1);
     let hnsw = Hnsw::<f32, DistL2>::new(
@@ -606,7 +633,15 @@ fn build_and_dump_hnsw(
         .enumerate()
         .map(|(row, doc_id)| (&vectors[row * dim..(row + 1) * dim], *doc_id as usize))
         .collect();
-    hnsw.parallel_insert_slice(&data);
+    if let Some(threads) = hnsw_threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.max(1))
+            .build()
+            .context("build rayon thread pool for HNSW")?
+            .install(|| hnsw.parallel_insert_slice(&data));
+    } else {
+        hnsw.parallel_insert_slice(&data);
+    }
 
     let (dump_dir, basename) = hnsw_dump_location(index_path)?;
     // Remove stale dumps so file_dump (which uses overwrite-style unique-name
@@ -739,6 +774,7 @@ mod tests {
             "test".to_string(),
             VectorBuildMetadata::default(),
             HnswParams::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("duplicate embedding doc_id"));
@@ -764,6 +800,7 @@ mod tests {
             "test".to_string(),
             VectorBuildMetadata::default(),
             HnswParams::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("dimension mismatch"));
@@ -789,6 +826,7 @@ mod tests {
             "test".to_string(),
             VectorBuildMetadata::default(),
             HnswParams::default(),
+            None,
         )
         .unwrap();
         let index = VectorIndex::open(&out).unwrap();

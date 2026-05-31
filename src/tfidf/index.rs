@@ -842,6 +842,26 @@ pub(crate) fn build_from_table(
     bucket_count: usize,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
+    build_from_table_with_progress(
+        parquet_path,
+        doc_table,
+        out_path,
+        params,
+        bucket_count,
+        temp_dir,
+        None,
+    )
+}
+
+pub(crate) fn build_from_table_with_progress(
+    parquet_path: PathBuf,
+    doc_table: DocumentTable,
+    out_path: PathBuf,
+    params: TfidfParams,
+    bucket_count: usize,
+    temp_dir: Option<PathBuf>,
+    progress: Option<&crate::phrase_index::BuildProgress<'_>>,
+) -> Result<()> {
     let temp_dir = temp_dir.unwrap_or_else(|| {
         let mut p = out_path.as_os_str().to_os_string();
         p.push(".work");
@@ -938,6 +958,13 @@ pub(crate) fn build_from_table(
 
         let counter = AtomicUsize::new(completed.len());
         let total = work_units.len();
+        emit_build_progress(
+            progress,
+            "TF-IDF phase 1: computing document frequencies",
+            completed.len(),
+            total,
+            0.25 * fraction(completed.len(), total),
+        );
         let prog_f = Mutex::new(
             OpenOptions::new()
                 .create(true)
@@ -1002,6 +1029,13 @@ pub(crate) fn build_from_table(
             let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 100 == 0 || n == total {
                 eprintln!("  {}/{}", n, total);
+                emit_build_progress(
+                    progress,
+                    "TF-IDF phase 1: computing document frequencies",
+                    n,
+                    total,
+                    0.25 * fraction(n, total),
+                );
             }
             writeln!(prog_f.lock().unwrap(), "{}", progress_key_for_unit(unit))?;
             Ok(())
@@ -1031,6 +1065,13 @@ pub(crate) fn build_from_table(
             let _ = fs::remove_dir(df_dir.join(format!("t{}", t)));
         }
         fs::write(&phase1_done, b"")?;
+        emit_build_progress(
+            progress,
+            "TF-IDF phase 1: computing document frequencies",
+            total,
+            total,
+            0.25,
+        );
         eprintln!("  Phase 1 complete.");
     }
 
@@ -1061,6 +1102,13 @@ pub(crate) fn build_from_table(
         }
 
         eprintln!("\n[Phase 2] Building vocabulary...");
+        emit_build_progress(
+            progress,
+            "TF-IDF phase 2: building vocabulary",
+            0,
+            bucket_count,
+            0.25,
+        );
 
         // Gram hashes are partitioned across buckets by `hash % bucket_count`,
         // so every DF record for a term lands in exactly one bucket and its
@@ -1077,11 +1125,22 @@ pub(crate) fn build_from_table(
             ((doc_count as f32) * params.max_df_ratio).floor().max(1.0) as u32
         };
 
+        let vocab_counter = AtomicUsize::new(0);
         let bucket_vocabs: Vec<Vec<(u64, u32)>> = (0..bucket_count)
             .into_par_iter()
             .map(|bucket_idx| -> Result<Vec<(u64, u32)>> {
                 let path = df_dir.join(format!("bucket-{:04}.bin", bucket_idx));
                 if !path.exists() {
+                    let done = vocab_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if done % 256 == 0 || done == bucket_count {
+                        emit_build_progress(
+                            progress,
+                            "TF-IDF phase 2: building vocabulary",
+                            done,
+                            bucket_count,
+                            0.25 + 0.20 * fraction(done, bucket_count),
+                        );
+                    }
                     return Ok(Vec::new());
                 }
                 let raw = fs::read(&path)?;
@@ -1112,6 +1171,16 @@ pub(crate) fn build_from_table(
                         local.push((h, df));
                     }
                     i = j;
+                }
+                let done = vocab_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if done % 256 == 0 || done == bucket_count {
+                    emit_build_progress(
+                        progress,
+                        "TF-IDF phase 2: building vocabulary",
+                        done,
+                        bucket_count,
+                        0.25 + 0.20 * fraction(done, bucket_count),
+                    );
                 }
                 Ok(local)
             })
@@ -1160,6 +1229,13 @@ pub(crate) fn build_from_table(
         fs::write(&phase2_termid, bincode::serialize(&term_to_id)?)?;
         // df_dir is no longer needed now that the checkpoint is safely written.
         let _ = fs::remove_dir_all(&df_dir);
+        emit_build_progress(
+            progress,
+            "TF-IDF phase 2: building vocabulary",
+            bucket_count,
+            bucket_count,
+            0.45,
+        );
 
         (vocab_entries, idf, term_to_id)
     };
@@ -1212,6 +1288,13 @@ pub(crate) fn build_from_table(
 
     let counter3 = AtomicUsize::new(0usize);
     let total3 = work_units.len();
+    emit_build_progress(
+        progress,
+        "TF-IDF phase 3: writing rows and postings",
+        0,
+        total3,
+        0.45,
+    );
     let min_n = params.min_ngram;
     let max_n = params.max_ngram;
     let analyze_opts = AnalyzeOptions {
@@ -1297,6 +1380,13 @@ pub(crate) fn build_from_table(
             let n = counter3.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 100 == 0 || n == total3 {
                 eprintln!("  {}/{}", n, total3);
+                emit_build_progress(
+                    progress,
+                    "TF-IDF phase 3: writing rows and postings",
+                    n,
+                    total3,
+                    0.45 + 0.25 * fraction(n, total3),
+                );
             }
             Ok(())
         })?;
@@ -1338,6 +1428,13 @@ pub(crate) fn build_from_table(
     for t in 0..nthreads {
         let _ = fs::remove_dir(post_dir.join(format!("t{}", t)));
     }
+    emit_build_progress(
+        progress,
+        "TF-IDF phase 3: writing rows and postings",
+        total3,
+        total3,
+        0.70,
+    );
 
     // -----------------------------------------------------------------------
     // Phase 4 — merge posting buckets, quantize on emit (parallel)
@@ -1355,9 +1452,23 @@ pub(crate) fn build_from_table(
     // final blob size plus one bucket, instead of roughly twice the blob. The
     // per-bucket sort is parallelised so cores stay busy on the dominant cost.
     let mut postings_blob: Vec<u8> = Vec::new();
+    emit_build_progress(
+        progress,
+        "TF-IDF phase 4: quantizing posting buckets",
+        0,
+        bucket_count,
+        0.70,
+    );
     for bucket_idx in 0..bucket_count {
         if bucket_idx % 256 == 0 {
             eprintln!("  bucket {}/{}", bucket_idx, bucket_count);
+            emit_build_progress(
+                progress,
+                "TF-IDF phase 4: quantizing posting buckets",
+                bucket_idx,
+                bucket_count,
+                0.70 + 0.15 * fraction(bucket_idx, bucket_count),
+            );
         }
         let path = post_dir.join(format!("bucket-{:04}.bin", bucket_idx));
         if !path.exists() {
@@ -1395,6 +1506,13 @@ pub(crate) fn build_from_table(
         }
     }
     let _ = fs::remove_dir_all(&post_dir);
+    emit_build_progress(
+        progress,
+        "TF-IDF phase 4: quantizing posting buckets",
+        bucket_count,
+        bucket_count,
+        0.85,
+    );
     eprintln!(
         "  Quantized postings blob: {} bytes ({:.1} MB)",
         postings_blob.len(),
@@ -1406,6 +1524,13 @@ pub(crate) fn build_from_table(
     // records into a packed 5-byte/entry quantized blob.
     // -----------------------------------------------------------------------
     eprintln!("\n[Quantize] Re-emitting row blob with u8 weights...");
+    emit_build_progress(
+        progress,
+        "TF-IDF phase 5: quantizing row vectors",
+        0,
+        1,
+        0.85,
+    );
     let mut row_blob_q: Vec<u8> = Vec::with_capacity((row_f32_bytes as usize) * 5 / 8);
     let mut row_offsets_q: Vec<u64> = vec![u64::MAX; doc_count];
     let mut row_lengths: Vec<u32> = vec![0u32; doc_count];
@@ -1446,11 +1571,19 @@ pub(crate) fn build_from_table(
         row_blob_q.len(),
         row_blob_q.len() as f64 / 1e6
     );
+    emit_build_progress(
+        progress,
+        "TF-IDF phase 5: quantizing row vectors",
+        1,
+        1,
+        0.95,
+    );
 
     // -----------------------------------------------------------------------
     // Save
     // -----------------------------------------------------------------------
     eprintln!("\n[Save] Writing index...");
+    emit_build_progress(progress, "TF-IDF phase 6: writing final index", 0, 1, 0.95);
     write_index_file(
         &out_path,
         &params,
@@ -1467,7 +1600,28 @@ pub(crate) fn build_from_table(
     let _ = fs::remove_dir_all(&temp_dir);
     eprintln!("\n=== Complete ===");
     eprintln!("Output: {}", out_path.display());
+    emit_build_progress(progress, "TF-IDF index complete", 1, 1, 1.0);
     Ok(())
+}
+
+fn fraction(done: usize, total: usize) -> f32 {
+    if total == 0 {
+        1.0
+    } else {
+        (done as f32 / total as f32).clamp(0.0, 1.0)
+    }
+}
+
+fn emit_build_progress(
+    progress: Option<&crate::phrase_index::BuildProgress<'_>>,
+    label: &str,
+    done: usize,
+    total: usize,
+    fraction: f32,
+) {
+    if let Some(progress) = progress {
+        progress(label, done.min(total), total, fraction.clamp(0.0, 1.0));
+    }
 }
 
 // ---------------------------------------------------------------------------

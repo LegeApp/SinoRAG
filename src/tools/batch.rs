@@ -8,7 +8,7 @@ use crate::tools::errors::ToolErrorBody;
 use crate::tools::registry::call_tool_enveloped;
 
 /// A batch job definition
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct BatchJob {
     pub id: Option<String>,
     pub tool: String,
@@ -276,7 +276,10 @@ fn record_completion(done: &mut std::collections::HashMap<String, bool>, job: &B
     }
 }
 
-fn skipped_dependency_envelope(job: &BatchJob, dep: &str) -> tools::registry::ToolCallEnvelope {
+pub(crate) fn skipped_dependency_envelope(
+    job: &BatchJob,
+    dep: &str,
+) -> tools::registry::ToolCallEnvelope {
     tools::registry::ToolCallEnvelope {
         id: job.id.clone(),
         ok: false,
@@ -296,7 +299,7 @@ fn skipped_dependency_envelope(job: &BatchJob, dep: &str) -> tools::registry::To
     }
 }
 
-fn unresolved_dependency_envelope(
+pub(crate) fn unresolved_dependency_envelope(
     job: &BatchJob,
     missing: Vec<String>,
 ) -> tools::registry::ToolCallEnvelope {
@@ -329,6 +332,38 @@ async fn run_one_job(
         job.tool.clone(),
         job.args.clone(),
     );
+
+    if let Some(timeout_ms) = job.timeout_ms {
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+            Ok(env) => env,
+            Err(_) => tools::registry::ToolCallEnvelope {
+                id: job.id.clone(),
+                ok: false,
+                tool: job.tool.clone(),
+                result: None,
+                error: Some(ToolErrorBody {
+                    code: "timeout".to_string(),
+                    message: format!("tool timed out after {timeout_ms} ms"),
+                    suggested_command: None,
+                    details: None,
+                }),
+                meta: tools::registry::ToolCallMeta {
+                    elapsed_ms: timeout_ms as u128,
+                    started_utc: None,
+                    finished_utc: None,
+                },
+            },
+        }
+    } else {
+        fut.await
+    }
+}
+
+pub(crate) async fn run_one_job_ref(
+    engine: &ToolEngine,
+    job: &BatchJob,
+) -> tools::registry::ToolCallEnvelope {
+    let fut = call_tool_enveloped(engine, job.id.clone(), job.tool.clone(), job.args.clone());
 
     if let Some(timeout_ms) = job.timeout_ms {
         match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {

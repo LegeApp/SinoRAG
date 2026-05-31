@@ -61,4 +61,20 @@ impl LocalEmbeddingProfile {
             Self::BgeM3 => "bge-m3",
         }
     }
+
+    /// HuggingFace repository that hosts the pre-converted ONNX for this model.
+    pub fn onnx_hf_repo(self) -> &'static str {
+        match self {
+            Self::BgeSmallZhV15 => "Xenova/bge-small-zh-v1.5",
+            Self::BgeM3 => "BAAI/bge-m3",
+        }
+    }
+
+    /// Path within the HF repo to the primary ONNX model file.
+    pub fn onnx_hf_file(self) -> &'static str {
+        match self {
+            Self::BgeSmallZhV15 => "onnx/model.onnx",
+            Self::BgeM3 => "onnx/model.onnx",
+        }
+    }
 }

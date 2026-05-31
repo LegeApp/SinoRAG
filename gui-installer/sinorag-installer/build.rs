@@ -6,19 +6,24 @@ use std::path::{Path, PathBuf};
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
+    let crate_name = env::var("CARGO_BIN_NAME").unwrap_or_default();
+    let building_installer = crate_name.is_empty() || crate_name == "sinorag-installer";
 
-    let payload_path = manifest_dir.join("sinorag.7z");
-    if !payload_path.exists() {
-        panic!(
-            "missing compressed SinoRAG payload at {}",
+    // Only the installer (not the uninstaller) embeds the compressed payload.
+    if building_installer {
+        let payload_path = manifest_dir.join("sinorag.7z");
+        if !payload_path.exists() {
+            panic!(
+                "missing compressed SinoRAG payload at {}",
+                payload_path.display()
+            );
+        }
+        println!(
+            "cargo:rustc-env=SINORAG_PAYLOAD_PATH={}",
             payload_path.display()
         );
+        println!("cargo:rerun-if-changed={}", payload_path.display());
     }
-    println!(
-        "cargo:rustc-env=SINORAG_PAYLOAD_PATH={}",
-        payload_path.display()
-    );
-    println!("cargo:rerun-if-changed={}", payload_path.display());
 
     // Bake in the SinoRAG version this installer ships, read from the workspace
     // crate manifest so it tracks the bundled payload without a manual bump.

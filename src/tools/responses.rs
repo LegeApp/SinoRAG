@@ -797,26 +797,6 @@ pub struct ReportFromEvidenceResponse {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct ResourceStatus {
-    pub passages_parquet: bool,
-    pub phrase_index: bool,
-    pub catalog_index: bool,
-    pub doc_table: bool,
-    pub tfidf_index: bool,
-    pub vector_index: bool,
-    pub registry: bool,
-}
-
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct PlanToolsResponse {
-    pub schema: &'static str,
-    pub recommended_workflow: String,
-    pub steps: Vec<SuggestedToolCall>,
-    pub notes: Vec<String>,
-    pub resource_status: ResourceStatus,
-}
-
 /// Response from the batch-evidence-search tool
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct BatchEvidenceSearchResponse {
@@ -932,4 +912,13 @@ pub struct CitationNearMatch {
     pub heading: Option<String>,
     pub overlap_score: f64,
     pub zh_quote: String,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct RunBatchResponse {
+    pub out: PathBuf,
+    pub jobs_total: usize,
+    pub jobs_ok: usize,
+    pub jobs_failed: usize,
+    pub elapsed_ms: u128,
 }

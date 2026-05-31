@@ -171,6 +171,16 @@ pub enum IndexCommand {
         ef_construction: usize,
         #[arg(long, default_value_t = 16)]
         nb_layer: usize,
+        /// Skip phases already completed. If the .index file exists but HNSW dump
+        /// files are missing, rebuild only the HNSW graph from the existing index.
+        #[arg(long, default_value_t = false)]
+        resume: bool,
+        /// Number of Rayon threads for the parallel HNSW build. Defaults to all
+        /// available cores. Reducing this lowers the transient peak memory spike
+        /// above the hard floor (2× vector data). Combine with
+        /// `systemd-run --scope -p MemoryMax=...` to keep OOM kills targeted.
+        #[arg(long)]
+        hnsw_threads: Option<usize>,
     },
 
     /// Print vector-index metadata.
@@ -180,10 +190,13 @@ pub enum IndexCommand {
     },
 
     /// Build a direct TensorRT engine with trtexec for local embeddings.
+    ///
+    /// If --onnx is not provided the ONNX model is downloaded automatically from
+    /// HuggingFace (Xenova/bge-small-zh-v1.5) and cached in the model cache directory.
     VectorEngineBuild {
-        /// ONNX model file to compile.
+        /// ONNX model file to compile. Omit to download automatically from HuggingFace.
         #[arg(long)]
-        onnx: PathBuf,
+        onnx: Option<PathBuf>,
         /// TensorRT engine directory; writes engine.plan and build.json.
         #[arg(long, default_value = "data/derived/tensorrt/bge-small-zh-v1.5")]
         engine_dir: PathBuf,
@@ -199,6 +212,12 @@ pub enum IndexCommand {
         /// Rebuild even when engine.plan and build.json already exist.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Directory for downloaded model files (ONNX cache). Defaults to .fastembed_cache.
+        #[arg(long, hide = true)]
+        model_cache_dir: Option<PathBuf>,
+        /// Show download progress bar when fetching model weights.
+        #[arg(long, default_value_t = true)]
+        show_download_progress: bool,
     },
 
     /// Embed passages with a local model and build the vector index.

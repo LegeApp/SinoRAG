@@ -49,16 +49,14 @@ impl FastEmbedProvider {
                 let engine_dir = tensorrt_cache_dir.unwrap_or_else(|| {
                     std::path::PathBuf::from("data/derived/tensorrt").join(profile.cache_slug())
                 });
-                let engine_path = engine_dir.join("engine.plan");
-                let build_metadata = engine_dir.join("build.json");
-                if !engine_path.is_file() || !build_metadata.is_file() {
-                    anyhow::bail!(
-                        "TensorRT engine is not ready in {}. Build it first with:\n  \
-                         sinorag index vector-engine-build --onnx <model.onnx> --engine-dir {}",
-                        engine_dir.display(),
-                        engine_dir.display()
-                    );
-                }
+                crate::commands::tensorrt_engine::ensure_engine_ready(
+                    &engine_dir,
+                    profile,
+                    None,
+                    std::path::Path::new("trtexec"),
+                    cache_dir.as_deref(),
+                    show_download_progress,
+                )?;
                 eprintln!("       TensorRT engine dir: {}", engine_dir.display());
                 EmbeddingBackendConfig::TensorRt {
                     engine_dir: Some(engine_dir),

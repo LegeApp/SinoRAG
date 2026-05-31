@@ -571,7 +571,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "vector-neighbors",
                 audience: ToolAudience::Specialist,
-                description: "Find semantic neighbor candidates from a seed passage or external query embedding. Results are discovery candidates, not exact evidence. Specialist: prefer hybrid-discover, which merges and rank-normalizes these with lexical parallels — call directly only when you want raw vector neighbors.",
+                description: "Find raw semantic neighbor candidates from a seed passage or external query embedding. Results are discovery candidates, not exact evidence. Specialist: prefer frontier for ordinary seed expansion; call this directly only when raw vector neighbors are specifically needed.",
                 input_schema: schema_for::<VectorNeighborsRequest>(),
                 output_schema: schema_for::<VectorNeighborsResponse>(),
                 requires: vec!["vector.index", "doc_table.bin", "passages.parquet"],
@@ -598,7 +598,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "similar",
                 audience: ToolAudience::Specialist,
-                description: "Find TF-IDF similar passages to a seed passage. Specialist lexical primitive: prefer hybrid-discover, which merges this with semantic neighbors and rank-normalizes — call directly only when you want TF-IDF parallels alone.",
+                description: "Find TF-IDF similar passages to a seed passage. Specialist lexical primitive: frontier wraps this with phrase-frontier discovery; call directly when you want TF-IDF parallels alone.",
                 input_schema: schema_for::<SimilarRequest>(),
                 output_schema: schema_for::<SimilarResponse>(),
                 requires: vec!["passages.parquet", "tfidf.index", "doc_table.bin"],
@@ -1030,33 +1030,6 @@ pub fn tool_defs() -> Vec<ToolDef> {
         // Evidence-search wrapper
         ToolDef {
             spec: ToolSpec {
-                name: "plan-tools",
-                audience: ToolAudience::DefaultAgent,
-                description: "Recommend an agent workflow and concrete next tool calls for a research task.",
-                input_schema: schema_for::<PlanToolsRequest>(),
-                output_schema: schema_for::<PlanToolsResponse>(),
-                requires: vec![],
-                safety: ToolSafety::ReadOnly,
-                examples: vec![
-                    ToolExample {
-                        title: "Plan exact evidence then discovery",
-                        args: serde_json::json!({
-                            "task": "find earliest usage of 一切有為法 and compare related passages",
-                            "known_phrase": "一切有為法"
-                        }),
-                    }
-                ],
-            },
-            call: |engine, args| Box::pin(async move {
-                let req: PlanToolsRequest = serde_json::from_value(args)?;
-                let res = engine.plan_tools_impl(req).await?;
-                Ok(serde_json::to_value(res)?)
-            }),
-        },
-
-        // Evidence-search wrapper
-        ToolDef {
-            spec: ToolSpec {
                 name: "evidence-search",
                 audience: ToolAudience::DefaultAgent,
                 description: "Run exact phrase evidence search plus optional attestation/history/usage/cluster summaries.",
@@ -1088,7 +1061,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "hybrid-discover",
                 audience: ToolAudience::DefaultAgent,
-                description: "Combine vector and TF-IDF discovery candidates when both indexes are available, or degrade to explicit lexical-only/semantic-only discovery mode.",
+                description: "Compactly merge vector and TF-IDF discovery candidates from a seed passage. Prefer frontier for ordinary seed expansion; use hybrid-discover when semantic-vector candidates are explicitly useful. Context and raw sub-results are debug/full-output features.",
                 input_schema: schema_for::<HybridDiscoverRequest>(),
                 output_schema: schema_for::<HybridDiscoverResponse>(),
                 requires: vec!["passages.parquet", "doc_table.bin"],
@@ -1098,7 +1071,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
                         title: "Hybrid discovery from a seed passage",
                         args: serde_json::json!({
                             "seed_passage_id": "B/B13/B13n0079.xml#pB13p0047a0417",
-                            "limit": 25
+                            "limit": 10,
+                            "verbosity": "summary"
                         }),
                     }
                 ],
@@ -1353,6 +1327,52 @@ pub fn tool_defs() -> Vec<ToolDef> {
             call: |engine, args| Box::pin(async move {
                 let req: CitationVerifyRequest = serde_json::from_value(args)?;
                 let res = engine.citation_verify_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
+        // run-batch tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "run-batch",
+                audience: ToolAudience::DefaultAgent,
+                description: "Execute a batch of tool calls from an inline job list or a JSONL \
+                    file, writing all results as JSONL to an output file. Supports DAG-style \
+                    `depends_on` ordering between jobs and per-job `timeout_ms`. Returns a \
+                    summary (jobs_total / ok / failed / elapsed_ms) and the output file path. \
+                    Use this to parallelise multi-step research workflows, persist results for \
+                    later analysis, or hand off a scripted plan to the corpus engine in one call.",
+                input_schema: schema_for::<RunBatchRequest>(),
+                output_schema: schema_for::<RunBatchResponse>(),
+                requires: vec![],
+                safety: ToolSafety::WritesOutput,
+                examples: vec![
+                    ToolExample {
+                        title: "Search two phrases in parallel, cluster results",
+                        args: serde_json::json!({
+                            "jobs": [
+                                {"id": "s1", "tool": "search", "args": {"phrase": "金剛經", "limit": 20}},
+                                {"id": "s2", "tool": "search", "args": {"phrase": "般若波羅蜜", "limit": 20}},
+                                {"id": "cluster", "tool": "cluster-hits",
+                                 "args": {"passage_ids": []},
+                                 "depends_on": ["s1", "s2"]}
+                            ],
+                            "out": "runs/my-research/batch-results.jsonl",
+                            "concurrency": 2
+                        }),
+                    },
+                    ToolExample {
+                        title: "Run from a pre-built JSONL plan file",
+                        args: serde_json::json!({
+                            "input_file": "runs/my-research/plan.jsonl",
+                            "out": "runs/my-research/results.jsonl"
+                        }),
+                    },
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: RunBatchRequest = serde_json::from_value(args)?;
+                let res = engine.run_batch_impl(req).await?;
                 Ok(serde_json::to_value(res)?)
             }),
         },

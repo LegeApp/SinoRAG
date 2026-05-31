@@ -123,19 +123,37 @@ pub fn build_all_indexes(
             });
         }
     };
+    let emit_index_progress = |prefix: &'static str, base: f32, span: f32| {
+        move |label: &str, done: usize, total: usize, fraction: f32| {
+            if let Some(progress) = progress {
+                let remaining = total.saturating_sub(done);
+                let detail = if total == 1 {
+                    label.to_string()
+                } else {
+                    format!("{label}: {done}/{total} done, {remaining} left")
+                };
+                progress.event(init::InitProgressEvent::Step {
+                    label: format!("{prefix}: {detail}"),
+                    progress: Some(base + span * fraction.clamp(0.0, 1.0)),
+                });
+            }
+        }
+    };
 
     eprintln!("=== Combined index build (phrase + tfidf) ===");
     if phrase_index_is_current(&phrase_out, &doc_table, &doc_table_loaded, phrase_gram_len)? {
         eprintln!("Phrase index is current; skipping.");
     } else {
         emit_step("Building phrase index", 0.70);
-        crate::phrase_index::build_from_table(
+        let phrase_progress = emit_index_progress("Building phrase index", 0.70, 0.15);
+        crate::phrase_index::build_from_table_with_progress(
             parquet.clone(),
             doc_table_loaded.clone(),
             phrase_out,
             phrase_gram_len,
             buckets,
             phrase_temp,
+            Some(&phrase_progress),
         )?;
     }
 
@@ -152,13 +170,15 @@ pub fn build_all_indexes(
         Ok(())
     } else {
         emit_step("Building TF-IDF index", 0.85);
-        crate::tfidf::index::build_from_table(
+        let tfidf_progress = emit_index_progress("Building TF-IDF index", 0.85, 0.12);
+        crate::tfidf::index::build_from_table_with_progress(
             parquet,
             doc_table_loaded,
             tfidf_out,
             params,
             buckets,
             tfidf_temp,
+            Some(&tfidf_progress),
         )
     }
 }
@@ -395,6 +415,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 max_nb_connection,
                 ef_construction,
                 nb_layer,
+                resume,
+                hnsw_threads,
             } => vector_index::build(
                 doc_table,
                 embeddings,
@@ -411,6 +433,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 max_nb_connection,
                 ef_construction,
                 nb_layer,
+                resume,
+                hnsw_threads,
             ),
             IndexCommand::VectorInfo { index } => vector_index::info(index),
             IndexCommand::VectorEngineBuild {
@@ -420,7 +444,18 @@ pub async fn run(cli: Cli) -> Result<()> {
                 batch_size,
                 trtexec,
                 force,
-            } => tensorrt_engine::build(onnx, engine_dir, model, batch_size, trtexec, force),
+                model_cache_dir,
+                show_download_progress,
+            } => tensorrt_engine::build(
+                onnx,
+                engine_dir,
+                model,
+                batch_size,
+                trtexec,
+                force,
+                model_cache_dir,
+                show_download_progress,
+            ),
             IndexCommand::Semantic {
                 allow_partial_vector_index,
             } => {

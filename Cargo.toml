@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-local-embeddings = ["dep:fastembed", "fastembed/tensorrt"]
+local-embeddings = ["dep:fastembed", "fastembed/tensorrt", "dep:hf-hub"]
 tensorrt = ["local-embeddings"]
 local-embeddings-cpu = ["dep:fastembed", "fastembed/tract"]
 # Backward-compatible alias for older build scripts.
@@ -19,6 +19,7 @@ local-embeddings-tensorrt = ["tensorrt"]
 # fastembed: enabled by --features local-embeddings. This fork keeps ORT optional
 # and uses direct TensorRT engines by default for local embedding.
 fastembed = { path = "fastembed-rs", optional = true, default-features = false, features = ["hf-hub-native-tls"] }
+hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "native-tls"], optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

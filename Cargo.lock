@@ -4597,7 +4597,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "sinorag"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4613,6 +4613,7 @@ dependencies = [
  "glob",
  "hashbrown 0.15.5",
  "hex",
+ "hf-hub",
  "hnsw_rs",
  "indicatif 0.17.11",
  "lazy_static",

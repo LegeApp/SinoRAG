@@ -35,7 +35,56 @@ pub fn build(
     max_nb_connection: usize,
     ef_construction: usize,
     nb_layer: usize,
+    resume: bool,
+    hnsw_threads: Option<usize>,
 ) -> Result<()> {
+    let hnsw = HnswParams {
+        max_nb_connection,
+        ef_construction,
+        nb_layer,
+    };
+
+    // Resume: check what's already present.
+    if resume && out.is_file() {
+        let (dump_dir, dump_basename) = vector_index::hnsw_dump_location(&out)?;
+        let graph_exists = dump_dir
+            .join(format!(
+                "{dump_basename}{}",
+                vector_index::HNSW_GRAPH_SUFFIX
+            ))
+            .is_file();
+        let data_exists = dump_dir
+            .join(format!("{dump_basename}{}", vector_index::HNSW_DATA_SUFFIX))
+            .is_file();
+
+        if graph_exists && data_exists {
+            eprintln!("resume: index and HNSW dump already complete — nothing to do");
+            let header = vector_index::VectorIndex::header_info(&out)?;
+            let payload = serde_json::json!({
+                "schema": "sinorag-vector-build-v1",
+                "out": out,
+                "header": header,
+                "resumed": true,
+                "phase": "complete",
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Ok(());
+        }
+
+        // .index exists but HNSW dump is missing — rebuild HNSW only from the index file.
+        eprintln!("resume: index file found but HNSW dump missing — rebuilding HNSW from index");
+        let header = vector_index::rebuild_hnsw_from_index(&out, hnsw_threads)?;
+        let payload = serde_json::json!({
+            "schema": "sinorag-vector-build-v1",
+            "out": out,
+            "header": header,
+            "resumed": true,
+            "phase": "hnsw_only",
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
     let header = vector_index::build_from_embeddings(
         &doc_table,
         &embeddings,
@@ -51,11 +100,8 @@ pub fn build(
             pooling,
             instruction,
         },
-        HnswParams {
-            max_nb_connection,
-            ef_construction,
-            nb_layer,
-        },
+        hnsw,
+        hnsw_threads,
     )?;
     let payload = serde_json::json!({
         "schema": "sinorag-vector-build-v1",

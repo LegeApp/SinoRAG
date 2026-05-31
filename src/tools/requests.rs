@@ -800,11 +800,17 @@ pub struct HybridDiscoverRequest {
     #[serde(default)]
     pub query_embedding: Option<Vec<f32>>,
 
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_hybrid_limit")]
     pub limit: usize,
 
     #[serde(default)]
     pub include_context: bool,
+
+    /// Character budget for optional context expansion. Context is omitted
+    /// unless `include_context=true`; at standard verbosity only a compact
+    /// component status is returned, while `full` keeps the raw context block.
+    #[serde(default = "default_hybrid_context_chars")]
+    pub max_context_chars: usize,
 
     #[serde(default = "default_workflow_quality")]
     pub quality: String,
@@ -815,7 +821,7 @@ pub struct HybridDiscoverRequest {
     #[serde(default)]
     pub max_component_ms: Option<u64>,
 
-    #[serde(default = "default_max_candidates")]
+    #[serde(default = "default_hybrid_max_candidates")]
     pub max_candidates: usize,
 
     /// Output verbosity. `standard` (default) returns the merged, scored hits but
@@ -908,17 +914,6 @@ pub struct ScopeProfileRequest {
     pub quality: String,
 }
 
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-pub struct PlanToolsRequest {
-    pub task: String,
-
-    #[serde(default)]
-    pub known_phrase: Option<String>,
-
-    #[serde(default)]
-    pub seed_passage_id: Option<String>,
-}
-
 /// Request for the batch-evidence-search tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct BatchEvidenceSearchRequest {
@@ -938,6 +933,18 @@ fn default_workflow_quality() -> String {
 
 fn default_max_candidates() -> usize {
     200
+}
+
+fn default_hybrid_limit() -> usize {
+    10
+}
+
+fn default_hybrid_max_candidates() -> usize {
+    50
+}
+
+fn default_hybrid_context_chars() -> usize {
+    1200
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -1096,4 +1103,30 @@ pub struct CitationVerifyRequest {
 
 fn default_citation_near_limit() -> usize {
     10
+}
+
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+pub struct RunBatchRequest {
+    /// Inline list of jobs to execute.
+    #[serde(default)]
+    pub jobs: Option<Vec<super::batch::BatchJob>>,
+
+    /// Path to a JSONL file containing one job object per line (alternative to `jobs`).
+    #[serde(default)]
+    pub input_file: Option<PathBuf>,
+
+    /// Output file path for JSONL results.  Must be writable (respects `output_root` sandbox).
+    pub out: PathBuf,
+
+    /// Number of parallel workers (default 1; for heavy parallel workloads prefer `sinorag run-tools --jobs N`).
+    #[serde(default = "default_batch_concurrency")]
+    pub concurrency: usize,
+
+    /// Continue past job failures (default true).  Can be overridden per-job via `continue_on_error`.
+    #[serde(default = "default_true")]
+    pub continue_on_error: bool,
+}
+
+fn default_batch_concurrency() -> usize {
+    1
 }

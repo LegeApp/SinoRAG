@@ -524,6 +524,21 @@ mod app {
         fs::write(&icon_path, SHORTCUT_ICON)
             .with_context(|| format!("writing {}", icon_path.display()))?;
 
+        step(&tx, "Deploying uninstaller", 0.065);
+        let installer_exe = std::env::current_exe()
+            .context("getting installer exe path")?;
+        let uninstaller_src = installer_exe
+            .parent()
+            .context("installer exe has no parent")?
+            .join("sinorag-uninstaller.exe");
+        if uninstaller_src.is_file() {
+            let uninstaller_dst = request.install_path.join("sinorag-uninstaller.exe");
+            fs::copy(&uninstaller_src, &uninstaller_dst)
+                .with_context(|| format!("copying uninstaller to {}", uninstaller_dst.display()))?;
+        } else {
+            log(&tx, format!("Warning: uninstaller not found at {}", uninstaller_src.display()));
+        }
+
         let data_root = request.install_path.join("data");
         let out_parquet = data_root.join("passages.parquet");
         let pack_url =

@@ -14,23 +14,38 @@ not a tool catalog.
 
 - **Exact phrase evidence**: `search`, `evidence-search`, `phrase-index-search`,
   `canonical-source`, `first-attestation`, `phrase-history`.
-- **Discovery (candidates, not evidence)**: `similar`, `vector-neighbors`,
-  `hybrid-discover`, `frontier`, `source-investigate`.
+- **Discovery from a seed passage (candidates, not evidence)**: prefer
+  `frontier` after one or two good exact hits. It does not use the vector index;
+  it combines TF-IDF similar passages with distinctive phrase frontiers and is
+  usually the best bridge from known wording to unknown leads.
+- **Semantic/vector discovery**: `vector-neighbors`, `hybrid-discover`. Use
+  only when conceptual drift is worth the extra latency and the seed passage is
+  representative. Vector hits are leads, not evidence; verify them with exact
+  tools before making claims.
+- **Fast lexical parallels**: `similar` for TF-IDF neighbors from a known
+  passage, especially reuse/retelling candidates.
 - **Scoped corpus reads**: `passage`, `source-read`, `expand-context-adaptive`,
   `heading-search`, `outline-search`.
 - **Distinctive vocabulary / comparison**: `compare-usage`, `scope-profile`,
   `collocation-search`, `trace-term-usage`.
 - **Absence / clustering**: `absence-check`, `cluster-hits`.
 - **Variant expansion**: `query-expand-terms` (no corpus deps).
-- **Workflow planning**: `plan-tools` for "what should I do next" style tasks.
 - **Output / write** (gated; only available when MCP is launched with
   `--writable`): `graph-build`, `report-build`, `report-from-evidence`,
   `pdf-build`, `validate-adjudication`.
 
-**Principle**: exact evidence before discovery. Confirm a phrase exists with
-`search` / `evidence-search` first; only then chase neighbors with
-`vector-neighbors` or `similar`. Treat candidate results as leads to verify,
-never as direct evidence.
+**Principle**: exact evidence before discovery. Start with `search`,
+`evidence-search`, `works`, or `heading-search` when the user gives a phrase,
+person, title, work, or doctrine. Read the best hit with `passage` or
+`source-read`. Then, unless the user asked only for direct lookup, run
+`frontier` on the best seed passage to discover phrases and nearby source
+candidates the user did not know to search for. Use `cluster-hits` or
+`trace-term-usage` once you have many hits and need distribution rather than
+more snippets.
+
+Treat every discovery result (`frontier`, `similar`, `vector-neighbors`,
+`hybrid-discover`, `source-investigate`) as a candidate lead. Convert it into
+evidence only after exact verification and close reading.
 
 ---
 

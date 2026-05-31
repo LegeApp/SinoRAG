@@ -13,13 +13,13 @@ pub fn docs_payload(tool: Option<&str>) -> Value {
     }
 
     json!({
-        "overview": "SinoRAG tools are JSON commands intended for agents and scripts. Start with status, then use evidence-search for exact evidence, pair-appearance for specified term-pair evidence, hybrid-discover for discovery, source-read for continuous close reading, and passage/expand-context-adaptive for targeted context.",
+        "overview": "SinoRAG tools are JSON commands intended for agents and scripts. Start with status, then use evidence-search for exact evidence, pair-appearance for specified term-pair evidence, frontier for seed-passage discovery, source-read for continuous close reading, and passage/expand-context-adaptive for targeted context.",
         "workflow": [
             "status: verify which indexes are available in the pack.",
-            "plan-tools: choose the recommended workflow tool sequence for a task.",
             "evidence-search: exact phrase evidence with optional attestation/history/usage summaries.",
             "pair-appearance: direct specified term1+term2 co-appearance evidence by passage, window, or sentence.",
-            "hybrid-discover: combine vector semantic neighbors and TF-IDF lexical parallels.",
+            "frontier: expand a known seed passage into distinctive phrase leads and TF-IDF lexical parallels.",
+            "hybrid-discover: compactly merge vector semantic neighbors and TF-IDF lexical parallels when vector candidates are specifically useful.",
             "search: quick exact phrase lookup across loaded passage text.",
             "heading-search: find section or heading names before searching inside a scope.",
             "cluster-hits: answer where the phrase occurs by work or division.",
@@ -36,6 +36,7 @@ pub fn docs_payload(tool: Option<&str>) -> Value {
             "pair-appearance_vs_pair-profile": "pair-appearance returns individual passages where two terms co-appear (evidence retrieval). pair-profile aggregates co-occurrence rates across periods, canons, or works (statistical analysis).",
             "person-resolve_vs_person-history": "person-resolve confirms name forms are in the corpus and shows a sample. person-history returns all passages ordered by period with mention-class labels.",
             "citation-verify_use": "citation-verify is for provenance verification: does this exact text appear in the scoped corpus? When the exact quote is not found it returns near-matches by character overlap."
+            ,"frontier_vs_hybrid-discover": "frontier is the default second-stage discovery tool after exact hits; it does not use vector.index. hybrid-discover is for explicit semantic-vector candidate expansion and returns compact output unless verbosity=full."
             ,"vector_vs_evidence": "vector-neighbors and hybrid-discover produce semantic discovery candidates. Use evidence-search, phrase tools, and close reading before treating a candidate as evidence."
         },
         "task_routing": {
@@ -46,14 +47,13 @@ pub fn docs_payload(tool: Option<&str>) -> Value {
             "term pair co-occurrence rates by period/canon": "pair-profile",
             "person mentions": "person-resolve then person-history",
             "verify a citation or quote": "citation-verify",
-            "related passages": "hybrid-discover",
+            "related passages": "frontier",
             "continuous source reading": "source-read",
             "read around a passage": "source-read",
             "one passage investigation": "source-investigate",
             "scope comparison": "scope-profile",
             "artifact generation": "report-from-evidence",
-            "pdf generation": "pdf-build",
-            "not sure where to start": "plan-tools"
+            "pdf generation": "pdf-build"
         },
         "tools": DOCS.iter().map(ToolDoc::to_value).collect::<Vec<_>>(),
     })
@@ -86,7 +86,6 @@ impl ToolDoc {
 const DOCS: &[ToolDoc] = &[
     ToolDoc { name: "status", purpose: "Report available corpus resources and indexes.", use_when: "Run first to see whether passages, phrase index, catalog, doc table, TF-IDF, and registry exist.", notes: "Read-only and cheap." },
     ToolDoc { name: "tool-docs", purpose: "Return this built-in documentation.", use_when: "Use when choosing a tool or explaining command differences.", notes: "Pass {\"tool\":\"search\"} for one tool or {} for the full guide." },
-    ToolDoc { name: "plan-tools", purpose: "Recommend a workflow and concrete next tool calls for a research task.", use_when: "Use when an agent or script is unsure whether to start with exact evidence, discovery, source investigation, scope comparison, or report generation.", notes: "Rule-based v1. It does not execute the tools; it returns suggested calls." },
     ToolDoc { name: "search", purpose: "Quick corpus-wide exact phrase lookup.", use_when: "Use for ordinary text search across every loaded passage. Add mode=clusters, trace, or all for grouped summaries.", notes: "Layered: phrase index when available, parquet verification, parquet scan fallback. brief=true suppresses verbose representative metadata." },
     ToolDoc { name: "heading-search", purpose: "Find headings, section names, and heading paths.", use_when: "Use when the query is a title, case heading, section label, or when you need a work/section scope before text search.", notes: "Works with passages.parquet alone; catalog indexes are not required." },
     ToolDoc { name: "passage", purpose: "Retrieve one passage by passage_id.", use_when: "Use after search or cluster tools identify an exact passage.", notes: "Returns compact passage text and basic work metadata." },
@@ -101,7 +100,7 @@ const DOCS: &[ToolDoc] = &[
     ToolDoc { name: "vector-info", purpose: "Show vector index metadata and compatibility.", use_when: "Use to confirm the vector index model, dimension, row count, and doc-table fingerprint.", notes: "Requires vector.index and doc_table.bin." },
     ToolDoc { name: "vector-neighbors", purpose: "Find semantic neighbor candidates from a seed passage or external query embedding.", use_when: "Use for conceptual discovery, paraphrase candidates, or candidate expansion.", notes: "Vector hits are not citation-grade evidence. query_text is intentionally unsupported until an embedding provider is configured." },
     ToolDoc { name: "similar", purpose: "Find TF-IDF similar passages to a seed passage.", use_when: "Use for text reuse or thematic similarity starting from a known passage.", notes: "Requires TF-IDF index and doc table." },
-    ToolDoc { name: "frontier", purpose: "Generate a discovery frontier packet for an agent session.", use_when: "Use to expand from a seed passage into promising leads.", notes: "Combines similarity and phrase extraction." },
+    ToolDoc { name: "frontier", purpose: "Generate a discovery frontier packet for an agent session.", use_when: "Use after one or two exact hits to expand a seed passage into promising leads.", notes: "Does not use vector.index. Combines TF-IDF similar passages and phrase extraction, and is the preferred ordinary discovery bridge." },
     ToolDoc { name: "first-attestation", purpose: "Find earliest loaded-corpus occurrence of a phrase.", use_when: "Use for historical ordering claims inside the loaded corpus.", notes: "Earliest means earliest by corpus period_rank, not absolute historical origin." },
     ToolDoc { name: "phrase-history", purpose: "Analyze phrase distribution across periods/canons/traditions.", use_when: "Use for historical spread and timeline-style summaries.", notes: "Can include variants if requested." },
     ToolDoc { name: "phrase-index-search", purpose: "Force phrase-index lookup for exact phrase hits.", use_when: "Use when you specifically want to validate the phrase index path.", notes: "Unlike search, this errors when the phrase index is missing." },
@@ -121,7 +120,7 @@ const DOCS: &[ToolDoc] = &[
     ToolDoc { name: "absence-check", purpose: "Check whether a phrase appears within a specific scope.", use_when: "Use for negative evidence in a work, canon, period, or node.", notes: "Absence is only meaningful for the loaded corpus and selected scope." },
     ToolDoc { name: "evidence-search", purpose: "Run exact phrase evidence search plus optional summaries.", use_when: "Use as the default agent tool for phrase evidence, attestation, history, term usage, and clusters.", notes: "Wraps simpler exact-evidence tools and reports index/fallback details." },
     ToolDoc { name: "batch-evidence-search", purpose: "Run compact exact searches for multiple phrases.", use_when: "Use for quick triage over a list of known phrases before selecting individual phrases for full evidence-search.", notes: "Returns hit counts and sample passage IDs only; use evidence-search for attestation/history details." },
-    ToolDoc { name: "hybrid-discover", purpose: "Merge semantic and lexical discovery candidates.", use_when: "Use for broader candidate finding from a seed passage or external query embedding.", notes: "Reports hybrid, lexical_only, semantic_only, or unavailable mode. Vector hits are semantic candidates, not evidence." },
+    ToolDoc { name: "hybrid-discover", purpose: "Compactly merge semantic and lexical discovery candidates.", use_when: "Use when vector-semantic candidates are specifically useful; prefer frontier for ordinary expansion from a seed passage.", notes: "Defaults are intentionally small. Context and raw sub-results are returned only with verbosity=full. Vector hits are semantic candidates, not evidence." },
     ToolDoc { name: "source-investigate", purpose: "Gather context, frontier, similarity, vector neighbors, and phrase histories for one seed.", use_when: "Use when beginning a source-dependence or passage-level investigation.", notes: "Optional indexes are used when present; component statuses explain unavailable or failed pieces." },
     ToolDoc { name: "scope-profile", purpose: "Compare two corpus scopes and optionally trace a phrase.", use_when: "Use for period/canon/work vocabulary comparison and scoped term usage.", notes: "Wraps compare-usage and trace-term-usage." },
     ToolDoc { name: "report-from-evidence", purpose: "Validate adjudication, build graph, and build report in one workflow.", use_when: "Use after evidence adjudication is ready for artifact generation.", notes: "Writes output files and respects readonly/output-root safety." },

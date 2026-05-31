@@ -4701,9 +4701,9 @@ impl ToolEngine {
         }
         let suggested_next_tools = vec![
             suggested_tool(
-                "hybrid-discover",
-                serde_json::json!({"seed_passage_id": "<choose passage_id from exact.hits>", "limit": output_limit.min(25), "max_candidates": candidate_limit}),
-                "expand exact evidence hits into lexical and semantic discovery candidates",
+                "frontier",
+                serde_json::json!({"seed": "<choose passage_id from exact.hits>", "limit": output_limit.min(10), "phrase_limit": 10}),
+                "expand an exact evidence hit into distinctive phrase and TF-IDF discovery leads",
             ),
             suggested_tool(
                 "source-investigate",
@@ -4770,6 +4770,11 @@ impl ToolEngine {
         warnings.push(format!(
             "candidate_budget_requested={candidate_limit}; returned_limit={output_limit}"
         ));
+        warnings.push(
+            "prefer frontier for ordinary seed expansion; use hybrid-discover when semantic-vector candidates are specifically useful".to_string(),
+        );
+        let full = matches!(verbosity, Verbosity::Full);
+        let summary_only = matches!(verbosity, Verbosity::Summary);
 
         let budget = WorkflowBudget::new(req.max_elapsed_ms, req.max_component_ms);
 
@@ -4782,7 +4787,7 @@ impl ToolEngine {
                 query_text: None,
                 k: candidate_limit,
                 ef_search: 64,
-                include_text: true,
+                include_text: full,
                 rerank: true,
             };
             match run_budgeted_component(&budget, self.vector_neighbors_impl(vector_req)).await {
@@ -4881,12 +4886,12 @@ impl ToolEngine {
             None
         };
 
-        let context = if req.include_context {
+        let context = if req.include_context && full {
             if let Some(seed) = &req.seed_passage_id {
                 let started = std::time::Instant::now();
                 let component_req = crate::tools::requests::ExpandContextAdaptiveRequest {
                     passage_id: seed.clone(),
-                    max_chars: 5000,
+                    max_chars: req.max_context_chars,
                 };
                 record_component_outcome(
                     run_budgeted_component(
@@ -4913,11 +4918,16 @@ impl ToolEngine {
                 None
             }
         } else {
+            let reason = if req.include_context {
+                "context returned only with verbosity=full"
+            } else {
+                "include_context=false"
+            };
             components.push(component_skipped(
                 "context",
                 "expand-context-adaptive",
                 ComponentStatus::SkippedNotRequested,
-                "include_context=false",
+                reason,
             ));
             None
         };
@@ -4947,7 +4957,7 @@ impl ToolEngine {
                         final_score,
                         merged_rank_reason: "semantic candidate from vector-neighbors".to_string(),
                         title: hit.main_title.clone(),
-                        snippet: hit.snippet.clone(),
+                        snippet: hit.snippet.as_ref().map(|s| char_prefix(s, 120)),
                     },
                 );
             }
@@ -4971,7 +4981,7 @@ impl ToolEngine {
                     final_score: 0.0,
                     merged_rank_reason: "lexical parallel from TF-IDF similar".to_string(),
                     title: opt_str(item, "main_title"),
-                    snippet: opt_str(item, "zh_text_raw").map(|s| char_prefix(&s, 160)),
+                    snippet: opt_str(item, "zh_text_raw").map(|s| char_prefix(&s, 120)),
                 });
                 if !entry.labels.iter().any(|l| l == "lexical_parallel") {
                     entry.labels.push("lexical_parallel".to_string());
@@ -5099,6 +5109,11 @@ impl ToolEngine {
         let mut suggested_next_tools = Vec::new();
         if let Some(seed) = &req.seed_passage_id {
             suggested_next_tools.push(suggested_tool(
+                "frontier",
+                serde_json::json!({"seed": seed, "limit": output_limit.min(10), "phrase_limit": 10}),
+                "use frontier as the usual next discovery step; it is lexical/distributional and avoids vector noise",
+            ));
+            suggested_next_tools.push(suggested_tool(
                 "source-read",
                 serde_json::json!({"passage_id": seed, "direction": "around", "max_chars": 4000}),
                 "read around the seed passage continuously before treating candidates as evidence",
@@ -5114,8 +5129,6 @@ impl ToolEngine {
         // ranks, so the raw `vector_neighbors`/`tfidf_similar` blocks are pure
         // duplication outside of debugging. Drop them below `full`; at `summary`
         // also drop context and the per-hit snippets, leaving counts + scored ids.
-        let full = matches!(verbosity, Verbosity::Full);
-        let summary_only = matches!(verbosity, Verbosity::Summary);
         let merged_hits = if summary_only {
             merged_hits
                 .into_iter()
@@ -5140,7 +5153,7 @@ impl ToolEngine {
             seed_passage_id: req.seed_passage_id,
             vector_neighbors: if full { vector_neighbors } else { None },
             tfidf_similar: if full { tfidf_similar } else { None },
-            context: if summary_only { None } else { context },
+            context: if full { context } else { None },
             groups,
             merged_hits,
             stages: trace.finish(),
@@ -5563,164 +5576,6 @@ impl ToolEngine {
             components,
             suggested_next_tools: Vec::new(),
             warnings,
-        })
-    }
-
-    pub async fn plan_tools_impl(
-        &self,
-        req: crate::tools::requests::PlanToolsRequest,
-    ) -> Result<crate::tools::responses::PlanToolsResponse> {
-        use crate::tools::responses::{PlanToolsResponse, ResourceStatus};
-
-        let task = req.task.to_lowercase();
-        let has_phrase = req.known_phrase.is_some();
-        let has_seed = req.seed_passage_id.is_some();
-        let evidence_words = [
-            "phrase",
-            "occur",
-            "occurrence",
-            "first",
-            "attestation",
-            "absence",
-        ];
-        let scope_words = ["compare", "scope", "canon", "period", "distribution"];
-        let report_words = ["report", "graph", "adjudication", "dossier"];
-        let read_words = ["read", "reading", "close", "context", "source", "document"];
-
-        // Check resource availability
-        let resource_status = ResourceStatus {
-            passages_parquet: self.resolve_passages_path().is_ok(),
-            phrase_index: self.resolve_phrase_path().is_ok(),
-            catalog_index: self.resolve_catalog_path().is_ok(),
-            doc_table: self.resolve_doc_table_path().is_ok(),
-            tfidf_index: self.resolve_tfidf_path().is_ok(),
-            vector_index: self.resolve_vector_path().is_ok(),
-            registry: self.resolve_registry_path().is_ok(),
-        };
-
-        let recommended_workflow = if report_words.iter().any(|w| task.contains(w)) {
-            "report_workflow"
-        } else if has_phrase || evidence_words.iter().any(|w| task.contains(w)) {
-            "evidence_then_discovery"
-        } else if has_seed && read_words.iter().any(|w| task.contains(w)) {
-            "source_reading"
-        } else if has_seed {
-            "source_investigation"
-        } else if scope_words.iter().any(|w| task.contains(w)) {
-            "scope_comparison"
-        } else {
-            "semantic_discovery"
-        }
-        .to_string();
-
-        let mut steps = Vec::new();
-        let mut notes = Vec::new();
-
-        // Resource-aware warnings
-        if !resource_status.vector_index {
-            notes.push("vector.index is missing; hybrid-discover will be TF-IDF lexical-only (no semantic neighbors)".to_string());
-        }
-        if !resource_status.phrase_index {
-            notes.push(
-                "phrase.index is missing; exact evidence will use parquet scan fallback (slower)"
-                    .to_string(),
-            );
-        }
-        if !resource_status.tfidf_index {
-            notes.push("tfidf.index is missing; hybrid-discover will be vector-only if available, otherwise unavailable".to_string());
-        }
-        if !resource_status.catalog_index || !resource_status.doc_table {
-            notes.push("catalog.index or doc_table.bin missing; scope-based tools and context expansion unavailable".to_string());
-        }
-
-        if let Some(phrase) = &req.known_phrase {
-            steps.push(suggested_tool(
-                "evidence-search",
-                serde_json::json!({
-                    "phrase": phrase,
-                    "include_attestation": true,
-                    "include_history": true,
-                    "include_clusters": true
-                }),
-                "establish exact evidence before broader discovery",
-            ));
-        }
-        if let Some(seed) = &req.seed_passage_id {
-            steps.push(suggested_tool(
-                "source-read",
-                serde_json::json!({"passage_id": seed, "direction": "around", "max_chars": 4000}),
-                "read around the seed passage in ordered source context",
-            ));
-            steps.push(suggested_tool(
-                "source-investigate",
-                serde_json::json!({
-                    "seed_passage_id": seed,
-                    "phrases": req.known_phrase.clone().into_iter().collect::<Vec<_>>()
-                }),
-                "collect context, lexical parallels, semantic neighbors, and follow-up leads",
-            ));
-            let hybrid_note = if !resource_status.vector_index && !resource_status.tfidf_index {
-                "unavailable: requires vector.index or tfidf.index".to_string()
-            } else if !resource_status.vector_index {
-                "lexical-only (TF-IDF parallels, no semantic neighbors)".to_string()
-            } else if !resource_status.tfidf_index {
-                "semantic-only (vector neighbors, no lexical parallels)".to_string()
-            } else {
-                "full semantic and lexical discovery".to_string()
-            };
-            steps.push(suggested_tool(
-                "hybrid-discover",
-                serde_json::json!({"seed_passage_id": seed, "limit": 25}),
-                &hybrid_note,
-            ));
-        } else {
-            steps.push(suggested_tool(
-                "hybrid-discover",
-                serde_json::json!({"seed_passage_id": "<choose from evidence-search hit>", "limit": 25}),
-                "use after selecting a seed passage from exact evidence",
-            ));
-        }
-        if scope_words.iter().any(|w| task.contains(w)) {
-            if resource_status.catalog_index && resource_status.doc_table {
-                steps.push(suggested_tool(
-                    "scope-profile",
-                    serde_json::json!({"scope_a_canon": "T", "scope_b_canon": "X", "gram_len": 1}),
-                    "compare distributions across canons, periods, works, or catalog scopes",
-                ));
-            } else {
-                notes.push(
-                    "scope-profile unavailable: requires catalog.index and doc_table.bin"
-                        .to_string(),
-                );
-            }
-        }
-        if report_words.iter().any(|w| task.contains(w)) {
-            steps.push(suggested_tool(
-                "report-from-evidence",
-                serde_json::json!({
-                    "adjudication": "<adjudication.json>",
-                    "graph_out": "<graph.json>",
-                    "report_out": "<report.md>"
-                }),
-                "only run after evidence has been adjudicated",
-            ));
-        }
-
-        notes.push(
-            "Vector and TF-IDF results are discovery candidates, not citation-grade evidence."
-                .to_string(),
-        );
-        notes.push(
-            "Use evidence-search to verify exact phrases before making research claims."
-                .to_string(),
-        );
-
-        Ok(PlanToolsResponse {
-            schema: "sinorag-plan-tools-v1",
-            recommended_workflow,
-            steps,
-            notes,
-            resource_status,
         })
     }
 
@@ -6662,6 +6517,178 @@ impl ToolEngine {
             near_matches,
             verdict,
             search_strategy: strategy,
+        })
+    }
+
+    pub async fn run_batch_impl(
+        &self,
+        req: crate::tools::requests::RunBatchRequest,
+    ) -> Result<crate::tools::responses::RunBatchResponse> {
+        use crate::tools::batch::{
+            run_one_job_ref, skipped_dependency_envelope, unresolved_dependency_envelope, BatchJob,
+        };
+        use crate::tools::registry::ToolCallEnvelope;
+        use std::collections::HashMap;
+        use std::io::Write;
+
+        self.ensure_write_allowed("run-batch", &req.out)?;
+
+        let jobs: Vec<BatchJob> = match (req.jobs, req.input_file) {
+            (Some(jobs), None) => jobs,
+            (None, Some(ref path)) => {
+                let text = std::fs::read_to_string(path).map_err(|e| {
+                    anyhow::anyhow!("cannot read input_file {}: {}", path.display(), e)
+                })?;
+                let mut out = Vec::new();
+                for (i, line) in text.lines().enumerate() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let job: BatchJob = serde_json::from_str(line)
+                        .map_err(|e| anyhow::anyhow!("invalid JSON at line {}: {}", i + 1, e))?;
+                    out.push(job);
+                }
+                out
+            }
+            (Some(_), Some(_)) => {
+                anyhow::bail!("specify `jobs` or `input_file`, not both")
+            }
+            (None, None) => anyhow::bail!("`jobs` or `input_file` is required"),
+        };
+
+        let jobs_total = jobs.len();
+        if req.concurrency > 1 {
+            tracing::debug!(
+                "run-batch: concurrency={} requested; running sequentially (use \
+                 `sinorag run-tools --jobs {}` for true parallel execution)",
+                req.concurrency,
+                req.concurrency
+            );
+        }
+        if let Some(parent) = req.out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(&req.out)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let started = std::time::Instant::now();
+        let mut jobs_ok = 0usize;
+        let mut jobs_failed = 0usize;
+
+        let write_env = |writer: &mut std::io::BufWriter<std::fs::File>,
+                         env: &ToolCallEnvelope|
+         -> Result<()> {
+            writeln!(writer, "{}", serde_json::to_string(env)?)?;
+            writer.flush()?;
+            Ok(())
+        };
+
+        if jobs.iter().any(|j| !j.depends_on.is_empty()) {
+            let mut completed: HashMap<String, bool> = HashMap::new();
+            let mut pending = jobs;
+
+            loop {
+                if pending.is_empty() {
+                    break;
+                }
+                let mut made_progress = false;
+                let mut next_pending = Vec::new();
+
+                for job in pending {
+                    if let Some(dep) = job
+                        .depends_on
+                        .iter()
+                        .find(|d| completed.get(*d) == Some(&false))
+                    {
+                        let env = skipped_dependency_envelope(&job, dep);
+                        if let Some(id) = &job.id {
+                            completed.insert(id.clone(), false);
+                        }
+                        jobs_failed += 1;
+                        made_progress = true;
+                        write_env(&mut writer, &env)?;
+                        if !job.continue_on_error.unwrap_or(req.continue_on_error) {
+                            return Ok(crate::tools::responses::RunBatchResponse {
+                                out: req.out,
+                                jobs_total,
+                                jobs_ok,
+                                jobs_failed,
+                                elapsed_ms: started.elapsed().as_millis(),
+                            });
+                        }
+                        continue;
+                    }
+
+                    if !job.depends_on.iter().all(|d| completed.contains_key(d)) {
+                        next_pending.push(job);
+                        continue;
+                    }
+
+                    let env = run_one_job_ref(self, &job).await;
+                    let ok = env.ok;
+                    if ok {
+                        jobs_ok += 1;
+                    } else {
+                        jobs_failed += 1;
+                    }
+                    if let Some(id) = &job.id {
+                        completed.insert(id.clone(), ok);
+                    }
+                    made_progress = true;
+                    write_env(&mut writer, &env)?;
+                    if !ok && !job.continue_on_error.unwrap_or(req.continue_on_error) {
+                        return Ok(crate::tools::responses::RunBatchResponse {
+                            out: req.out,
+                            jobs_total,
+                            jobs_ok,
+                            jobs_failed,
+                            elapsed_ms: started.elapsed().as_millis(),
+                        });
+                    }
+                }
+
+                if !made_progress {
+                    for job in next_pending {
+                        let missing: Vec<String> = job
+                            .depends_on
+                            .iter()
+                            .filter(|d| !completed.contains_key(*d))
+                            .cloned()
+                            .collect();
+                        let env = unresolved_dependency_envelope(&job, missing);
+                        jobs_failed += 1;
+                        write_env(&mut writer, &env)?;
+                        if !job.continue_on_error.unwrap_or(req.continue_on_error) {
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+                pending = next_pending;
+            }
+        } else {
+            for job in &jobs {
+                let env = run_one_job_ref(self, job).await;
+                let ok = env.ok;
+                if ok {
+                    jobs_ok += 1;
+                } else {
+                    jobs_failed += 1;
+                }
+                write_env(&mut writer, &env)?;
+                if !ok && !job.continue_on_error.unwrap_or(req.continue_on_error) {
+                    break;
+                }
+            }
+        }
+
+        Ok(crate::tools::responses::RunBatchResponse {
+            out: req.out,
+            jobs_total,
+            jobs_ok,
+            jobs_failed,
+            elapsed_ms: started.elapsed().as_millis(),
         })
     }
 }

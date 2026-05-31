@@ -48,6 +48,8 @@ use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_64;
 
+pub type BuildProgress<'a> = dyn Fn(&str, usize, usize, f32) + Send + Sync + 'a;
+
 pub type DocId = u32;
 
 const MAGIC: &[u8; 8] = b"SRPH3VAA";
@@ -766,6 +768,26 @@ pub(crate) fn build_from_table(
     bucket_count: usize,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
+    build_from_table_with_progress(
+        parquet_path,
+        doc_table,
+        out_path,
+        gram_len,
+        bucket_count,
+        temp_dir,
+        None,
+    )
+}
+
+pub(crate) fn build_from_table_with_progress(
+    parquet_path: PathBuf,
+    doc_table: DocumentTable,
+    out_path: PathBuf,
+    gram_len: usize,
+    bucket_count: usize,
+    temp_dir: Option<PathBuf>,
+    progress: Option<&BuildProgress<'_>>,
+) -> Result<()> {
     if bucket_count == 0 {
         anyhow::bail!("bucket_count must be greater than zero");
     }
@@ -815,6 +837,13 @@ pub(crate) fn build_from_table(
         let phase1_start = Instant::now();
         let mut last_report = Instant::now();
         let total_files = files.len();
+        emit_build_progress(
+            progress,
+            "Phrase index phase 1: scanning parquet files",
+            0,
+            total_files,
+            0.0,
+        );
 
         let analyze_opts = crate::text_analyzer::AnalyzeOptions {
             min_n: gram_len,
@@ -860,10 +889,24 @@ pub(crate) fn build_from_table(
                     "  [Phase 1] {}/{} files  |  {} records  |  {}s elapsed  |  ~{}s remaining",
                     processed, total_files, total_records, elapsed, eta
                 );
+                emit_build_progress(
+                    progress,
+                    "Phrase index phase 1: scanning parquet files",
+                    processed,
+                    total_files,
+                    0.35 * fraction(processed, total_files),
+                );
                 last_report = Instant::now();
             }
         }
         writers.flush_all()?;
+        emit_build_progress(
+            progress,
+            "Phrase index phase 1: scanning parquet files",
+            total_files,
+            total_files,
+            0.35,
+        );
         eprintln!(
             "  [Phase 1] done — {} files, {} records, {}s",
             total_files,
@@ -880,6 +923,13 @@ pub(crate) fn build_from_table(
     {
         let phase2_start = Instant::now();
         let mut last_report = Instant::now();
+        emit_build_progress(
+            progress,
+            "Phrase index phase 2: sorting buckets",
+            0,
+            bucket_count,
+            0.35,
+        );
         for bucket_idx in 0..bucket_count {
             let bucket_path = temp_dir.join(format!("bucket-{:04}.bin", bucket_idx));
             if !bucket_path.exists() {
@@ -896,6 +946,13 @@ pub(crate) fn build_from_table(
                 eprintln!(
                     "  [Phase 2] {}/{} buckets  |  {}s elapsed  |  ~{}s remaining",
                     bucket_idx, bucket_count, elapsed, eta
+                );
+                emit_build_progress(
+                    progress,
+                    "Phrase index phase 2: sorting buckets",
+                    bucket_idx,
+                    bucket_count,
+                    0.35 + 0.30 * fraction(bucket_idx, bucket_count),
                 );
                 last_report = Instant::now();
             }
@@ -938,6 +995,13 @@ pub(crate) fn build_from_table(
             fs::remove_file(&bucket_path)?;
             all_sorted_chunks.push(sorted_chunks);
         } // end bucket loop
+        emit_build_progress(
+            progress,
+            "Phrase index phase 2: sorting buckets",
+            bucket_count,
+            bucket_count,
+            0.65,
+        );
         eprintln!("  [Phase 2] done — {}s", phase2_start.elapsed().as_secs());
     } // end Phase 2 block
 
@@ -956,6 +1020,13 @@ pub(crate) fn build_from_table(
 
     let phase3_start = Instant::now();
     let mut last_report = Instant::now();
+    emit_build_progress(
+        progress,
+        "Phrase index phase 3: merging buckets",
+        0,
+        bucket_count,
+        0.65,
+    );
     for (bucket_idx, sorted_chunks) in all_sorted_chunks.iter().enumerate() {
         if sorted_chunks.is_empty() {
             continue;
@@ -970,6 +1041,13 @@ pub(crate) fn build_from_table(
             eprintln!(
                 "  [Phase 3] {}/{} buckets  |  {} grams  |  {}s elapsed  |  ~{}s remaining",
                 bucket_idx, bucket_count, gram_count, elapsed, eta
+            );
+            emit_build_progress(
+                progress,
+                "Phrase index phase 3: merging buckets",
+                bucket_idx,
+                bucket_count,
+                0.65 + 0.30 * fraction(bucket_idx, bucket_count),
             );
             last_report = Instant::now();
         }
@@ -1045,6 +1123,13 @@ pub(crate) fn build_from_table(
     postings_writer.flush()?;
     drop(entries_writer);
     drop(postings_writer);
+    emit_build_progress(
+        progress,
+        "Phrase index phase 3: merging buckets",
+        bucket_count,
+        bucket_count,
+        0.95,
+    );
     eprintln!(
         "  [Phase 3] done — {} grams (roaring: {}, varint: {}), {}s",
         gram_count,
@@ -1057,6 +1142,13 @@ pub(crate) fn build_from_table(
     // Phase 4 — write final index file (header + entries + postings).
     // -----------------------------------------------------------------------
     eprintln!("\n[Phase 4] Writing final index...");
+    emit_build_progress(
+        progress,
+        "Phrase index phase 4: writing final index",
+        0,
+        1,
+        0.95,
+    );
     write_final_index(
         &out_path,
         &entries_path,
@@ -1075,7 +1167,28 @@ pub(crate) fn build_from_table(
 
     eprintln!("\n=== Complete ===");
     eprintln!("Output: {}", out_path.display());
+    emit_build_progress(progress, "Phrase index complete", 1, 1, 1.0);
     Ok(())
+}
+
+fn fraction(done: usize, total: usize) -> f32 {
+    if total == 0 {
+        1.0
+    } else {
+        (done as f32 / total as f32).clamp(0.0, 1.0)
+    }
+}
+
+fn emit_build_progress(
+    progress: Option<&BuildProgress<'_>>,
+    label: &str,
+    done: usize,
+    total: usize,
+    fraction: f32,
+) {
+    if let Some(progress) = progress {
+        progress(label, done.min(total), total, fraction.clamp(0.0, 1.0));
+    }
 }
 
 fn emit_gram(
