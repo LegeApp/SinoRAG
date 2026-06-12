@@ -21,7 +21,7 @@ check-installer-freya  = ["check", "--manifest-path", "gui-installer/sinorag-ins
 # Debug builds generate very large stack frames (proc-macro-generated futures,
 # clap parser) that overflow the default 1 MiB stack at startup.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-arg=/STACK:67108864"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:67108864"]
 
 [target.x86_64-pc-windows-gnu]
 rustflags = ["-C", "link-arg=-Wl,--stack,67108864"]

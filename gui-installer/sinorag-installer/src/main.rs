@@ -579,7 +579,7 @@ mod app {
             }
             InitProgressEvent::Done(_) => {}
         };
-        init::run_from_pack_url_blocking(pack_url, false, data_root, out_parquet, Some(&callback))?;
+        init::run_from_pack_url_blocking(pack_url, false, data_root, out_parquet, Some(&callback), true)?;
 
         install_or_verify_opencode(&tx)?;
         create_shortcuts(&request, &exe_path, &icon_path, &tx)?;

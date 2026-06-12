@@ -98,6 +98,27 @@ pub fn append_call_at(
     Ok(())
 }
 
+/// Return the names of the most recent `limit` tool calls, oldest first.
+///
+/// Used to avoid re-suggesting a tool the agent has already pivoted to —
+/// suggestions should fade once acted on rather than repeating every call.
+pub fn recent_tool_names(path: &Path, limit: usize) -> Result<Vec<String>> {
+    if limit == 0 || !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(path)?;
+    let mut names: Vec<String> = text
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<ToolCallLogRecord>(line).ok())
+        .map(|record| record.tool)
+        .take(limit)
+        .collect();
+    names.reverse();
+    Ok(names)
+}
+
 pub fn summarize(path: &Path, limit_recent: usize) -> Result<ToolLogSummary> {
     let mut records = Vec::new();
     if path.exists() {
@@ -233,5 +254,39 @@ fn summarize_value(value: &Value) -> Value {
             }
             Value::Object(out)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_tool_names_returns_last_n_oldest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool_calls.jsonl");
+        for tool in ["search", "search", "frontier", "source-read"] {
+            append_call_at(&path, tool, &serde_json::json!({}), None, None, 1).unwrap();
+        }
+        assert_eq!(
+            recent_tool_names(&path, 2).unwrap(),
+            vec!["frontier".to_string(), "source-read".to_string()]
+        );
+        assert_eq!(
+            recent_tool_names(&path, 10).unwrap(),
+            vec![
+                "search".to_string(),
+                "search".to_string(),
+                "frontier".to_string(),
+                "source-read".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_tool_names_empty_when_log_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.jsonl");
+        assert!(recent_tool_names(&path, 5).unwrap().is_empty());
     }
 }

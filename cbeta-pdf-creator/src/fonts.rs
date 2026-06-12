@@ -32,15 +32,23 @@ pub struct FontContext {
     pub english_font_data: Vec<u8>, // Store raw font data for embedding
     pub english_font_italic: Option<Font>,
     pub english_font_bold: Option<Font>,
-    
+
+    // Monospace font (for Markdown code spans/blocks). Falls back to the
+    // English font when no system monospace font is available.
+    pub mono_font: Font,
+    pub mono_font_name: String,
+    pub mono_font_path: String,
+    pub mono_font_data: Vec<u8>,
+
     // Layout settings
     pub page_width: f32,
     pub page_height: f32,
     pub margin: f32,
     pub font_size_chinese: f32,
     pub font_size_english: f32,
+    pub font_size_mono: f32,
     pub line_spacing: f32,
-    
+
     // Typography settings for professional print quality
     pub tracking_chinese: f32,   // in 1/1000 em (0 = none, 10-30 = classic print)
     pub tracking_english: f32,
@@ -58,9 +66,25 @@ impl FontContext {
         let (chinese_font, chinese_font_name, chinese_font_path, chinese_font_data) =
             Self::load_chinese_font()?;
         let (english_font, english_font_name, english_font_path, english_font_data) = Self::load_english_font()?;
-        
-        println!("Loaded fonts: Chinese={}, English={}", chinese_font_name, english_font_name);
-        
+
+        // Monospace font is optional; fall back to the English font so Markdown
+        // code rendering always has a usable face.
+        let (mono_font, mono_font_name, mono_font_path, mono_font_data) =
+            match Self::load_mono_font() {
+                Ok(found) => found,
+                Err(_) => (
+                    english_font.clone(),
+                    english_font_name.clone(),
+                    english_font_path.clone(),
+                    english_font_data.clone(),
+                ),
+            };
+
+        log::debug!(
+            "Loaded fonts: Chinese={}, English={}, Mono={}",
+            chinese_font_name, english_font_name, mono_font_name
+        );
+
         Ok(FontContext {
             chinese_font,
             chinese_font_name,
@@ -73,13 +97,19 @@ impl FontContext {
             english_font_data,
             english_font_italic: None, // TODO: Load italic variant
             english_font_bold: None, // TODO: Load bold variant
-            
+
+            mono_font,
+            mono_font_name,
+            mono_font_path,
+            mono_font_data,
+
             // Default page settings (A4-like)
             page_width: 595.0, // A4 width in points
             page_height: 842.0, // A4 height in points
             margin: 72.0, // 1 inch margins
             font_size_chinese: 13.0,
             font_size_english: 12.0,
+            font_size_mono: 10.5,
             line_spacing: 1.4,
             
             // Professional typography defaults
@@ -97,6 +127,9 @@ impl FontContext {
         // Priority order for Chinese fonts
         let font_paths = vec![
             // Bundled open-source, print-ready default for Linux/portable builds.
+            // TrueType (glyf) build is preferred so it embeds as a valid
+            // CIDFontType2; the CFF .otf is kept only as a fallback.
+            ("Noto Serif CJK TC", concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoSerifCJKtc-Regular.ttf")),
             ("Noto Serif CJK TC", concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoSerifCJKtc-Regular.otf")),
             // Source Han (same glyph design family; also open-source).
             ("Source Han Serif TC", concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/SourceHanSerifTC-Regular.otf")),
@@ -117,7 +150,7 @@ impl FontContext {
         
         for (font_name, font_path) in font_paths {
             if Path::new(font_path).exists() {
-                println!("Loading Chinese font: {} from {}", font_name, font_path);
+                log::debug!("Loading Chinese font: {} from {}", font_name, font_path);
                 let font_data = std::fs::read(font_path)?;
                 let font = Font::from_bytes(font_data.clone(), FontSettings::default())
                     .map_err(|e| anyhow!("Failed to load Chinese font from {}: {}", font_path, e))?;
@@ -154,7 +187,7 @@ impl FontContext {
         
         for (font_name, font_path) in font_paths {
             if Path::new(font_path).exists() {
-                println!("Loading English font: {} from {}", font_name, font_path);
+                log::debug!("Loading English font: {} from {}", font_name, font_path);
                 let font_data = std::fs::read(font_path)?;
                 let font = Font::from_bytes(font_data.clone(), FontSettings::default())
                     .map_err(|e| anyhow!("Failed to load English font from {}: {}", font_path, e))?;
@@ -164,7 +197,35 @@ impl FontContext {
         
         Err(anyhow!("No suitable English font found"))
     }
-    
+
+    /// Load a monospace font for Markdown code blocks / inline code.
+    fn load_mono_font() -> Result<(Font, String, String, Vec<u8>)> {
+        let font_paths = vec![
+            // Bundled monospace, if present.
+            ("DejaVu Sans Mono", concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/DejaVuSansMono.ttf")),
+            // Linux packaged monospace fonts.
+            ("DejaVu Sans Mono", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+            ("Liberation Mono", "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf"),
+            ("Liberation Mono", "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
+            ("Noto Sans Mono", "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"),
+            // Windows system monospace fonts.
+            ("Consolas", "C:\\Windows\\Fonts\\consola.ttf"),
+            ("Courier New", "C:\\Windows\\Fonts\\cour.ttf"),
+        ];
+
+        for (font_name, font_path) in font_paths {
+            if Path::new(font_path).exists() {
+                log::debug!("Loading monospace font: {} from {}", font_name, font_path);
+                let font_data = std::fs::read(font_path)?;
+                let font = Font::from_bytes(font_data.clone(), FontSettings::default())
+                    .map_err(|e| anyhow!("Failed to load monospace font from {}: {}", font_path, e))?;
+                return Ok((font, font_name.to_string(), font_path.to_string(), font_data));
+            }
+        }
+
+        Err(anyhow!("No suitable monospace font found"))
+    }
+
     /// Set PDF generation options
     pub fn set_options(
         &mut self,

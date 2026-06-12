@@ -269,6 +269,12 @@ pub struct PdfBuildRequest {
 /// Request for the works tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct WorksRequest {
+    /// Look up one work directly by its source_work_id (e.g. "X26n0534"),
+    /// returning its title/author/period/canon/traditions without reading
+    /// passage text. Skips all other filters when set.
+    #[serde(default)]
+    pub work_id: Option<String>,
+
     #[serde(default)]
     pub tradition: Option<String>,
 
@@ -329,6 +335,23 @@ pub struct FrontierRequest {
 
     #[serde(default = "default_phrase_limit")]
     pub phrase_limit: usize,
+
+    /// Keep only similar_passages with tfidf_cosine >= this threshold. Default: no filter.
+    /// Use 0.2–0.4 to suppress weak/tangential matches; higher values narrow to close parallels.
+    #[serde(default)]
+    pub min_similarity: Option<f64>,
+
+    /// Keep only similar_passages from these canons (e.g. ["T", "X"]). Empty = no filter.
+    #[serde(default)]
+    pub scope_canon: Vec<String>,
+
+    /// Keep only similar_passages from these periods (e.g. ["Tang", "Song"]). Empty = no filter.
+    #[serde(default)]
+    pub scope_period: Vec<String>,
+
+    /// Keep only similar_passages from this specific work (source_work_id). Empty = no filter.
+    #[serde(default)]
+    pub scope_source_work_id: Option<String>,
 }
 
 fn default_phrase_limit() -> usize {
@@ -1060,10 +1083,35 @@ pub struct PersonHistoryRequest {
     /// Maximum number of mentions to return.
     #[serde(default = "default_person_history_limit")]
     pub limit: usize,
+
+    /// Return a grouped summary instead of the full mentions array.
+    /// Groups hits by mention_class × period with counts and up to 3 sample passage IDs per group.
+    /// Reduces output from ~1MB to ~5KB; use passage tool to read specific samples.
+    #[serde(default)]
+    pub compact: bool,
 }
 
 fn default_person_history_limit() -> usize {
     200
+}
+
+/// Request for the person-profile tool.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PersonProfileRequest {
+    /// Primary name form to look up.
+    pub name: String,
+
+    /// Additional alias forms to search alongside the primary name.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+
+    /// Maximum passage samples per mention_class to include in corpus_summary. Default: 3.
+    #[serde(default = "default_profile_samples")]
+    pub samples_per_class: usize,
+}
+
+fn default_profile_samples() -> usize {
+    3
 }
 
 /// Request for the citation-verify tool.

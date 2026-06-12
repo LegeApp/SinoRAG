@@ -1128,6 +1128,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let engine = ToolEngine::open(config).await?;
 
             let req = crate::tools::requests::WorksRequest {
+                work_id: None,
                 tradition,
                 period,
                 canon,
@@ -1292,6 +1293,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 seed,
                 limit,
                 phrase_limit,
+                min_similarity: None,
+                scope_canon: vec![],
+                scope_period: vec![],
+                scope_source_work_id: None,
             };
 
             let res = engine.frontier_impl(req).await?;

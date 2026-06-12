@@ -105,7 +105,7 @@ pub async fn run(
             data_root.display()
         );
         return tokio::task::spawn_blocking(move || {
-            build_local_indexes(&data_root, &out_parquet, None)
+            build_local_indexes(&data_root, &out_parquet, None, true)
         })
         .await
         .context("index rebuild task panicked")?;
@@ -140,7 +140,7 @@ pub async fn run(
     // so the Tokio runtime stays responsive.
     let url_owned = url.to_string();
     tokio::task::spawn_blocking(move || {
-        run_from_pack_url_blocking(&url_owned, false, data_root, out_parquet, None)
+        run_from_pack_url_blocking(&url_owned, false, data_root, out_parquet, None, true)
     })
     .await
     .context("init blocking task panicked")?
@@ -152,6 +152,7 @@ pub fn run_from_pack_url_blocking(
     data_root: PathBuf,
     out_parquet: PathBuf,
     progress: Option<&dyn InitProgress>,
+    build_phrase_tfidf: bool,
 ) -> Result<()> {
     let cbeta_partition = out_parquet.join("source_corpus=cbeta");
     if cbeta_partition.exists() && !force {
@@ -190,7 +191,7 @@ pub fn run_from_pack_url_blocking(
         );
         extract_7z(&arc_path, &data_root, progress)?;
 
-        build_local_indexes(&data_root, &out_parquet, progress)
+        build_local_indexes(&data_root, &out_parquet, progress, build_phrase_tfidf)
     })();
 
     let _ = std::fs::remove_file(&arc_path);
@@ -300,16 +301,22 @@ try {
   $response.Dispose()
 }
 "#;
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-            url,
-            dest.to_str().context("non-UTF-8 destination path")?,
-        ])
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+        url,
+        dest.to_str().context("non-UTF-8 destination path")?,
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = cmd
         .output()
         .context("failed to invoke PowerShell for download")?;
 
@@ -398,6 +405,7 @@ fn build_local_indexes(
     data_root: &Path,
     out_parquet: &Path,
     progress: Option<&dyn InitProgress>,
+    build_phrase_tfidf: bool,
 ) -> Result<()> {
     let doc_table_path = data_root.join("derived").join("doc_table.bin");
     let catalog_path = data_root.join("derived").join("catalog.index");
@@ -437,29 +445,38 @@ fn build_local_indexes(
         Some(doc_table_path.clone()),
     )?;
 
-    eprintln!("\n=== Building phrase + TF-IDF indexes ===");
-    emit(
-        progress,
-        InitProgressEvent::Step {
-            label: "Building phrase and TF-IDF indexes".to_string(),
-            progress: Some(0.68),
-        },
-    );
-    crate::commands::build_all_indexes(
-        out_parquet.to_path_buf(),
-        doc_table_path.clone(),
-        phrase_path,
-        tfidf_path,
-        4,       // phrase_gram_len
-        5,       // min_ngram
-        8,       // max_ngram
-        5,       // min_df
-        0.05,    // max_df_ratio
-        200_000, // max_features
-        2048,    // buckets
-        None,    // temp_dir
-        progress,
-    )?;
+    if build_phrase_tfidf {
+        eprintln!("\n=== Building phrase + TF-IDF indexes ===");
+        emit(
+            progress,
+            InitProgressEvent::Step {
+                label: "Building phrase and TF-IDF indexes".to_string(),
+                progress: Some(0.68),
+            },
+        );
+        crate::commands::build_all_indexes(
+            out_parquet.to_path_buf(),
+            doc_table_path.clone(),
+            phrase_path,
+            tfidf_path,
+            4,       // phrase_gram_len
+            5,       // min_ngram
+            8,       // max_ngram
+            5,       // min_df
+            0.05,    // max_df_ratio
+            200_000, // max_features
+            2048,    // buckets
+            None,    // temp_dir
+            progress,
+        )?;
+    } else {
+        emit(
+            progress,
+            InitProgressEvent::Log(
+                "Phrase and TF-IDF indexing skipped — run `sinorag indexes lexical` later to build them.".to_string(),
+            ),
+        );
+    }
 
     crate::commands::ingest::initialize_registry_after_ingest(
         data_root,

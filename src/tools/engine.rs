@@ -637,6 +637,143 @@ fn suggested_tool(
     }
 }
 
+/// Build ranked next-step candidates from the shape of *this* search result
+/// — zero hits, a single hit, a tight cluster, or a corpus-wide spread each
+/// point somewhere different. Reasons cite the concrete numbers/passage IDs
+/// observed in this call so they read as an observation about this result
+/// rather than a fixed tip repeated on every call. Callers should drop
+/// candidates whose tool the agent has already pivoted to recently (see
+/// `tools::log::recent_tool_names`) so the same nudge doesn't linger once
+/// it's been acted on.
+fn search_suggestion_candidates(
+    phrase: &str,
+    hits: &[crate::tools::responses::SearchHit],
+    verified_count: usize,
+) -> Vec<(&'static str, serde_json::Value, String)> {
+    if hits.is_empty() {
+        return vec![
+            (
+                "query-expand-terms",
+                serde_json::json!({"phrase": phrase}),
+                format!(
+                    "no exact hits for \"{phrase}\" — query-expand-terms can surface variant forms and orthographic flips to retry with"
+                ),
+            ),
+            (
+                "heading-search",
+                serde_json::json!({"query": phrase, "limit": 10}),
+                format!(
+                    "\"{phrase}\" may be a title or section heading rather than body text — heading-search checks heading/section metadata directly"
+                ),
+            ),
+            (
+                "canonical-source",
+                serde_json::json!({"phrase": phrase}),
+                format!(
+                    "canonical-source looks for canon-side passages that may phrase \"{phrase}\" differently"
+                ),
+            ),
+        ];
+    }
+
+    let top = &hits[0];
+    let mut work_ids = std::collections::BTreeSet::new();
+    for hit in hits {
+        if let Some(ref wid) = hit.source_work_id {
+            work_ids.insert(wid.as_str());
+        }
+    }
+    let work_count = work_ids.len();
+
+    if verified_count == 1 {
+        return vec![
+            (
+                "source-investigate",
+                serde_json::json!({"seed_passage_id": top.passage_id}),
+                format!(
+                    "exactly one exact hit, at {} — source-investigate gathers context, frontier, similarity, and phrase history from this single anchor in one call",
+                    top.passage_id
+                ),
+            ),
+            (
+                "source-read",
+                serde_json::json!({"passage_id": top.passage_id, "direction": "around", "max_chars": 4000}),
+                format!("read {} in its surrounding source context before pivoting outward", top.passage_id),
+            ),
+            (
+                "frontier",
+                serde_json::json!({"seed": top.passage_id}),
+                format!("expand the single hit at {} into a discovery frontier of lexically/phrasally similar passages corpus-wide", top.passage_id),
+            ),
+        ];
+    }
+
+    if work_count > 0 && work_count <= 2 {
+        let works: Vec<&str> = work_ids.iter().copied().collect();
+        let works_label = works.join(", ");
+        return vec![
+            (
+                "frontier",
+                serde_json::json!({"seed": top.passage_id}),
+                format!(
+                    "{verified_count} hits concentrate in {work_count} work(s) ({works_label}) — frontier from {} would expand this cluster into a ranked discovery packet across the rest of the corpus",
+                    top.passage_id
+                ),
+            ),
+            (
+                "search",
+                serde_json::json!({"phrase": phrase, "mode": "clusters", "group_by": "division"}),
+                format!("re-run with mode=\"clusters\", group_by=\"division\" to see where within {works_label} these hits concentrate"),
+            ),
+            (
+                "source-read",
+                serde_json::json!({"passage_id": top.passage_id, "direction": "around", "max_chars": 4000}),
+                format!("read around the top hit {} in its citation-aware source stream", top.passage_id),
+            ),
+        ];
+    }
+
+    if work_count >= 5 {
+        return vec![
+            (
+                "phrase-history",
+                serde_json::json!({"phrase": phrase}),
+                format!(
+                    "{verified_count} hits span {work_count} different works — phrase-history maps this phrase's distribution across periods, canons, and traditions"
+                ),
+            ),
+            (
+                "search",
+                serde_json::json!({"phrase": phrase, "mode": "trace", "group_by": "period"}),
+                format!("re-run with mode=\"trace\", group_by=\"period\" to see how these {verified_count} hits concentrate by historical period directly"),
+            ),
+            (
+                "evidence-search",
+                serde_json::json!({"phrase": phrase, "include_attestation": true, "include_history": true}),
+                format!("evidence-search would wrap \"{phrase}\" with attestation and history summaries in one call"),
+            ),
+        ];
+    }
+
+    // Moderate spread: neither tightly concentrated nor corpus-wide — offer
+    // both a discovery pivot and a navigational view of the concentration.
+    vec![
+        (
+            "frontier",
+            serde_json::json!({"seed": top.passage_id}),
+            format!(
+                "{verified_count} hits across {work_count} works — frontier from the top hit {} would expand into discovery candidates beyond exact matches",
+                top.passage_id
+            ),
+        ),
+        (
+            "cluster-hits",
+            serde_json::json!({"phrase": phrase, "cluster_by": "work"}),
+            format!("cluster-hits would group these {verified_count} hits by work/division to show where they concentrate"),
+        ),
+    ]
+}
+
 fn count_unique_ngrams_with_terms(
     text: &str,
     gram_len: usize,
@@ -666,6 +803,55 @@ fn count_unique_ngrams_with_terms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(passage_id: &str, work_id: &str) -> crate::tools::responses::SearchHit {
+        crate::tools::responses::SearchHit {
+            passage_id: passage_id.to_string(),
+            source_work_id: Some(work_id.to_string()),
+            main_title: None,
+            heading: None,
+            zh_quote: String::new(),
+            score: None,
+        }
+    }
+
+    #[test]
+    fn search_suggestions_steer_toward_expansion_on_zero_hits() {
+        let candidates = search_suggestion_candidates("無一物", &[], 0);
+        assert!(candidates.iter().any(|(tool, _, _)| *tool == "query-expand-terms"));
+    }
+
+    #[test]
+    fn search_suggestions_seed_investigation_from_lone_hit() {
+        let hits = vec![hit("T/T08/T08n0235.xml#p1", "T08n0235")];
+        let candidates = search_suggestion_candidates("無一物", &hits, 1);
+        let (tool, args, _) = &candidates[0];
+        assert_eq!(*tool, "source-investigate");
+        assert_eq!(args["seed_passage_id"], "T/T08/T08n0235.xml#p1");
+    }
+
+    #[test]
+    fn search_suggestions_point_at_frontier_when_concentrated() {
+        let hits = vec![
+            hit("T/T08/T08n0235.xml#p1", "T08n0235"),
+            hit("T/T08/T08n0235.xml#p2", "T08n0235"),
+            hit("T/T08/T08n0235.xml#p3", "T08n0235"),
+        ];
+        let candidates = search_suggestion_candidates("無一物", &hits, 3);
+        let (tool, args, reason) = &candidates[0];
+        assert_eq!(*tool, "frontier");
+        assert_eq!(args["seed"], "T/T08/T08n0235.xml#p1");
+        assert!(reason.contains("T08n0235"));
+    }
+
+    #[test]
+    fn search_suggestions_point_at_phrase_history_when_spread_wide() {
+        let hits = (0..6)
+            .map(|i| hit(&format!("W{i}#p1"), &format!("W{i}")))
+            .collect::<Vec<_>>();
+        let candidates = search_suggestion_candidates("無一物", &hits, 6);
+        assert!(candidates.iter().any(|(tool, _, _)| *tool == "phrase-history"));
+    }
 
     #[test]
     fn optional_filter_expands_csv_values() {
@@ -2089,6 +2275,24 @@ impl ToolEngine {
                 .unwrap_or(false)
         });
 
+        // Suggest next steps based on the shape of *this* result (zero hits,
+        // a single anchor, a tight cluster, or a corpus-wide spread each call
+        // for something different) rather than a fixed tip on every search.
+        // Drop candidates whose tool the agent already pivoted to recently so
+        // a followed suggestion doesn't keep resurfacing.
+        let suggested_next_tools = {
+            let candidates = search_suggestion_candidates(&req.phrase, &hits, verified_count);
+            let recent_tools =
+                crate::tools::log::recent_tool_names(&crate::tools::log::default_log_path(), 12)
+                    .unwrap_or_default();
+            candidates
+                .into_iter()
+                .filter(|(tool, _, _)| !recent_tools.iter().any(|r| r == tool))
+                .take(2)
+                .map(|(tool, args, reason)| suggested_tool(tool, args, &reason))
+                .collect::<Vec<_>>()
+        };
+
         Ok(SearchResponse {
             schema: "sinorag-search-v1",
             phrase: req.phrase,
@@ -2138,6 +2342,7 @@ impl ToolEngine {
                     Some("phrase_index_unavailable_or_not_applicable".to_string())
                 },
             },
+            suggested_next_tools,
         })
     }
 
@@ -2531,6 +2736,26 @@ impl ToolEngine {
         let catalog_path = self.resolve_catalog_path()?;
         let catalog = CorpusCatalogIndex::load(&catalog_path)?;
 
+        if let Some(ref work_id) = req.work_id {
+            let works: Vec<WorkInfo> = catalog
+                .get_work(work_id)
+                .map(|w| WorkInfo {
+                    work_id: w.work_id.clone(),
+                    main_title: w.main_title.clone(),
+                    author: Some(w.author.clone()),
+                    period: Some(w.period.clone()),
+                    canon: Some(w.canon.clone()),
+                    traditions: w.traditions.clone(),
+                    passage_count: w.passage_count as usize,
+                })
+                .into_iter()
+                .collect();
+            return Ok(WorksResponse {
+                schema: "sinorag-works-v1",
+                works,
+            });
+        }
+
         let mut filtered: Vec<_> = catalog.works.iter().collect();
 
         if let Some(ref tradition) = req.tradition {
@@ -2634,17 +2859,77 @@ impl ToolEngine {
             registry::init_registry(&registry_path)?;
         }
 
+        // frontier needs a passage_id (e.g. "T/T08/T08n0235.xml#pT08p0750c0201"),
+        // not a source_work_id (e.g. "X26n0534"). Passage IDs always carry a
+        // "#<anchor>" suffix; work IDs never do — catch the mix-up here with a
+        // clear message instead of letting it surface as a generic "not found".
+        if !req.seed.contains('#') {
+            return Err(anyhow::anyhow!(
+                "frontier expects a passage_id (containing '#', e.g. \"T/T08/T08n0235.xml#pT08p0750c0201\"), \
+                 but got \"{}\", which looks like a source_work_id. Use the `works` tool with work_id=\"{}\" \
+                 for work-level metadata, or `search`/`heading-search` to find a passage_id within that work first.",
+                req.seed, req.seed
+            ));
+        }
+
         // Get seed passage
         let seed_row = passages.get_passage(&req.seed).await?;
 
         // Get similar passages
-        let similar = similar_passages_with_index(
+        let mut similar = similar_passages_with_index(
             &passages, &tfidf, &req.seed, req.limit, 12, // shared_ngram_limit
             8,  // shared_phrase_limit
             4,  // min_shared_phrase_len
             &doc_table,
         )
         .await?;
+
+        // Apply optional post-filters to similar_passages
+        if req.min_similarity.is_some()
+            || !req.scope_canon.is_empty()
+            || !req.scope_period.is_empty()
+            || req.scope_source_work_id.is_some()
+        {
+            similar.retain(|row| {
+                if let Some(min_sim) = req.min_similarity {
+                    let score = row
+                        .get("tfidf_cosine")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    if score < min_sim {
+                        return false;
+                    }
+                }
+                if !req.scope_canon.is_empty() {
+                    let canon = row
+                        .get("canon")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !req.scope_canon.iter().any(|c| c == canon) {
+                        return false;
+                    }
+                }
+                if !req.scope_period.is_empty() {
+                    let period = row
+                        .get("period")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !req.scope_period.iter().any(|p| p == period) {
+                        return false;
+                    }
+                }
+                if let Some(work) = &req.scope_source_work_id {
+                    let w = row
+                        .get("source_work_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if w != work {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
 
         // Get phrase frontiers
         let phrase_frontiers =
@@ -2657,10 +2942,26 @@ impl ToolEngine {
             Vec::new()
         };
 
+        // Build active_filters summary for output transparency
+        let mut active_filters = serde_json::Map::new();
+        if let Some(ms) = req.min_similarity {
+            active_filters.insert("min_similarity".into(), ms.into());
+        }
+        if !req.scope_canon.is_empty() {
+            active_filters.insert("scope_canon".into(), req.scope_canon.clone().into());
+        }
+        if !req.scope_period.is_empty() {
+            active_filters.insert("scope_period".into(), req.scope_period.clone().into());
+        }
+        if let Some(w) = &req.scope_source_work_id {
+            active_filters.insert("scope_source_work_id".into(), w.clone().into());
+        }
+
         let payload = serde_json::json!({
             "schema": "readzen-sinorag-frontier-v1",
             "seed_passage_id": req.seed,
             "seed": seed_row,
+            "active_filters": active_filters,
             "similar_passages": similar,
             "phrase_frontiers": phrase_frontiers,
             "facet_summary": frontier::facet_summary(&similar),
@@ -5228,6 +5529,10 @@ impl ToolEngine {
                 seed: req.seed_passage_id.clone(),
                 limit: req.limit,
                 phrase_limit: 20,
+                min_similarity: None,
+                scope_canon: vec![],
+                scope_period: vec![],
+                scope_source_work_id: None,
             };
             record_component_outcome(
                 run_budgeted_component(&budget, self.frontier_impl(component_req)).await,
@@ -6218,6 +6523,7 @@ impl ToolEngine {
                 forms.push(alias.clone());
             }
         }
+        let canonical_candidate = forms.first().cloned().unwrap_or_default();
 
         let mut by_passage: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         for (idx, form) in forms.iter().enumerate() {
@@ -6267,11 +6573,16 @@ impl ToolEngine {
         });
         mentions.truncate(limit);
 
+        // Fix: earliest_unambiguous must skip hits where contains_person=false
         let earliest_unambiguous = mentions
             .iter()
-            .find(|row| row.get("is_primary_name").and_then(|v| v.as_bool()) == Some(true))
+            .find(|row| {
+                row.get("is_primary_name").and_then(|v| v.as_bool()) == Some(true)
+                    && row.get("contains_person").and_then(|v| v.as_bool()) != Some(false)
+            })
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+
         let ambiguous_earlier_hits = mentions
             .iter()
             .filter(|row| row.get("is_primary_name").and_then(|v| v.as_bool()) != Some(true))
@@ -6290,29 +6601,155 @@ impl ToolEngine {
             })
             .collect::<Vec<_>>();
 
+        // Short-name false-positive warning (≤2 chars likely a common compound)
+        let name_len = req.name.chars().count();
+        let false_positive_warning = if name_len <= 2 {
+            Some(format!(
+                "Name '{}' is {} char(s) and may be a common Chinese compound (not a personal name) in pre-Song texts. \
+                 Recommend: pass compact=true first to gauge hit counts, then scope with scope_period=[\"Song\",\"Yuan\",\"Ming\",\"Qing\"] \
+                 to reduce false positives.",
+                req.name, name_len
+            ))
+        } else {
+            None
+        };
+
+        // Add caveat when earliest_unambiguous is null due to contains_person filter
+        let mut caveats = vec![
+            "Rule-based mention classes are triage labels, not accepted historical claims."
+                .to_string(),
+            "Alias hits may refer to more than one person.".to_string(),
+        ];
+        if earliest_unambiguous.is_null() && mentions.iter().any(|r| {
+            r.get("is_primary_name").and_then(|v| v.as_bool()) == Some(true)
+        }) {
+            caveats.push(
+                "earliest_unambiguous is null: all primary-name hits have contains_person=false \
+                 (compound word matches, not a personal name)."
+                    .to_string(),
+            );
+        }
+
+        // Compact mode: replace mentions with grouped summary
         let total_mentions = mentions.len();
+        let (compact_summary, output_mentions) = if req.compact {
+            let summary = build_person_compact_summary(&mentions);
+            (Some(summary), vec![])
+        } else {
+            (None, mentions)
+        };
+
         Ok(PersonHistoryResponse {
             schema: "sinorag-person-history-v1",
             name: req.name,
             aliases: req.aliases,
-            canonical_candidate: forms.first().cloned().unwrap_or_default(),
+            aliases_searched: forms,
+            canonical_candidate,
             total_mentions,
             limit,
-            mentions,
+            mentions: output_mentions,
+            compact_summary,
             earliest_unambiguous,
             ambiguous_earlier_hits,
             evidence,
-            caveats: vec![
-                "Rule-based mention classes are triage labels, not accepted historical claims."
-                    .to_string(),
-                "Alias hits may refer to more than one person.".to_string(),
-            ],
+            caveats,
+            false_positive_warning,
             suggested_next: vec![
                 "Review earliest hits with source-read before asserting a first mention."
                     .to_string(),
                 "Use pair-appearance to check if this person is mentioned with another figure."
                     .to_string(),
             ],
+        })
+    }
+
+    /// Implement the person-profile tool.
+    pub async fn person_profile_impl(
+        &self,
+        req: crate::tools::requests::PersonProfileRequest,
+    ) -> Result<crate::tools::responses::PersonProfileResponse> {
+        use crate::tools::requests::PersonHistoryRequest;
+        use crate::tools::responses::PersonProfileResponse;
+
+        // Look up DDBC authority record (already queries birth/death/teachers/students/bio)
+        let authority = query_person_authority(&req.name, &req.aliases).await;
+
+        // Assess false-positive risk
+        let name_len = req.name.chars().count();
+        let (false_positive_risk, false_positive_warning) = if name_len <= 2 {
+            let warning = format!(
+                "Name '{}' is {} char(s) and likely a common Chinese compound in pre-Song texts. \
+                 Corpus hits may be overwhelmingly false positives (not this person). \
+                 Scope to Song or later periods for reliable results.",
+                req.name, name_len
+            );
+            ("high".to_string(), Some(warning))
+        } else if authority.is_some() {
+            ("none".to_string(), None)
+        } else {
+            ("low".to_string(), None)
+        };
+
+        // Determine status
+        let status = if authority.is_some() {
+            "fully_attested"
+        } else if name_len <= 2 {
+            "needs_filtered_search"
+        } else {
+            "partially_attested"
+        }
+        .to_string();
+
+        // Extract known aliases from authority or fall back to req.aliases
+        let known_aliases = if let Some(auth) = &authority {
+            auth.get("alt_names")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| req.aliases.clone())
+        } else {
+            req.aliases.clone()
+        };
+
+        // Get compact corpus summary via person-history in compact mode
+        let history_req = PersonHistoryRequest {
+            name: req.name.clone(),
+            aliases: req.aliases.clone(),
+            limit: 500,
+            compact: true,
+        };
+        let corpus_summary = match self.person_history_impl(history_req).await {
+            Ok(hist) => hist.compact_summary,
+            Err(_) => None,
+        };
+
+        let mut caveats = Vec::new();
+        if authority.is_none() {
+            caveats.push(
+                "Name not found in DDBC authority database; authority fields will be absent."
+                    .to_string(),
+            );
+        }
+        if false_positive_risk == "high" {
+            caveats.push(
+                "Use person-history with compact=true and scoped periods before drawing conclusions."
+                    .to_string(),
+            );
+        }
+
+        Ok(PersonProfileResponse {
+            schema: "sinorag-person-profile-v1",
+            name: req.name,
+            status,
+            false_positive_risk,
+            false_positive_warning,
+            authority,
+            known_aliases,
+            corpus_summary,
+            caveats,
         })
     }
 
@@ -6941,6 +7378,58 @@ fn classify_person_mention(row: &serde_json::Value, form: &str) -> &'static str 
     } else {
         "name_mention"
     }
+}
+
+/// Build a compact grouped summary of person mentions for compact=true mode.
+/// Groups by mention_class × period, returning counts and up to `samples_per_group` passage IDs.
+fn build_person_compact_summary(mentions: &[serde_json::Value]) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    // by_class_period[class][period] = vec of passage_ids
+    let mut by_class_period: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for row in mentions {
+        let class = row
+            .get("mention_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("name_mention")
+            .to_string();
+        let period = row
+            .get("period")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let pid = row
+            .get("passage_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        by_class_period
+            .entry(class)
+            .or_default()
+            .entry(period)
+            .or_default()
+            .push(pid);
+    }
+
+    let mut result = serde_json::Map::new();
+    for (class, periods) in &by_class_period {
+        let mut period_map = serde_json::Map::new();
+        for (period, ids) in periods {
+            let samples: Vec<&String> = ids.iter().take(3).collect();
+            period_map.insert(
+                period.clone(),
+                serde_json::json!({
+                    "count": ids.len(),
+                    "samples": samples,
+                }),
+            );
+        }
+        result.insert(class.clone(), serde_json::Value::Object(period_map));
+    }
+
+    serde_json::json!({
+        "total_mentions": mentions.len(),
+        "by_class_period": result,
+    })
 }
 
 fn merge_person_mention(row: &mut serde_json::Value, form: &str, is_primary: bool) {

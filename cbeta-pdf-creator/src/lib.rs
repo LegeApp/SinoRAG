@@ -9,6 +9,7 @@ pub mod bilingual_generator;
 pub mod typography;
 pub mod hocr_layer;
 pub mod fonts;
+pub mod markdown;
 
 // Re-export commonly used functions and types
 pub use fonts::FontContext;
@@ -16,6 +17,8 @@ pub use bilingual_generator::{
     create_bilingual_pdf,
     create_bilingual_pdf_with_context,
     create_bilingual_pdf_side_by_side_with_context,
+    create_markdown_pdf,
+    create_markdown_pdf_with_context,
 };
 
 use std::ffi::{CStr, c_void};

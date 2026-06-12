@@ -14,6 +14,7 @@ mod app {
     use std::cell::{Cell, RefCell};
     use std::ffi::c_void;
     use std::fs;
+    use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::rc::Rc;
@@ -32,6 +33,9 @@ mod app {
     const PAYLOAD_7Z: &[u8] = include_bytes!(env!("SINORAG_PAYLOAD_PATH"));
     const SHORTCUT_ICON: &[u8] = include_bytes!(env!("SINORAG_ICON_ICO"));
     const EXPECTED_SINORAG_VERSION: &str = env!("EXPECTED_SINORAG_VERSION");
+
+    // Suppress console windows when spawning child processes from a GUI app.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     const W: i32 = 500;
     const H: i32 = 640;
@@ -82,6 +86,8 @@ mod app {
         install_path: PathBuf,
         desktop_shortcut: bool,
         start_menu_shortcut: bool,
+        build_indexes: bool,
+        install_opencode: bool,
     }
 
     #[derive(Debug)]
@@ -129,6 +135,8 @@ mod app {
         browse_btn: gui::Button,
         desktop_cb: gui::CheckBox,
         start_menu_cb: gui::CheckBox,
+        skip_indexing_cb: gui::CheckBox,
+        skip_opencode_cb: gui::CheckBox,
         step_label: gui::Label,
         // Owner-drawn progress bar (an SS_OWNERDRAW static). The native ProgressBar's
         // PBM_SETBKCOLOR/PBM_SETBARCOLOR rendered an unthemed black trough, so we paint
@@ -243,25 +251,41 @@ mod app {
                 ..Default::default()
             });
 
+            let skip_indexing_cb = gui::CheckBox::new(&wnd, gui::CheckBoxOpts {
+                text: "Phrase and TF/IDF indexing",
+                position: gui::dpi(20, 210),
+                size: gui::dpi(440, 24),
+                check_state: co::BST::CHECKED,
+                ..Default::default()
+            });
+
+            let skip_opencode_cb = gui::CheckBox::new(&wnd, gui::CheckBoxOpts {
+                text: "OpenCode integration",
+                position: gui::dpi(20, 238),
+                size: gui::dpi(440, 24),
+                check_state: co::BST::CHECKED,
+                ..Default::default()
+            });
+
             let step_label = gui::Label::new(&wnd, gui::LabelOpts {
                 text: "Ready to install SinoRAG.",
-                position: gui::dpi(20, 222),
+                position: gui::dpi(20, 278),
                 size: gui::dpi(448, 22),
                 ..Default::default()
             });
 
             let progress_bar = gui::Label::new(&wnd, gui::LabelOpts {
                 text: "",
-                position: gui::dpi(20, 250),
+                position: gui::dpi(20, 306),
                 size: gui::dpi(448, 22),
                 control_style: co::SS::OWNERDRAW,
                 ..Default::default()
             });
 
-            let (log_w, log_h) = gui::dpi(448, 250);
+            let (log_w, log_h) = gui::dpi(448, 194);
             let log_edit = gui::Edit::new(&wnd, gui::EditOpts {
-                text: "Ready to install SinoRAG.\r\n",
-                position: gui::dpi(20, 292),
+                text: "",
+                position: gui::dpi(20, 348),
                 width: log_w,
                 height: log_h,
                 control_style: co::ES::MULTILINE
@@ -295,6 +319,8 @@ mod app {
                 browse_btn,
                 desktop_cb,
                 start_menu_cb,
+                skip_indexing_cb,
+                skip_opencode_cb,
                 step_label,
                 progress_bar,
                 log_edit,
@@ -331,6 +357,8 @@ mod app {
             let path_edit_ctrl = self.path_edit.clone();
             let desktop_cb_ctrl = self.desktop_cb.clone();
             let start_menu_cb_ctrl = self.start_menu_cb.clone();
+            let skip_indexing_cb_ctrl = self.skip_indexing_cb.clone();
+            let skip_opencode_cb_ctrl = self.skip_opencode_cb.clone();
             let log_edit_ctrl = self.log_edit.clone();
 
             self.wnd.on().wm_create(move |_| {
@@ -350,6 +378,8 @@ mod app {
                         path_edit_ctrl.hwnd(),
                         desktop_cb_ctrl.hwnd(),
                         start_menu_cb_ctrl.hwnd(),
+                        skip_indexing_cb_ctrl.hwnd(),
+                        skip_opencode_cb_ctrl.hwnd(),
                         log_edit_ctrl.hwnd(),
                     ] {
                         let _ = hwnd.SendMessage(w::msg::wm::SetFont {
@@ -525,10 +555,14 @@ mod app {
 
             let desktop_checked = self.desktop_cb.is_checked();
             let start_menu_checked = self.start_menu_cb.is_checked();
+            let build_indexes = self.skip_indexing_cb.is_checked();
+            let install_opencode = self.skip_opencode_cb.is_checked();
             let request = InstallRequest {
                 install_path,
                 desktop_shortcut: desktop_checked,
                 start_menu_shortcut: start_menu_checked,
+                build_indexes,
+                install_opencode,
             };
 
             // Build display string once, use in both state and UI.
@@ -654,6 +688,8 @@ mod app {
             self.browse_btn.hwnd().EnableWindow(enabled);
             self.desktop_cb.hwnd().EnableWindow(enabled);
             self.start_menu_cb.hwnd().EnableWindow(enabled);
+            self.skip_indexing_cb.hwnd().EnableWindow(enabled);
+            self.skip_opencode_cb.hwnd().EnableWindow(enabled);
             // Action button stays clickable throughout (retry / open-folder / observe).
             self.action_btn.hwnd().EnableWindow(true);
             Ok(())
@@ -805,9 +841,21 @@ mod app {
             InitProgressEvent::Done(_) => {}
         };
 
-        init::run_from_pack_url_blocking(pack_url, false, data_root, out_parquet, Some(&callback))?;
+        init::run_from_pack_url_blocking(
+            pack_url,
+            false,
+            data_root,
+            out_parquet,
+            Some(&callback),
+            request.build_indexes,
+        )?;
 
-        install_or_verify_opencode(&tx)?;
+        if request.install_opencode {
+            install_or_verify_opencode(&tx)?;
+        } else {
+            log_msg(&tx, "OpenCode integration skipped.");
+        }
+
         create_shortcuts(&request, &exe_path, &icon_path, &tx)?;
 
         step(&tx, "Registering uninstaller", 0.99);
@@ -844,6 +892,7 @@ mod app {
                     "-Command",
                     "curl.exe -fsSL https://opencode.ai/install | bash",
                 ])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .context("running OpenCode official installer")?;
             if status.success() && command_ok("opencode", &["--version"]) {
@@ -857,6 +906,7 @@ mod app {
             step(tx, "Installing OpenCode with npm", 0.93);
             let status = Command::new("npm")
                 .args(["install", "-g", "opencode-ai"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .context("running npm install -g opencode-ai")?;
             if status.success() && command_ok("opencode", &["--version"]) {
@@ -982,6 +1032,7 @@ mod app {
     fn command_ok(program: &str, args: &[&str]) -> bool {
         Command::new(program)
             .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -1015,7 +1066,7 @@ mod app {
         if !corpus_ready(&exe_path, &request.install_path.join("data")) {
             return None;
         }
-        if !opencode_fully_installed() {
+        if request.install_opencode && !opencode_fully_installed() {
             return None;
         }
         if request.desktop_shortcut
@@ -1039,7 +1090,11 @@ mod app {
         if !exe_path.is_file() {
             return None;
         }
-        let out = Command::new(exe_path).arg("--version").output().ok()?;
+        let out = Command::new(exe_path)
+            .arg("--version")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
         if !out.status.success() {
             return None;
         }
@@ -1067,6 +1122,7 @@ mod app {
         Command::new(exe_path)
             .args(["status", "--data"])
             .arg(data_root)
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -1090,6 +1146,7 @@ mod app {
         };
         Command::new(&path)
             .arg("--version")
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| {
                 o.status.success()

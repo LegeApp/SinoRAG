@@ -19,6 +19,10 @@ pub struct SearchResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_groups: Option<Vec<TermUsageGroup>>,
     pub search_strategy: SearchStrategy,
+    /// Next-step candidates derived from the shape of *this* result set
+    /// (hit count, work concentration, etc.) — varies call to call rather
+    /// than repeating a fixed tip, and already-tried tools are filtered out.
+    pub suggested_next_tools: Vec<SuggestedToolCall>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -877,15 +881,41 @@ pub struct PersonHistoryResponse {
     pub schema: &'static str,
     pub name: String,
     pub aliases: Vec<String>,
+    /// All name forms actually searched (primary name + aliases).
+    pub aliases_searched: Vec<String>,
     pub canonical_candidate: String,
     pub total_mentions: usize,
     pub limit: usize,
+    /// Full mention rows. Empty when compact=true (use compact_summary instead).
     pub mentions: Vec<serde_json::Value>,
+    /// Populated when compact=true: hits grouped by mention_class × period with counts and samples.
+    pub compact_summary: Option<serde_json::Value>,
     pub earliest_unambiguous: serde_json::Value,
     pub ambiguous_earlier_hits: Vec<serde_json::Value>,
     pub evidence: Vec<serde_json::Value>,
     pub caveats: Vec<String>,
+    /// Non-empty when the name is ≤2 chars and may be a common Chinese compound.
+    pub false_positive_warning: Option<String>,
     pub suggested_next: Vec<String>,
+}
+
+/// Response from the person-profile tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PersonProfileResponse {
+    pub schema: &'static str,
+    pub name: String,
+    /// "fully_attested" | "partially_attested" | "needs_filtered_search" | "not_found"
+    pub status: String,
+    /// "none" | "low" | "high"
+    pub false_positive_risk: String,
+    /// Populated when false_positive_risk is "high".
+    pub false_positive_warning: Option<String>,
+    /// DDBC authority record (bio, birth/death years, dynasty, teachers, students, etc.).
+    pub authority: Option<serde_json::Value>,
+    pub known_aliases: Vec<String>,
+    /// Compact corpus mention summary grouped by mention_class.
+    pub corpus_summary: Option<serde_json::Value>,
+    pub caveats: Vec<String>,
 }
 
 /// Response from the citation-verify tool

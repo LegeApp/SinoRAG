@@ -6,6 +6,10 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "md2pdf"
+path = "src/bin/md2pdf.rs"
+
 [dependencies]
 # PDF generation - use crates.io version
 lopdf = "0.39"
@@ -21,6 +25,15 @@ unicode-segmentation = "1.11"
 
 # XML parsing for hOCR
 quick-xml = "0.31"
+
+# Markdown parsing (CommonMark + GFM tables/strikethrough)
+pulldown-cmark = { version = "0.12", default-features = false }
+
+# Image decoding for embedding raster images in PDFs
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Font subsetting so embedded fonts carry only the glyphs actually used
+subsetter = "0.2"
 
 # Error handling
 anyhow = "1.0"

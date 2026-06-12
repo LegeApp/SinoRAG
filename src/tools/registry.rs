@@ -369,7 +369,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "validate-adjudication",
                 audience: ToolAudience::Specialist,
-                description: "Validate an adjudication JSON file for structural correctness.",
+                description: "Validate a finished adjudication JSON file (your written-up scholarly verdict) for structural correctness. A late-pipeline check, not a precondition for exploration: write your adjudication after investigating, then run this before graph-build/report-build.",
                 input_schema: schema_for::<ValidateAdjudicationRequest>(),
                 output_schema: schema_for::<ValidateAdjudicationResponse>(),
                 requires: vec![],
@@ -395,7 +395,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "graph-build",
                 audience: ToolAudience::Specialist,
-                description: "Build evidence graph from adjudication JSON.",
+                description: "Build an evidence graph from a finished adjudication JSON file. A terminal artifact-building step for after you've investigated and written up your findings — not something you need before exploring with frontier/source-investigate.",
                 input_schema: schema_for::<GraphBuildRequest>(),
                 output_schema: schema_for::<GraphBuildResponse>(),
                 requires: vec![],
@@ -424,7 +424,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "report-build",
                 audience: ToolAudience::Specialist,
-                description: "Build markdown report from adjudication and graph files.",
+                description: "Assemble a markdown report from finished adjudication and graph artifact files. For writing up raw markdown directly without an adjudication, use pdf-build's input_markdown instead — this tool is for the structured-evidence pipeline's final assembly step.",
                 input_schema: schema_for::<ReportBuildRequest>(),
                 output_schema: schema_for::<ReportBuildResponse>(),
                 requires: vec![],
@@ -454,7 +454,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "pdf-build",
                 audience: ToolAudience::DefaultAgent,
-                description: "Build a PDF with the built-in Lopdf renderer from either Markdown or structured report/evidence JSON. Use input_json for the basic report template; no external PDF tools are required.",
+                description: "Build a PDF with the built-in Lopdf renderer. Accepts raw Markdown directly via input_markdown — hand-written or model-authored prose, no adjudication or evidence pipeline required — or structured report/evidence JSON via input_json for the basic report template. No external PDF tools are required.",
                 input_schema: schema_for::<PdfBuildRequest>(),
                 output_schema: schema_for::<PdfBuildResponse>(),
                 requires: vec![],
@@ -490,12 +490,18 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "works",
                 audience: ToolAudience::Specialist,
-                description: "List works in the catalog, optionally filtered by tradition/period/canon/author.",
+                description: "List works in the catalog, optionally filtered by tradition/period/canon/author — or look up a single work directly with work_id (title, author, period, canon, traditions) without reading any passage text.",
                 input_schema: schema_for::<WorksRequest>(),
                 output_schema: schema_for::<WorksResponse>(),
                 requires: vec!["catalog.index"],
                 safety: ToolSafety::ReadOnly,
                 examples: vec![
+                    ToolExample {
+                        title: "Look up one work's metadata by ID",
+                        args: serde_json::json!({
+                            "work_id": "X26n0534"
+                        }),
+                    },
                     ToolExample {
                         title: "List all works",
                         args: serde_json::json!({
@@ -625,7 +631,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "frontier",
                 audience: ToolAudience::Specialist,
-                description: "Generate a discovery frontier packet for an agent session. Specialist: source-investigate wraps this — call directly only when you want the raw discovery-frontier packet.",
+                description: "Generate a discovery frontier packet for an agent session. Specialist: source-investigate wraps this — call directly only when you want the raw discovery-frontier packet. Use min_similarity (0.2–0.4) to suppress noisy tangential matches; use scope_canon/scope_period to restrict to a specific corpus section.",
                 input_schema: schema_for::<FrontierRequest>(),
                 output_schema: schema_for::<FrontierResponse>(),
                 requires: vec!["passages.parquet", "tfidf.index", "doc_table.bin"],
@@ -638,7 +644,16 @@ pub fn tool_defs() -> Vec<ToolDef> {
                             "limit": 25,
                             "phrase_limit": 20
                         }),
-                    }
+                    },
+                    ToolExample {
+                        title: "Filtered frontier: Tang-period Chan texts, similarity ≥ 0.3",
+                        args: serde_json::json!({
+                            "seed": "B/B13/B13n0079.xml#pB13p0047a0417",
+                            "limit": 25,
+                            "min_similarity": 0.3,
+                            "scope_period": ["Tang"]
+                        }),
+                    },
                 ],
             },
             call: |engine, args| Box::pin(async move {
@@ -1292,6 +1307,40 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
 
+        // person-profile tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "person-profile",
+                audience: ToolAudience::DefaultAgent,
+                description: "Return a structured biographical profile for a person: DDBC authority data (birth/death, dynasty, teachers, students, concise bio) plus a compact corpus mention summary. Use instead of person-history when you want a synthesized overview rather than raw passage hits. Returns false_positive_risk assessment for short names.",
+                input_schema: schema_for::<PersonProfileRequest>(),
+                output_schema: schema_for::<PersonProfileResponse>(),
+                requires: vec!["passages.parquet"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Profile a well-attested figure",
+                        args: serde_json::json!({
+                            "name": "臨濟義玄",
+                            "aliases": []
+                        }),
+                    },
+                    ToolExample {
+                        title: "Profile a short-name figure (high false-positive risk)",
+                        args: serde_json::json!({
+                            "name": "慧能",
+                            "aliases": ["惠能"]
+                        }),
+                    },
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: PersonProfileRequest = serde_json::from_value(args)?;
+                let res = engine.person_profile_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // citation-verify tool
         ToolDef {
             spec: ToolSpec {
@@ -1382,7 +1431,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "report-from-evidence",
                 audience: ToolAudience::DefaultAgent,
-                description: "Validate adjudication, build evidence graph, and build the markdown report in one workflow.",
+                description: "One-shot pipeline that validates a finished adjudication, builds the evidence graph, and renders the markdown report. Run this after your investigation is done and you've written up an adjudication — for writing reports straight from prose without one, use pdf-build's input_markdown instead.",
                 input_schema: schema_for::<ReportFromEvidenceRequest>(),
                 output_schema: schema_for::<ReportFromEvidenceResponse>(),
                 requires: vec![],
