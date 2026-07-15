@@ -109,12 +109,15 @@ impl ServerHandler for SinoragMcpServer {
         let payload = serde_json::to_value(&envelope).map_err(|e| {
             McpError::internal_error(format!("failed to serialize tool envelope: {e}"), None)
         })?;
-        let pretty = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+        // Keep the text fallback compact. Modern clients consume
+        // `structured_content`; older clients still receive equivalent JSON
+        // without paying the whitespace cost on large research responses.
+        let text = serde_json::to_string(&payload).unwrap_or_else(|_| payload.to_string());
 
         let mut result = if envelope.ok {
-            CallToolResult::success(vec![Content::text(pretty)])
+            CallToolResult::success(vec![Content::text(text)])
         } else {
-            CallToolResult::error(vec![Content::text(pretty)])
+            CallToolResult::error(vec![Content::text(text)])
         };
         result.structured_content = Some(payload);
         Ok(result)

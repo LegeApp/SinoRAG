@@ -53,6 +53,16 @@ pub enum ToolError {
     #[error("invalid args: {0}")]
     InvalidArgs(String),
 
+    #[error("{tool} expects a passage_id, but got {provided}")]
+    InvalidPassageId {
+        tool: String,
+        provided: String,
+        detected_kind: String,
+    },
+
+    #[error("passage not found: {passage_id}")]
+    PassageNotFound { passage_id: String },
+
     #[error("query embedding provider is not configured")]
     QueryEmbeddingProviderNotConfigured,
 
@@ -181,6 +191,48 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                     "Run 'sinorag explain-tool <tool>' for usage information".to_string(),
                 ),
                 details: None,
+            },
+            ToolError::InvalidPassageId {
+                tool,
+                provided,
+                detected_kind,
+            } => {
+                let (message, suggested_command) = if detected_kind == "source_work_id" {
+                    (
+                        format!(
+                            "Tool '{tool}' expects a passage_id, but '{provided}' looks like a source_work_id"
+                        ),
+                        Some(format!(
+                            "Use works with work_id='{provided}' for metadata, or search/source-read to select a passage in that work"
+                        )),
+                    )
+                } else {
+                    (
+                        format!(
+                            "Tool '{tool}' expects one passage_id, but the supplied value looks like search text"
+                        ),
+                        Some("Use search or evidence-search first, then pass one returned passage_id".to_string()),
+                    )
+                };
+                ToolErrorBody {
+                    code: "invalid_passage_id".to_string(),
+                    message,
+                    suggested_command,
+                    details: Some(serde_json::json!({
+                        "tool": tool,
+                        "provided": provided,
+                        "detected_kind": detected_kind,
+                    })),
+                }
+            }
+            ToolError::PassageNotFound { passage_id } => ToolErrorBody {
+                code: "passage_not_found".to_string(),
+                message: format!("No passage exists with passage_id '{passage_id}'"),
+                suggested_command: Some(
+                    "Use search, heading-search, or source-read to obtain an exact passage_id"
+                        .to_string(),
+                ),
+                details: Some(serde_json::json!({ "passage_id": passage_id })),
             },
             ToolError::QueryEmbeddingProviderNotConfigured => ToolErrorBody {
                 code: "query_embedding_provider_not_configured".to_string(),

@@ -100,11 +100,7 @@ fn main() -> ExitCode {
     }
 
     if failures > 0 {
-        eprintln!(
-            "{} of {} file(s) failed",
-            failures,
-            targets.len()
-        );
+        eprintln!("{} of {} file(s) failed", failures, targets.len());
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
@@ -178,8 +174,7 @@ fn convert_one(
     out: &Path,
     font_context: &cbeta_pdf_creator::fonts::FontContext,
 ) -> Result<(), String> {
-    let markdown = std::fs::read_to_string(input)
-        .map_err(|e| format!("cannot read input: {e}"))?;
+    let markdown = std::fs::read_to_string(input).map_err(|e| format!("cannot read input: {e}"))?;
     let out_str = out
         .to_str()
         .ok_or_else(|| "output path is not valid UTF-8".to_string())?;

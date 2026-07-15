@@ -5,9 +5,7 @@
 //! spans. The PDF renderer in `bilingual_generator.rs` consumes this model and
 //! reuses the existing CJK-aware font machinery to lay it out.
 
-use pulldown_cmark::{
-    Alignment, CodeBlockKind, Event, Options, Parser, Tag,
-};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag};
 
 /// Column alignment for a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,15 +40,23 @@ pub enum Span {
 /// A block-level Markdown element.
 #[derive(Debug, Clone)]
 pub enum MdBlock {
-    Heading { level: u8, spans: Vec<Span> },
-    Paragraph { spans: Vec<Span> },
+    Heading {
+        level: u8,
+        spans: Vec<Span>,
+    },
+    Paragraph {
+        spans: Vec<Span>,
+    },
     BlockQuote(Vec<MdBlock>),
     List {
         ordered: bool,
         start: u64,
         items: Vec<Vec<MdBlock>>,
     },
-    CodeBlock { text: String, lang: Option<String> },
+    CodeBlock {
+        text: String,
+        lang: Option<String>,
+    },
     Table {
         aligns: Vec<Align>,
         header: Vec<Vec<Span>>,

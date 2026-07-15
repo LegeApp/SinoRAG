@@ -116,6 +116,7 @@ Reports what's ingested, which indexes are present, and suggested next steps.
 # Scriptable / batchable JSON CLI
 sinorag tools-manifest --include-examples
 sinorag tool-call evidence-search --json '{"phrase":"金剛經","limit":5}'
+sinorag tool-call batch-evidence-search --json '{"phrases":["金剛經","般若波羅蜜"],"concurrency":4}'
 sinorag tool-call hybrid-discover --json '{"seed_passage_id":"B/B13/B13n0079.xml#pB13p0047a0417","limit":10}'
 sinorag run-tools --input jobs.jsonl --output results.jsonl
 
@@ -125,6 +126,8 @@ sinorag agent
 ```
 
 JSON CLI is the best fit for scripts, tests, repeatable batches, and audit trails. MCP is the supported interactive transport for MCP-capable agents. `sinorag agent` wraps `sinorag mcp` for opencode by regenerating `<workdir>/.opencode/opencode.json` and the sinorag-managed block in `<workdir>/AGENTS.md`, then launching opencode. If you use another MCP client, point it at `sinorag mcp`.
+
+For several independent phrases, prefer `batch-evidence-search` to separate `search` calls; it runs up to four searches concurrently by default and returns compact samples in input order. `source-investigate` defaults to context plus the lexical frontier. Its separate similarity block and semantic vector neighbors are opt-in because frontier already contains TF-IDF parallels and vector reranking is substantially slower.
 
 ### Step 4 — Optional: semantic vector search
 

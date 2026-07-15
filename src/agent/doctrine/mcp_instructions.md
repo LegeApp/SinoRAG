@@ -34,6 +34,9 @@ not a tool catalog.
   `collocation-search`, `trace-term-usage`.
 - **Absence / clustering**: `absence-check`, `cluster-hits`.
 - **Variant expansion**: `query-expand-terms` (no corpus deps).
+- **Several independent phrases**: `batch-evidence-search` returns compact
+  per-phrase counts and sample passage IDs concurrently. Prefer it to a run of
+  separate `search` calls when later inputs do not depend on earlier results.
 - **Person research**: `person-resolve` then `person-history`.
 - **Term-pair co-occurrence**: `pair-appearance` (individual passage evidence);
   `pair-profile` (aggregate rates by period, canon, or work).
@@ -44,7 +47,8 @@ not a tool catalog.
   file; use `depends_on` for DAG ordering and `concurrency` for parallel steps.
 - **Output / write** (gated; only available when MCP is launched with
   `--writable`): `graph-build`, `report-build`, `report-from-evidence`,
-  `pdf-build`, `validate-adjudication`.
+  `pdf-build`, `validate-adjudication`. `pdf-build` accepts prose directly in
+  `markdown`; `input_markdown` is a file path.
 
 **Principle**: exact evidence before discovery. Start with `search`,
 `evidence-search`, `works`, or `heading-search` when the user gives a phrase,
@@ -65,6 +69,13 @@ evidence only after exact verification and close reading.
 
 - Every accepted claim must cite a `passage_id` returned by a tool. No
   invented citations.
+- A work ID such as `T48n2002B` is metadata, not a citation. Put the complete
+  passage ID (including its source path and anchor) beside every quotation and
+  every factual table row or bullet that depends on corpus evidence.
+- Before finalizing a report, audit every claim: distinguish direct text from
+  inference, describe zero hits as absence in the loaded corpus rather than
+  proof of nonexistence, and do not turn the earliest loaded attestation into
+  an unsupported claim about historical origin.
 - Tool errors with `kind = missing_artifact` mean the relevant index has
   not been built; surface this to the user rather than guessing.
 - Prefer JSON-ready output when the next consumer is another tool; prefer

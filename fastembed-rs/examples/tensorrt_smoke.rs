@@ -31,7 +31,11 @@ fn main() -> Result<()> {
     ];
     let embeddings = model.embed(texts, Some(batch_size))?;
     for (idx, embedding) in embeddings.iter().enumerate() {
-        let norm = embedding.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let norm = embedding
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
         let preview = embedding.iter().take(4).copied().collect::<Vec<_>>();
         println!(
             "embedding[{idx}] dim={} norm={norm:.6} first4={preview:?}",

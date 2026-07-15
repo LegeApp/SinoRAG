@@ -71,14 +71,14 @@ mod tensorrt;
 mod text_embedding;
 
 pub use crate::common::{get_cache_dir, Embedding, Error, SparseEmbedding, TokenizerFiles};
-pub use crate::models::{model_info::ModelInfo, quantization::QuantizationMode};
 #[cfg(feature = "ort-backend")]
 pub use crate::models::model_info::RerankerModelInfo;
+pub use crate::models::{model_info::ModelInfo, quantization::QuantizationMode};
 #[cfg(feature = "ort-backend")]
 pub use crate::output::{EmbeddingOutput, OutputKey, OutputPrecedence, SingleBatchOutput};
+pub use crate::pooling::Pooling;
 #[cfg(not(feature = "ort-backend"))]
 pub use crate::text_embedding::{EmbeddingOutput, OutputKey};
-pub use crate::pooling::Pooling;
 
 // For all Embedding
 pub use crate::init::{

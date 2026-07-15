@@ -1133,6 +1133,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 period,
                 canon,
                 author,
+                title: None,
                 limit,
             };
 

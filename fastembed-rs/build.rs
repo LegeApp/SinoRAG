@@ -8,13 +8,21 @@ fn main() {
 
     let trt_libs = env::var("TENSORRT_LIBRARIES")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| find_lib_dir("libnvinfer.so").expect("TENSORRT_LIBRARIES not set and libnvinfer.so not found"));
+        .unwrap_or_else(|_| {
+            find_lib_dir("libnvinfer.so")
+                .expect("TENSORRT_LIBRARIES not set and libnvinfer.so not found")
+        });
     let cuda_libs = env::var("CUDA_LIBRARIES")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| find_lib_dir("libcudart.so").expect("CUDA_LIBRARIES not set and libcudart.so not found"));
+        .unwrap_or_else(|_| {
+            find_lib_dir("libcudart.so").expect("CUDA_LIBRARIES not set and libcudart.so not found")
+        });
     let cuda_incl = env::var("CUDA_INCLUDE_DIRS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| find_include_dir("cuda_runtime.h").expect("CUDA_INCLUDE_DIRS not set and cuda_runtime.h not found"));
+        .unwrap_or_else(|_| {
+            find_include_dir("cuda_runtime.h")
+                .expect("CUDA_INCLUDE_DIRS not set and cuda_runtime.h not found")
+        });
     let trt_incl = env::var("TENSORRT_INCLUDE_DIRS")
         .map(PathBuf::from)
         .ok()

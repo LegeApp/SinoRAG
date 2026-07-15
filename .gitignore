@@ -1,4 +1,5 @@
 /target/
+**/target/
 /outputs/
 Cargo.lock.bak
 *.tmp
@@ -6,6 +7,7 @@ Cargo.lock.bak
 .DS_Store
 SinoRAG.zip
 cargo-checker.exe
+/gui-installer/sinorag-installer/*.exe
 /terebess_zen_text_images/
 /terebess_zen_urls/
 /.codegraph/

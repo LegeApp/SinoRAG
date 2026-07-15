@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::tools::errors::ToolErrorBody;
 
 const DEFAULT_LOG_PATH: &str = ".sinorag/tool_calls.jsonl";
+const MAX_SUMMARY_OBJECT_DEPTH: usize = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallLogRecord {
@@ -171,7 +172,15 @@ pub fn summarize(path: &Path, limit_recent: usize) -> Result<ToolLogSummary> {
         .iter()
         .rev()
         .take(limit_recent)
-        .cloned()
+        .map(|record| {
+            let mut compact = record.clone();
+            // Logs from older binaries may contain deeply nested summaries.
+            // Compact them again on read so one historical composite response
+            // cannot overwhelm `tool-log-summary` output.
+            compact.args_summary = summarize_value(&compact.args_summary);
+            compact.result_summary = summarize_value(&compact.result_summary);
+            compact
+        })
         .collect::<Vec<_>>();
     recent.reverse();
 
@@ -233,6 +242,10 @@ fn summarize_tool_result(result: &Value) -> Value {
 }
 
 fn summarize_value(value: &Value) -> Value {
+    summarize_value_at_depth(value, 0)
+}
+
+fn summarize_value_at_depth(value: &Value, depth: usize) -> Value {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
         Value::String(s) => {
@@ -248,9 +261,15 @@ fn summarize_value(value: &Value) -> Value {
             "len": items.len(),
         }),
         Value::Object(obj) => {
+            if depth >= MAX_SUMMARY_OBJECT_DEPTH {
+                return serde_json::json!({
+                    "type": "object",
+                    "keys": obj.len(),
+                });
+            }
             let mut out = serde_json::Map::new();
             for (key, value) in obj {
-                out.insert(key.clone(), summarize_value(value));
+                out.insert(key.clone(), summarize_value_at_depth(value, depth + 1));
             }
             Value::Object(out)
         }
@@ -288,5 +307,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.jsonl");
         assert!(recent_tool_names(&path, 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn summaries_bound_nested_object_detail() {
+        let summary = summarize_value(&serde_json::json!({
+            "result": {
+                "timeline": {
+                    "Song": {
+                        "representative": {
+                            "passage_id": "T/T01/example.xml#p1",
+                            "zh_text_raw": "佛法"
+                        }
+                    }
+                }
+            }
+        }));
+        assert_eq!(summary["result"]["type"], "object");
+        assert_eq!(summary["result"]["keys"], 1);
+        assert!(serde_json::to_string(&summary).unwrap().len() < 60);
     }
 }

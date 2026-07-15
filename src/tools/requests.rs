@@ -248,6 +248,12 @@ fn default_essay_max_pages() -> usize {
 /// Request for the pdf-build tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PdfBuildRequest {
+    /// Raw Markdown content to render directly. Use this when the caller
+    /// already has model-authored prose and does not need an intermediate file.
+    #[serde(default)]
+    pub markdown: Option<String>,
+
+    /// Path to a Markdown file to render.
     #[serde(default)]
     pub input_markdown: Option<PathBuf>,
 
@@ -286,6 +292,10 @@ pub struct WorksRequest {
 
     #[serde(default)]
     pub author: Option<String>,
+
+    /// Match a normalized substring of the work title.
+    #[serde(default)]
+    pub title: Option<String>,
 
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -873,10 +883,15 @@ pub struct SourceInvestigateRequest {
     #[serde(default = "default_true")]
     pub include_frontier: bool,
 
-    #[serde(default = "default_true")]
+    /// Return a separate TF-IDF block. The frontier already contains the same
+    /// lexical parallels, so this is opt-in and reuses frontier output when
+    /// both are requested.
+    #[serde(default)]
     pub include_similar: bool,
 
-    #[serde(default = "default_true")]
+    /// Include semantic vector neighbors. Opt-in because vector reranking is
+    /// substantially slower than the lexical investigation path.
+    #[serde(default)]
     pub include_vector: bool,
 
     #[serde(default = "default_workflow_quality")]
@@ -944,6 +959,15 @@ pub struct BatchEvidenceSearchRequest {
 
     #[serde(default = "default_limit")]
     pub limit: usize,
+
+    /// Maximum number of independent phrase searches to run concurrently
+    /// (clamped to 1..=8).
+    #[serde(default = "default_batch_search_concurrency")]
+    pub concurrency: usize,
+}
+
+fn default_batch_search_concurrency() -> usize {
+    4
 }
 
 fn default_variant_policy() -> String {

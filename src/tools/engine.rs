@@ -128,6 +128,47 @@ fn opt_str(row: &serde_json::Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn looks_like_source_work_id(value: &str) -> bool {
+    if value.contains('/') || value.contains('#') || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((prefix, suffix)) = value.split_once('n') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && prefix.chars().any(|ch| ch.is_ascii_digit())
+        && prefix
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        && suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+}
+
+fn validate_passage_input(tool: &str, value: &str) -> Result<()> {
+    let detected_kind = if looks_like_source_work_id(value) {
+        Some("source_work_id")
+    } else if value.trim().is_empty() || value.chars().any(char::is_whitespace) {
+        Some("search_text")
+    } else {
+        None
+    };
+    if let Some(detected_kind) = detected_kind {
+        return Err(ToolError::InvalidPassageId {
+            tool: tool.to_string(),
+            provided: value.to_string(),
+            detected_kind: detected_kind.to_string(),
+        }
+        .into_anyhow());
+    }
+    Ok(())
+}
+
+fn passage_not_found(passage_id: &str) -> anyhow::Error {
+    ToolError::PassageNotFound {
+        passage_id: passage_id.to_string(),
+    }
+    .into_anyhow()
+}
+
 fn char_prefix(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
@@ -818,7 +859,9 @@ mod tests {
     #[test]
     fn search_suggestions_steer_toward_expansion_on_zero_hits() {
         let candidates = search_suggestion_candidates("無一物", &[], 0);
-        assert!(candidates.iter().any(|(tool, _, _)| *tool == "query-expand-terms"));
+        assert!(candidates
+            .iter()
+            .any(|(tool, _, _)| *tool == "query-expand-terms"));
     }
 
     #[test]
@@ -850,7 +893,9 @@ mod tests {
             .map(|i| hit(&format!("W{i}#p1"), &format!("W{i}")))
             .collect::<Vec<_>>();
         let candidates = search_suggestion_candidates("無一物", &hits, 6);
-        assert!(candidates.iter().any(|(tool, _, _)| *tool == "phrase-history"));
+        assert!(candidates
+            .iter()
+            .any(|(tool, _, _)| *tool == "phrase-history"));
     }
 
     #[test]
@@ -879,6 +924,27 @@ mod tests {
             tradition_contains_sql("traditions", "canon"),
             "strpos(traditions, '\"canon\"') > 0"
         );
+    }
+
+    #[test]
+    fn passage_input_distinguishes_work_ids_and_search_text() {
+        assert!(looks_like_source_work_id("T48n2005_001"));
+        assert!(!looks_like_source_work_id(
+            "T/T48/T48n2005.xml#pT48p0292a0101"
+        ));
+
+        let work_err = validate_passage_input("frontier", "T48n2005_001").unwrap_err();
+        let work_body = crate::tools::errors::classify_tool_error(&work_err);
+        assert_eq!(work_body.code, "invalid_passage_id");
+        assert_eq!(
+            work_body.details.unwrap()["detected_kind"],
+            "source_work_id"
+        );
+
+        let text_err = validate_passage_input("frontier", "摩訶迦葉 拈花").unwrap_err();
+        let text_body = crate::tools::errors::classify_tool_error(&text_err);
+        assert_eq!(text_body.code, "invalid_passage_id");
+        assert_eq!(text_body.details.unwrap()["detected_kind"], "search_text");
     }
 
     #[test]
@@ -1416,6 +1482,7 @@ impl ToolEngine {
         use crate::datafusion_store::sql_literal;
         use crate::tools::responses::PassageResponse;
 
+        validate_passage_input("passage", &req.id)?;
         let passages = self.passages().await?;
         let sql = format!(
             "SELECT passage_id, zh_text_raw, source_work_id, main_title, heading, \
@@ -1427,7 +1494,7 @@ impl ToolEngine {
         let row = rows
             .drain(..)
             .next()
-            .ok_or_else(|| anyhow::anyhow!("Passage not found: {}", req.id))?;
+            .ok_or_else(|| passage_not_found(&req.id))?;
 
         Ok(PassageResponse {
             schema: "sinorag-passage-v1",
@@ -2684,13 +2751,26 @@ impl ToolEngine {
 
         self.ensure_write_allowed("pdf-build", &req.out)?;
 
-        let source_count =
-            usize::from(req.input_markdown.is_some()) + usize::from(req.input_json.is_some());
+        let source_count = usize::from(req.markdown.is_some())
+            + usize::from(req.input_markdown.is_some())
+            + usize::from(req.input_json.is_some());
         if source_count != 1 {
-            anyhow::bail!("pdf-build expects exactly one of input_markdown or input_json");
+            return Err(ToolError::InvalidArgs(
+                "pdf-build expects exactly one of markdown, input_markdown, or input_json"
+                    .to_string(),
+            )
+            .into_anyhow());
         }
 
-        let (source_format, section_count) = if let Some(input) = req.input_markdown {
+        let (source_format, section_count) = if let Some(markdown) = req.markdown {
+            let section_count = markdown
+                .lines()
+                .filter(|line| line.trim_start().starts_with('#'))
+                .count()
+                .max(1);
+            export::pdf_markdown(&markdown, req.out.clone(), req.side_by_side)?;
+            ("inline_markdown".to_string(), section_count)
+        } else if let Some(input) = req.input_markdown {
             let markdown = std::fs::read_to_string(&input)?;
             let section_count = markdown
                 .lines()
@@ -2730,11 +2810,9 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::WorksRequest,
     ) -> Result<crate::tools::responses::WorksResponse> {
-        use crate::catalog_index::CorpusCatalogIndex;
         use crate::tools::responses::{WorkInfo, WorksResponse};
 
-        let catalog_path = self.resolve_catalog_path()?;
-        let catalog = CorpusCatalogIndex::load(&catalog_path)?;
+        let catalog = self.catalog().await?;
 
         if let Some(ref work_id) = req.work_id {
             let works: Vec<WorkInfo> = catalog
@@ -2768,7 +2846,12 @@ impl ToolEngine {
             filtered.retain(|w| &w.canon == canon);
         }
         if let Some(ref author) = req.author {
-            filtered.retain(|w| &w.author == author);
+            let author = crate::normalize::normalize_zh(author);
+            filtered.retain(|w| crate::normalize::normalize_zh(&w.author).contains(&author));
+        }
+        if let Some(ref title) = req.title {
+            let title = crate::normalize::normalize_zh(title);
+            filtered.retain(|w| crate::normalize::normalize_zh(&w.main_title).contains(&title));
         }
 
         filtered.truncate(req.limit);
@@ -2797,11 +2880,9 @@ impl ToolEngine {
         &self,
         _req: crate::tools::requests::CatalogIndexInfoRequest,
     ) -> Result<crate::tools::responses::CatalogIndexInfoResponse> {
-        use crate::catalog_index::CorpusCatalogIndex;
         use crate::tools::responses::CatalogIndexInfoResponse;
 
-        let catalog_path = self.resolve_catalog_path()?;
-        let catalog = CorpusCatalogIndex::load(&catalog_path)?;
+        let catalog = self.catalog().await?;
         let info = catalog.info_payload();
 
         Ok(CatalogIndexInfoResponse {
@@ -2818,6 +2899,7 @@ impl ToolEngine {
         use crate::commands::tfidf::similar_passages_with_index;
         use crate::tools::responses::SimilarResponse;
 
+        validate_passage_input("similar", &req.seed)?;
         let passages = self.passages().await?;
         let tfidf = self.tfidf().await?;
         let doc_table = self.doc_table().await?;
@@ -2851,6 +2933,8 @@ impl ToolEngine {
         use crate::registry;
         use crate::tools::responses::FrontierResponse;
 
+        validate_passage_input("frontier", &req.seed)?;
+
         let passages = self.passages().await?;
         let tfidf = self.tfidf().await?;
         let doc_table = self.doc_table().await?;
@@ -2859,21 +2943,14 @@ impl ToolEngine {
             registry::init_registry(&registry_path)?;
         }
 
-        // frontier needs a passage_id (e.g. "T/T08/T08n0235.xml#pT08p0750c0201"),
-        // not a source_work_id (e.g. "X26n0534"). Passage IDs always carry a
-        // "#<anchor>" suffix; work IDs never do — catch the mix-up here with a
-        // clear message instead of letting it surface as a generic "not found".
-        if !req.seed.contains('#') {
-            return Err(anyhow::anyhow!(
-                "frontier expects a passage_id (containing '#', e.g. \"T/T08/T08n0235.xml#pT08p0750c0201\"), \
-                 but got \"{}\", which looks like a source_work_id. Use the `works` tool with work_id=\"{}\" \
-                 for work-level metadata, or `search`/`heading-search` to find a passage_id within that work first.",
-                req.seed, req.seed
-            ));
-        }
-
         // Get seed passage
-        let seed_row = passages.get_passage(&req.seed).await?;
+        let seed_row = passages.get_passage(&req.seed).await.map_err(|err| {
+            if err.to_string().contains("Passage not found") {
+                passage_not_found(&req.seed)
+            } else {
+                err
+            }
+        })?;
 
         // Get similar passages
         let mut similar = similar_passages_with_index(
@@ -2901,19 +2978,13 @@ impl ToolEngine {
                     }
                 }
                 if !req.scope_canon.is_empty() {
-                    let canon = row
-                        .get("canon")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let canon = row.get("canon").and_then(|v| v.as_str()).unwrap_or("");
                     if !req.scope_canon.iter().any(|c| c == canon) {
                         return false;
                     }
                 }
                 if !req.scope_period.is_empty() {
-                    let period = row
-                        .get("period")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let period = row.get("period").and_then(|v| v.as_str()).unwrap_or("");
                     if !req.scope_period.iter().any(|p| p == period) {
                         return false;
                     }
@@ -5474,11 +5545,16 @@ impl ToolEngine {
 
         let verbosity = req.verbosity;
         let mut components = Vec::new();
-        let mut risk_notes = vec![
-            "vector neighbors are discovery candidates only".to_string(),
-            "TF-IDF similar passages are lexical candidates until exact evidence is verified"
-                .to_string(),
-        ];
+        let mut risk_notes = Vec::new();
+        if req.include_vector {
+            risk_notes.push("vector neighbors are discovery candidates only".to_string());
+        }
+        if req.include_frontier || req.include_similar {
+            risk_notes.push(
+                "TF-IDF similar passages are lexical candidates until exact evidence is verified"
+                    .to_string(),
+            );
+        }
         risk_notes.push(format!("workflow_quality={}", req.quality));
 
         let budget = WorkflowBudget::new(req.max_elapsed_ms, req.max_component_ms);
@@ -5555,25 +5631,48 @@ impl ToolEngine {
             None
         };
         let similar = if req.include_similar {
-            let started = std::time::Instant::now();
-            let component_req = crate::tools::requests::SimilarRequest {
-                seed: req.seed_passage_id.clone(),
-                limit: req.limit,
-                shared_ngram_limit: 12,
-                shared_phrase_limit: 8,
-                min_shared_phrase_len: 4,
-            };
-            record_component_outcome(
-                run_budgeted_component(&budget, self.similar_impl(component_req)).await,
-                &mut components,
-                &mut component_warnings,
-                "similar",
-                "similar",
-                started,
-                |v| format!("{} similar passages", v.similar_passages.len()),
-                "TF-IDF similar failed or index is unavailable",
-                "TF-IDF similar timed out",
-            )
+            if let Some(frontier) = &frontier {
+                let similar_passages = frontier
+                    .payload
+                    .get("similar_passages")
+                    .and_then(|value| value.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                components.push(component_ok(
+                    "similar",
+                    "frontier",
+                    0,
+                    format!(
+                        "reused {} TF-IDF parallels already computed by frontier",
+                        similar_passages.len()
+                    ),
+                ));
+                Some(crate::tools::responses::SimilarResponse {
+                    schema: "sinorag-similar-v1",
+                    seed: req.seed_passage_id.clone(),
+                    similar_passages,
+                })
+            } else {
+                let started = std::time::Instant::now();
+                let component_req = crate::tools::requests::SimilarRequest {
+                    seed: req.seed_passage_id.clone(),
+                    limit: req.limit,
+                    shared_ngram_limit: 12,
+                    shared_phrase_limit: 8,
+                    min_shared_phrase_len: 4,
+                };
+                record_component_outcome(
+                    run_budgeted_component(&budget, self.similar_impl(component_req)).await,
+                    &mut components,
+                    &mut component_warnings,
+                    "similar",
+                    "similar",
+                    started,
+                    |v| format!("{} similar passages", v.similar_passages.len()),
+                    "TF-IDF similar failed or index is unavailable",
+                    "TF-IDF similar timed out",
+                )
+            }
         } else {
             components.push(component_skipped(
                 "similar",
@@ -5671,8 +5770,8 @@ impl ToolEngine {
             .map(|p| {
                 suggested_tool(
                     "evidence-search",
-                    serde_json::json!({"phrase": p, "include_attestation": true, "include_history": true}),
-                    "establish exact phrase evidence and history",
+                    serde_json::json!({"phrase": p, "include_attestation": true}),
+                    "establish exact phrase evidence without repeating the history already gathered here",
                 )
             })
             .collect();
@@ -5681,11 +5780,13 @@ impl ToolEngine {
             serde_json::json!({"passage_id": req.seed_passage_id.clone(), "direction": "around", "max_chars": 4000}),
             "read the seed passage in a continuous source stream with citation-aware chunks",
         ));
-        suggested_next_tools.push(suggested_tool(
-            "hybrid-discover",
-            serde_json::json!({"seed_passage_id": req.seed_passage_id.clone(), "limit": req.limit}),
-            "expand the seed into discovery candidates",
-        ));
+        if !req.include_frontier {
+            suggested_next_tools.push(suggested_tool(
+                "frontier",
+                serde_json::json!({"seed": req.seed_passage_id.clone(), "limit": req.limit}),
+                "add lexical discovery candidates when broader investigation is needed",
+            ));
+        }
         // At `summary` verbosity, drop the raw analysis blocks (they are the bulk
         // of the payload); the next-step guidance and risk notes are enough to
         // decide where to go next. `standard`/`full` keep whatever was requested.
@@ -5891,54 +5992,66 @@ impl ToolEngine {
     ) -> Result<crate::tools::responses::BatchEvidenceSearchResponse> {
         use crate::tools::responses::{BatchEvidenceSearchResponse, BatchEvidenceSearchResult};
 
-        let mut results = Vec::new();
+        use futures::{stream, StreamExt};
 
-        for phrase in &req.phrases {
-            match self
-                .search_impl(crate::tools::requests::SearchRequest {
-                    phrase: phrase.clone(),
-                    limit: req.limit,
-                    mode: "hits".to_string(),
-                    depth: "exact".to_string(),
-                    group_by: "work".to_string(),
-                    include_variants: false,
-                    limit_per_group: 5,
-                    brief: true,
-                    canon: None,
-                    source_work_id: None,
-                    tradition: None,
-                    period: None,
-                    origin: None,
-                    author: None,
-                    title: None,
-                    heading_path_prefix: None,
-                })
-                .await
-            {
-                Ok(search_result) => {
-                    let sample_passage_ids: Vec<String> = search_result
-                        .hits
-                        .iter()
-                        .take(5)
-                        .map(|h| h.passage_id.clone())
-                        .collect();
-                    results.push(BatchEvidenceSearchResult {
+        let limit = req.limit;
+        let concurrency = req.concurrency.clamp(1, 8);
+        let mut results = stream::iter(req.phrases.into_iter().enumerate().map(
+            |(index, phrase)| async move {
+                let result = match self
+                    .search_impl(crate::tools::requests::SearchRequest {
                         phrase: phrase.clone(),
-                        hit_count: search_result.hits.len(),
-                        sample_passage_ids,
-                        error: None,
-                    });
-                }
-                Err(err) => {
-                    results.push(BatchEvidenceSearchResult {
-                        phrase: phrase.clone(),
+                        limit,
+                        mode: "hits".to_string(),
+                        depth: "exact".to_string(),
+                        group_by: "work".to_string(),
+                        include_variants: false,
+                        limit_per_group: 5,
+                        brief: true,
+                        canon: None,
+                        source_work_id: None,
+                        tradition: None,
+                        period: None,
+                        origin: None,
+                        author: None,
+                        title: None,
+                        heading_path_prefix: None,
+                    })
+                    .await
+                {
+                    Ok(search_result) => {
+                        let sample_passage_ids: Vec<String> = search_result
+                            .hits
+                            .iter()
+                            .take(5)
+                            .map(|h| h.passage_id.clone())
+                            .collect();
+                        BatchEvidenceSearchResult {
+                            phrase,
+                            hit_count: search_result.hits.len(),
+                            returned_count: search_result.hits.len(),
+                            possibly_truncated: limit > 0 && search_result.hits.len() >= limit,
+                            sample_passage_ids,
+                            error: None,
+                        }
+                    }
+                    Err(err) => BatchEvidenceSearchResult {
+                        phrase,
                         hit_count: 0,
+                        returned_count: 0,
+                        possibly_truncated: false,
                         sample_passage_ids: Vec::new(),
                         error: Some(err.to_string()),
-                    });
-                }
-            }
-        }
+                    },
+                };
+                (index, result)
+            },
+        ))
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+        results.sort_unstable_by_key(|(index, _)| *index);
+        let results = results.into_iter().map(|(_, result)| result).collect();
 
         Ok(BatchEvidenceSearchResponse {
             schema: "sinorag-batch-evidence-search-v1",
@@ -6620,9 +6733,11 @@ impl ToolEngine {
                 .to_string(),
             "Alias hits may refer to more than one person.".to_string(),
         ];
-        if earliest_unambiguous.is_null() && mentions.iter().any(|r| {
-            r.get("is_primary_name").and_then(|v| v.as_bool()) == Some(true)
-        }) {
+        if earliest_unambiguous.is_null()
+            && mentions
+                .iter()
+                .any(|r| r.get("is_primary_name").and_then(|v| v.as_bool()) == Some(true))
+        {
             caveats.push(
                 "earliest_unambiguous is null: all primary-name hits have contains_person=false \
                  (compound word matches, not a personal name)."

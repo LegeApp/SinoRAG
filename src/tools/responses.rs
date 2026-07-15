@@ -811,7 +811,11 @@ pub struct BatchEvidenceSearchResponse {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct BatchEvidenceSearchResult {
     pub phrase: String,
+    /// Backward-compatible alias for `returned_count`; this is not guaranteed
+    /// to be the corpus-wide total when it reaches the requested limit.
     pub hit_count: usize,
+    pub returned_count: usize,
+    pub possibly_truncated: bool,
     pub sample_passage_ids: Vec<String>,
     pub error: Option<String>,
 }

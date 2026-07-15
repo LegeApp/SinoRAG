@@ -1,22 +1,21 @@
 //! Bilingual PDF generation with alternating Chinese/English paragraphs
-//! 
+//!
 //! Creates high-quality PDFs with professional typography, alternating paragraph layout,
 //! and hOCR layers for text accessibility.
 
-use anyhow::{Result, anyhow};
 use crate::fonts::FontContext;
-use crate::typography::{TextLayoutEngine, FormattedParagraph, FormattedLine};
 use crate::hocr_layer::{HocrGenerator, HocrPage};
+use crate::markdown::{parse_markdown, Align, InlineStyle, MdBlock, Span};
+use crate::typography::{FormattedLine, FormattedParagraph, TextLayoutEngine};
+use anyhow::{anyhow, Result};
+use fontdue::Font;
 use lopdf::{
-    Document, Object, Dictionary, Stream, StringFormat,
     content::{Content, Operation},
-    ObjectId,
+    Dictionary, Document, Object, ObjectId, Stream, StringFormat,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
-use fontdue::Font;
 use subsetter::GlyphRemapper;
-use crate::markdown::{parse_markdown, Align, InlineStyle, MdBlock, Span};
 
 /// Which embedded font face a glyph should be drawn with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,7 +211,7 @@ impl BilingualPdfGenerator {
     pub fn new(font_context: FontContext) -> Self {
         let layout_engine = crate::typography::create_layout_engine(font_context.clone());
         let hocr_generator = crate::hocr_layer::create_hocr_generator();
-        
+
         Self {
             font_context,
             layout_engine,
@@ -223,7 +222,7 @@ impl BilingualPdfGenerator {
             pages_id: (0, 0), // Will be set properly in initialize_document
         }
     }
-    
+
     /// Generate a bilingual PDF with alternating paragraphs
     pub fn generate_bilingual_pdf(
         &mut self,
@@ -238,15 +237,18 @@ impl BilingualPdfGenerator {
                 english_sections.len()
             ));
         }
-        
+
         // Initialize PDF document
         self.initialize_document()?;
-        
+
         // Create alternating paragraph layout
         let all_paragraphs = self.create_alternating_layout(chinese_sections, english_sections)?;
-        
+
         // Generate pages
-        println!("DEBUG: About to create pages from {} paragraphs", all_paragraphs.len());
+        println!(
+            "DEBUG: About to create pages from {} paragraphs",
+            all_paragraphs.len()
+        );
         let pages = self.create_pages_from_paragraphs(all_paragraphs)?;
         println!("DEBUG: Created {} pages", pages.len());
 
@@ -254,10 +256,12 @@ impl BilingualPdfGenerator {
         self.add_hocr_layer(&pages)?;
 
         // Save document
-        println!("DEBUG: Document has {} objects, pages_id: {:?}, {} actual pages in Kids array", 
-                 self.document.objects.len(), 
-                 self.pages_id,
-                 self.get_page_count()?);
+        println!(
+            "DEBUG: Document has {} objects, pages_id: {:?}, {} actual pages in Kids array",
+            self.document.objects.len(),
+            self.pages_id,
+            self.get_page_count()?
+        );
         self.save_document(output_path)?;
 
         Ok(())
@@ -284,7 +288,7 @@ impl BilingualPdfGenerator {
         self.save_document(output_path)?;
         Ok(())
     }
-    
+
     /// Initialize PDF document with fonts and metadata
     fn initialize_document(&mut self) -> Result<()> {
         // Add fonts to document (full embedding for the bilingual pipeline).
@@ -306,7 +310,10 @@ impl BilingualPdfGenerator {
 
         // Create info dictionary
         let mut info_dict = Dictionary::new();
-        info_dict.set("Producer", Object::string_literal("CBETA Bilingual PDF Creator"));
+        info_dict.set(
+            "Producer",
+            Object::string_literal("CBETA Bilingual PDF Creator"),
+        );
         info_dict.set("Creator", Object::string_literal("CBETA Project"));
         let info_id = self.document.add_object(Object::Dictionary(info_dict));
 
@@ -314,19 +321,23 @@ impl BilingualPdfGenerator {
         let mut catalog_dict = Dictionary::new();
         catalog_dict.set("Type", Object::Name(b"Catalog".to_vec()));
         catalog_dict.set("Pages", Object::Reference(pages_id));
-        
+
         let catalog_id = self.document.add_object(Object::Dictionary(catalog_dict));
 
         // Set catalog as root and info in trailer
-        self.document.trailer.set(b"Root", Object::Reference(catalog_id));
-        self.document.trailer.set(b"Info", Object::Reference(info_id));
+        self.document
+            .trailer
+            .set(b"Root", Object::Reference(catalog_id));
+        self.document
+            .trailer
+            .set(b"Info", Object::Reference(info_id));
 
         // Store pages ID for later use
         self.pages_id = pages_id;
 
         Ok(())
     }
-    
+
     /// Create alternating layout: Chinese #1 → English #1 → Chinese #2 → English #2
     fn create_alternating_layout(
         &mut self,
@@ -334,14 +345,18 @@ impl BilingualPdfGenerator {
         english_sections: &[String],
     ) -> Result<Vec<FormattedParagraph>> {
         let mut all_paragraphs = Vec::new();
-        
+
         let (content_x, content_y, content_width, _content_height) = self.safe_content_area();
         let mut current_y = content_y;
-        
+
         // Add spacing between alternating paragraphs
         let paragraph_spacing = self.font_context.get_line_height(true) * 0.5;
-        
-        for (index, (chinese_text, english_text)) in chinese_sections.iter().zip(english_sections.iter()).enumerate() {
+
+        for (index, (chinese_text, english_text)) in chinese_sections
+            .iter()
+            .zip(english_sections.iter())
+            .enumerate()
+        {
             // Add Chinese paragraph
             if !chinese_text.trim().is_empty() {
                 let chinese_para = self.layout_engine.layout_paragraph(
@@ -351,11 +366,11 @@ impl BilingualPdfGenerator {
                     content_width,
                     true, // is_chinese
                 )?;
-                
+
                 current_y += chinese_para.height + paragraph_spacing;
                 all_paragraphs.push(chinese_para);
             }
-            
+
             // Add English paragraph
             if !english_text.trim().is_empty() {
                 let english_para = self.layout_engine.layout_paragraph(
@@ -365,50 +380,55 @@ impl BilingualPdfGenerator {
                     content_width,
                     false, // is_chinese
                 )?;
-                
+
                 current_y += english_para.height + paragraph_spacing;
                 all_paragraphs.push(english_para);
             }
-            
+
             // Add section separator (optional)
             if index < chinese_sections.len() - 1 {
                 current_y += paragraph_spacing * 2.0; // Extra space between sections
             }
         }
-        
+
         Ok(all_paragraphs)
     }
-    
+
     /// Create PDF pages from formatted paragraphs
-    fn create_pages_from_paragraphs(&mut self, paragraphs: Vec<FormattedParagraph>) -> Result<Vec<HocrPage>> {
+    fn create_pages_from_paragraphs(
+        &mut self,
+        paragraphs: Vec<FormattedParagraph>,
+    ) -> Result<Vec<HocrPage>> {
         let mut pages = Vec::new();
         let (_content_x, _content_y, _content_width, content_height) = self.safe_content_area();
-        
+
         // Group paragraphs into pages
         let mut current_page_paragraphs = Vec::new();
         let mut current_page_height = 0.0;
-        
+
         for paragraph in &paragraphs {
-            if current_page_height + paragraph.height > content_height && !current_page_paragraphs.is_empty() {
+            if current_page_height + paragraph.height > content_height
+                && !current_page_paragraphs.is_empty()
+            {
                 // Current page is full, create it
                 let page = self.create_single_page(&current_page_paragraphs)?;
                 pages.push(page);
-                
+
                 // Start new page
                 current_page_paragraphs.clear();
                 current_page_height = 0.0;
             }
-            
+
             current_page_paragraphs.push(paragraph.clone());
             current_page_height += paragraph.height;
         }
-        
+
         // Create the last page if there are remaining paragraphs
         if !current_page_paragraphs.is_empty() {
             let page = self.create_single_page(&current_page_paragraphs)?;
             pages.push(page);
         }
-        
+
         Ok(pages)
     }
 
@@ -425,8 +445,9 @@ impl BilingualPdfGenerator {
         let column_gutter = 24.0_f32;
         let column_width = ((content_width - column_gutter) / 2.0).max(120.0);
         let right_column_x = content_x + column_width + column_gutter;
-        let row_spacing = (self.font_context.get_line_height(true) * self.font_context.paragraph_spacing.max(0.2))
-            .max(4.0);
+        let row_spacing = (self.font_context.get_line_height(true)
+            * self.font_context.paragraph_spacing.max(0.2))
+        .max(4.0);
 
         let mut current_y = content_y;
         let mut current_page_paragraphs: Vec<FormattedParagraph> = Vec::new();
@@ -490,13 +511,10 @@ impl BilingualPdfGenerator {
         let zh_para = if zh_text.trim().is_empty() {
             None
         } else {
-            Some(self.layout_engine.layout_paragraph(
-                zh_text,
-                left_x,
-                row_y,
-                column_width,
-                true,
-            )?)
+            Some(
+                self.layout_engine
+                    .layout_paragraph(zh_text, left_x, row_y, column_width, true)?,
+            )
         };
 
         let en_para = if en_text.trim().is_empty() {
@@ -511,91 +529,121 @@ impl BilingualPdfGenerator {
             )?)
         };
 
-        let row_height = zh_para.as_ref().map(|p| p.height).unwrap_or(0.0)
+        let row_height = zh_para
+            .as_ref()
+            .map(|p| p.height)
+            .unwrap_or(0.0)
             .max(en_para.as_ref().map(|p| p.height).unwrap_or(0.0))
             .max(self.font_context.get_line_height(true));
 
         Ok((zh_para, en_para, row_height))
     }
-    
+
     /// Create a single PDF page from paragraphs
     fn create_single_page(&mut self, paragraphs: &[FormattedParagraph]) -> Result<HocrPage> {
         let page_id = self.document.new_object_id();
-        
+
         // Create page content
         let mut content = Content {
             operations: Vec::new(),
         };
-        
+
         // Add each paragraph to the page content
         for paragraph in paragraphs {
             self.add_paragraph_to_content(&mut content, paragraph)?;
         }
-        
+
         // Create page object
         let mut page_dict = Dictionary::new();
         page_dict.set("Type", Object::Name(b"Page".to_vec()));
         page_dict.set("Parent", Object::Reference(self.pages_id)); // Reference to pages object
         page_dict.set("Resources", self.create_resources_dict()?);
-        page_dict.set("MediaBox", Object::Array(vec![
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Real(self.font_context.page_width),
-            Object::Real(self.font_context.page_height),
-        ]));
+        page_dict.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Real(self.font_context.page_width),
+                Object::Real(self.font_context.page_height),
+            ]),
+        );
 
         let content_stream = Stream::new(Dictionary::new(), content.encode()?);
         let content_id = self.document.add_object(content_stream);
         page_dict.set("Contents", Object::Reference(content_id));
 
         // Add page to document
-        self.document.objects.insert(page_id, Object::Dictionary(page_dict));
+        self.document
+            .objects
+            .insert(page_id, Object::Dictionary(page_dict));
 
         // Add to pages tree
         self.add_page_to_tree(page_id)?;
-        
+
         // Generate hOCR for this page
         let hocr_page = self.hocr_generator.generate_hocr(paragraphs)?;
-        
+
         Ok(hocr_page)
     }
-    
+
     /// Add a paragraph to the page content with professional typography
-    fn add_paragraph_to_content(&mut self, content: &mut Content, paragraph: &FormattedParagraph) -> Result<()> {
-        let font_name = if paragraph.is_chinese { "chinese" } else { "english" };
+    fn add_paragraph_to_content(
+        &mut self,
+        content: &mut Content,
+        paragraph: &FormattedParagraph,
+    ) -> Result<()> {
+        let font_name = if paragraph.is_chinese {
+            "chinese"
+        } else {
+            "english"
+        };
         let font_size = paragraph.font_size;
 
         // Clip only by column width (full page height), so text never bleeds across columns
         // while avoiding vertical clipping artifacts on glyph ascenders/descenders.
         content.operations.push(Operation::new("q", vec![]));
-        content.operations.push(Operation::new("re", vec![
-            Object::Real(paragraph.x),
-            Object::Real(0.0),
-            Object::Real(paragraph.width),
-            Object::Real(self.font_context.page_height),
-        ]));
+        content.operations.push(Operation::new(
+            "re",
+            vec![
+                Object::Real(paragraph.x),
+                Object::Real(0.0),
+                Object::Real(paragraph.width),
+                Object::Real(self.font_context.page_height),
+            ],
+        ));
         content.operations.push(Operation::new("W", vec![]));
         content.operations.push(Operation::new("n", vec![]));
 
         content.operations.push(Operation::new("BT", vec![]));
-        content.operations.push(Operation::new("Tf", vec![
-            Object::Name(font_name.as_bytes().to_vec()),
-            Object::Real(font_size),
-        ]));
+        content.operations.push(Operation::new(
+            "Tf",
+            vec![
+                Object::Name(font_name.as_bytes().to_vec()),
+                Object::Real(font_size),
+            ],
+        ));
 
         for line in &paragraph.lines {
             // Use baseline positioning for proper leading
             let pdf_y = self.font_context.page_height - (paragraph.y + line.baseline);
 
-            content.operations.push(Operation::new("Tm", vec![
-                Object::Real(1.0), Object::Real(0.0),
-                Object::Real(0.0), Object::Real(1.0),
-                Object::Real(paragraph.x + line.x), Object::Real(pdf_y),
-            ]));
+            content.operations.push(Operation::new(
+                "Tm",
+                vec![
+                    Object::Real(1.0),
+                    Object::Real(0.0),
+                    Object::Real(0.0),
+                    Object::Real(1.0),
+                    Object::Real(paragraph.x + line.x),
+                    Object::Real(pdf_y),
+                ],
+            ));
 
             // Build TJ array with kerning + tracking
             let tj = self.build_tj_array(line)?;
-            content.operations.push(Operation::new("TJ", vec![Object::Array(tj)]));
+            content
+                .operations
+                .push(Operation::new("TJ", vec![Object::Array(tj)]));
         }
 
         content.operations.push(Operation::new("ET", vec![]));
@@ -605,13 +653,17 @@ impl BilingualPdfGenerator {
 
     /// Build TJ array with proper Chinese character handling
     fn build_tj_array(&mut self, line: &FormattedLine) -> Result<Vec<Object>> {
-        let font = if line.is_chinese { 
-            self.font_context.chinese_font.clone() 
-        } else { 
-            self.font_context.english_font.clone() 
+        let font = if line.is_chinese {
+            self.font_context.chinese_font.clone()
+        } else {
+            self.font_context.english_font.clone()
         };
         let size = line.font_size;
-        let tracking = if line.is_chinese { self.font_context.tracking_chinese } else { self.font_context.tracking_english };
+        let tracking = if line.is_chinese {
+            self.font_context.tracking_chinese
+        } else {
+            self.font_context.tracking_english
+        };
         let _scale = size / font.units_per_em() as f32;
 
         let chars: Vec<char> = line.text.chars().collect();
@@ -647,7 +699,8 @@ impl BilingualPdfGenerator {
                 if ch == ' ' {
                     if let Some(&ratio) = space_adjustments_map.get(&char_position) {
                         // Convert adjustment ratio to thousandths of em
-                        let space_width = self.font_context.calculate_text_width(" ", line.is_chinese);
+                        let space_width =
+                            self.font_context.calculate_text_width(" ", line.is_chinese);
                         let extra_space = space_width * ratio;
                         adjust += extra_space * 1000.0 / size;
                     }
@@ -685,7 +738,7 @@ impl BilingualPdfGenerator {
 
         Ok(Object::Dictionary(resources))
     }
-    
+
     /// Add a fully-embedded font (no subsetting).
     fn add_font_to_document(&mut self, name: &str) -> Result<ObjectId> {
         self.add_font_to_document_impl(name, None)
@@ -754,13 +807,19 @@ impl BilingualPdfGenerator {
         let mut font_descriptor = Dictionary::new();
         font_descriptor.set("Type", Object::Name(b"FontDescriptor".to_vec()));
         font_descriptor.set("FontName", Object::Name(pdf_font_name.clone().into_bytes()));
-        font_descriptor.set("Flags", Object::Integer(if is_chinese_font { 4 } else { 32 }));
-        font_descriptor.set("FontBBox", Object::Array(vec![
-            Object::Integer(-200),
-            Object::Integer(-300),
-            Object::Integer(1400),
-            Object::Integer(1100),
-        ]));
+        font_descriptor.set(
+            "Flags",
+            Object::Integer(if is_chinese_font { 4 } else { 32 }),
+        );
+        font_descriptor.set(
+            "FontBBox",
+            Object::Array(vec![
+                Object::Integer(-200),
+                Object::Integer(-300),
+                Object::Integer(1400),
+                Object::Integer(1100),
+            ]),
+        );
         font_descriptor.set("ItalicAngle", Object::Integer(0));
         font_descriptor.set("Ascent", Object::Integer(880));
         font_descriptor.set("Descent", Object::Integer(-220));
@@ -775,19 +834,24 @@ impl BilingualPdfGenerator {
             font_descriptor.set(font_file_key.as_str(), Object::Reference(font_stream_id));
             is_embedded = true;
         }
-        let font_descriptor_id = self.document.add_object(Object::Dictionary(font_descriptor));
+        let font_descriptor_id = self
+            .document
+            .add_object(Object::Dictionary(font_descriptor));
 
         let mut cidfont = Dictionary::new();
         cidfont.set("Type", Object::Name(b"Font".to_vec()));
         cidfont.set("Subtype", Object::Name(b"CIDFontType2".to_vec()));
         cidfont.set("BaseFont", Object::Name(pdf_font_name.clone().into_bytes()));
-        cidfont.set("CIDSystemInfo", Object::Dictionary({
-            let mut d = Dictionary::new();
-            d.set("Registry", Object::string_literal("Adobe"));
-            d.set("Ordering", Object::string_literal("Identity"));
-            d.set("Supplement", Object::Integer(0));
-            d
-        }));
+        cidfont.set(
+            "CIDSystemInfo",
+            Object::Dictionary({
+                let mut d = Dictionary::new();
+                d.set("Registry", Object::string_literal("Adobe"));
+                d.set("Ordering", Object::string_literal("Identity"));
+                d.set("Supplement", Object::Integer(0));
+                d
+            }),
+        );
         cidfont.set("FontDescriptor", Object::Reference(font_descriptor_id));
         cidfont.set("DW", Object::Integer(1000));
         if is_embedded {
@@ -799,14 +863,19 @@ impl BilingualPdfGenerator {
         }
         let cidfont_id = self.document.add_object(Object::Dictionary(cidfont));
 
-        let tounicode_id = self.document.add_object(self.create_identity_tounicode_cmap_stream());
+        let tounicode_id = self
+            .document
+            .add_object(self.create_identity_tounicode_cmap_stream());
 
         let mut type0 = Dictionary::new();
         type0.set("Type", Object::Name(b"Font".to_vec()));
         type0.set("Subtype", Object::Name(b"Type0".to_vec()));
         type0.set("BaseFont", Object::Name(pdf_font_name.into_bytes()));
         type0.set("Encoding", Object::Name(b"Identity-H".to_vec()));
-        type0.set("DescendantFonts", Object::Array(vec![Object::Reference(cidfont_id)]));
+        type0.set(
+            "DescendantFonts",
+            Object::Array(vec![Object::Reference(cidfont_id)]),
+        );
         type0.set("ToUnicode", Object::Reference(tounicode_id));
 
         let font_id = self.document.add_object(Object::Dictionary(type0));
@@ -901,7 +970,11 @@ end"
         Object::Stream(Stream::new(Dictionary::new(), map))
     }
 
-    fn create_embeddable_font_stream(&self, font_path: &str, font_data: &[u8]) -> Option<(String, Object)> {
+    fn create_embeddable_font_stream(
+        &self,
+        font_path: &str,
+        font_data: &[u8],
+    ) -> Option<(String, Object)> {
         if font_data.is_empty() {
             return None;
         }
@@ -928,7 +1001,7 @@ end"
         // TTC collections are not embedded yet in this pipeline.
         None
     }
-    
+
     /// Add page to pages tree
     fn add_page_to_tree(&mut self, page_id: ObjectId) -> Result<()> {
         // Get the current count of kids to update the Count field
@@ -936,12 +1009,12 @@ end"
             let pages_obj = self.document.get_object(self.pages_id)?;
             if let Object::Dictionary(ref pages_dict) = pages_obj {
                 let kids = pages_dict.get(b"Kids")?.as_array()?;
-                kids.len() + 1  // Adding one new page
+                kids.len() + 1 // Adding one new page
             } else {
                 return Err(anyhow!("Pages object is not a dictionary"));
             }
         };
-        
+
         // Now update both Kids and Count
         let pages_obj = self.document.get_object_mut(self.pages_id)?;
         if let Object::Dictionary(ref mut pages_dict) = pages_obj {
@@ -955,18 +1028,18 @@ end"
 
         Ok(())
     }
-    
+
     /// Add hOCR layer to the document
     fn add_hocr_layer(&mut self, pages: &[HocrPage]) -> Result<()> {
         // Generate hOCR HTML
         let _hocr_html = self.hocr_generator.generate_hocr_html(pages)?;
-        
+
         // Add hOCR as attachment or separate layer
         // This would be implemented with PDF annotations or attachments
-        
+
         Ok(())
     }
-    
+
     /// Save the document to file
     fn save_document(&mut self, output_path: &str) -> Result<()> {
         // Ensure the document is properly structured before saving
@@ -974,7 +1047,7 @@ end"
         self.document.save(output_path)?;
         Ok(())
     }
-    
+
     /// Helper function to get the page count from the Kids array
     fn get_page_count(&self) -> Result<usize> {
         let pages_obj = self.document.get_object(self.pages_id)?;
@@ -1171,14 +1244,7 @@ impl BilingualPdfGenerator {
                     let bar_w = 3.0;
                     let top = self.font_context.page_height - y_start;
                     let bot = self.font_context.page_height - ctx.y;
-                    self.md_fill_rect(
-                        ctx,
-                        x_left,
-                        bot,
-                        bar_w,
-                        top - bot,
-                        (0.6, 0.6, 0.65),
-                    );
+                    self.md_fill_rect(ctx, x_left, bot, bar_w, top - bot, (0.6, 0.6, 0.65));
                 }
                 ctx.y += base * 0.4;
             }
@@ -1426,14 +1492,15 @@ impl BilingualPdfGenerator {
         let mut cur: Vec<MdTok> = Vec::new();
         let mut cur_w = 0.0f32;
 
-        let finalize = |cur: &mut Vec<MdTok>, lines: &mut Vec<MdLine>, base_size: f32, this: &Self| {
-            // Trim trailing spaces.
-            while cur.last().map_or(false, |t| t.is_space) {
-                cur.pop();
-            }
-            this.md_tokens_to_line(cur, base_size, lines);
-            cur.clear();
-        };
+        let finalize =
+            |cur: &mut Vec<MdTok>, lines: &mut Vec<MdLine>, base_size: f32, this: &Self| {
+                // Trim trailing spaces.
+                while cur.last().map_or(false, |t| t.is_space) {
+                    cur.pop();
+                }
+                this.md_tokens_to_line(cur, base_size, lines);
+                cur.clear();
+            };
 
         for tok in toks {
             if tok.force_break {
@@ -1577,7 +1644,10 @@ impl BilingualPdfGenerator {
                 Object::Real(baseline),
             ],
         ));
-        ops.push(Operation::new("TJ", vec![Object::Array(self.md_run_tj(run))]));
+        ops.push(Operation::new(
+            "TJ",
+            vec![Object::Array(self.md_run_tj(run))],
+        ));
         ops.push(Operation::new("ET", vec![]));
 
         // Underline (links) and strikethrough.
@@ -1680,7 +1750,14 @@ impl BilingualPdfGenerator {
         // Bottom padding background.
         self.md_ensure(ctx, pad);
         let bg_top = self.font_context.page_height - ctx.y;
-        self.md_fill_rect(ctx, x_left, bg_top - pad, max_width, pad, (0.96, 0.96, 0.97));
+        self.md_fill_rect(
+            ctx,
+            x_left,
+            bg_top - pad,
+            max_width,
+            pad,
+            (0.96, 0.96, 0.97),
+        );
         ctx.y += pad + base * 0.5;
     }
 
@@ -1738,10 +1815,7 @@ impl BilingualPdfGenerator {
         } else {
             1.0
         };
-        let col_w: Vec<f32> = natural
-            .iter()
-            .map(|n| (n + 2.0 * pad) * scale)
-            .collect();
+        let col_w: Vec<f32> = natural.iter().map(|n| (n + 2.0 * pad) * scale).collect();
 
         ctx.y += base * 0.3;
 
@@ -1891,7 +1965,8 @@ impl BilingualPdfGenerator {
         let rgb = img.to_rgb8();
         let (w, h) = (rgb.width(), rgb.height());
 
-        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(rgb.as_raw()).ok()?;
         let compressed = encoder.finish().ok()?;
 
@@ -1911,7 +1986,15 @@ impl BilingualPdfGenerator {
     }
 
     /// Filled rectangle (PDF coordinates), saved/restored so it doesn't leak state.
-    fn md_fill_rect(&self, ctx: &mut MdCtx, x: f32, y: f32, w: f32, h: f32, color: (f32, f32, f32)) {
+    fn md_fill_rect(
+        &self,
+        ctx: &mut MdCtx,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: (f32, f32, f32),
+    ) {
         let ops = ctx.ops();
         ops.push(Operation::new("q", vec![]));
         ops.push(Operation::new(
@@ -1935,7 +2018,15 @@ impl BilingualPdfGenerator {
         ops.push(Operation::new("Q", vec![]));
     }
 
-    fn md_stroke_rect(&self, ctx: &mut MdCtx, x: f32, y: f32, w: f32, h: f32, color: (f32, f32, f32)) {
+    fn md_stroke_rect(
+        &self,
+        ctx: &mut MdCtx,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: (f32, f32, f32),
+    ) {
         let ops = ctx.ops();
         ops.push(Operation::new("q", vec![]));
         ops.push(Operation::new(
@@ -1996,7 +2087,7 @@ pub fn create_bilingual_pdf(
 ) -> Result<()> {
     let font_context = crate::fonts::initialize_fonts()?;
     let mut generator = create_bilingual_generator(font_context);
-    
+
     generator.generate_bilingual_pdf(chinese_sections, english_sections, output_path)
 }
 
@@ -2008,7 +2099,7 @@ pub fn create_bilingual_pdf_with_context(
     font_context: &crate::fonts::FontContext,
 ) -> Result<()> {
     let mut generator = create_bilingual_generator(font_context.clone());
-    
+
     generator.generate_bilingual_pdf(chinese_sections, english_sections, output_path)
 }
 

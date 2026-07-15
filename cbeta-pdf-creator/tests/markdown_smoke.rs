@@ -46,7 +46,11 @@ fn markdown_to_pdf_smoke() {
     create_markdown_pdf(SAMPLE, out_str).expect("markdown conversion failed");
 
     let bytes = std::fs::read(&out).expect("output pdf not written");
-    assert!(bytes.len() > 1000, "pdf suspiciously small: {} bytes", bytes.len());
+    assert!(
+        bytes.len() > 1000,
+        "pdf suspiciously small: {} bytes",
+        bytes.len()
+    );
     assert!(bytes.starts_with(b"%PDF-"), "output is not a PDF");
 
     // Re-open with lopdf and confirm it has at least one page.

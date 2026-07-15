@@ -6,8 +6,8 @@
 
 pub use crate::bilingual_generator::*;
 pub use crate::fonts::*;
-pub use crate::typography::*;
 pub use crate::hocr_layer::*;
+pub use crate::typography::*;
 
 // Re-export main functionality for backward compatibility
-pub use super::{generate_bilingual_pdf, init_pdf_creator, cleanup_pdf_creator, set_pdf_options};
+pub use super::{cleanup_pdf_creator, generate_bilingual_pdf, init_pdf_creator, set_pdf_options};

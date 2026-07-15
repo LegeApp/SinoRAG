@@ -14,9 +14,9 @@ use anyhow::{Context, Result};
 use hf_hub::api::sync::ApiRepo;
 #[cfg(feature = "hf-hub")]
 use std::path::PathBuf;
-use tokenizers::Tokenizer;
 #[cfg(feature = "tensorrt")]
 use tokenizers::PaddingStrategy;
+use tokenizers::Tokenizer;
 
 #[cfg(feature = "hf-hub")]
 use super::TextInitOptions;
@@ -67,7 +67,8 @@ impl TextEmbedding {
         model: UserDefinedEmbeddingModel,
         options: super::InitOptionsUserDefined,
     ) -> Result<Self> {
-        let mut tokenizer = crate::common::load_tokenizer(model.tokenizer_files, options.max_length)?;
+        let mut tokenizer =
+            crate::common::load_tokenizer(model.tokenizer_files, options.max_length)?;
         if matches!(options.backend, EmbeddingBackendConfig::TensorRt { .. }) {
             set_fixed_padding(&mut tokenizer, options.max_length)?;
         }
@@ -159,9 +160,7 @@ impl TextEmbedding {
                 TextEmbeddingBackend::TensorRt {
                     engine_path,
                     engine,
-                } => {
-                    run_tensorrt(engine_path, engine, &encoded, self.pooling.clone())?
-                }
+                } => run_tensorrt(engine_path, engine, &encoded, self.pooling.clone())?,
                 #[cfg(not(feature = "tensorrt"))]
                 TextEmbeddingBackend::TensorRt { engine_path } => {
                     run_tensorrt(engine_path, &encoded, self.pooling.clone())?

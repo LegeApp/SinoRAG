@@ -5,9 +5,9 @@
 //! typesetting guide (no widows/orphans, no stacked hyphens, no rivers, proper rag, etc.). [file:1]
 
 use crate::fonts::{FontContext, Justification};
+use anyhow::Result;
 use unicode_bidi::BidiInfo;
 use unicode_script::{Script, UnicodeScript};
-use anyhow::Result;
 
 /// Text tokens for professional paragraph composition. [file:6]
 #[derive(Debug, Clone, PartialEq)]
@@ -79,7 +79,12 @@ impl FormattedLine {
             .iter()
             .rev()
             .find(|t| !matches!(t, TextToken::Space))
-            .map(|t| matches!(t, TextToken::Punctuation('-') | TextToken::DiscretionaryHyphen))
+            .map(|t| {
+                matches!(
+                    t,
+                    TextToken::Punctuation('-') | TextToken::DiscretionaryHyphen
+                )
+            })
             .unwrap_or(false)
     }
 }
@@ -276,7 +281,8 @@ impl TextLayoutEngine {
     ) -> Result<Vec<FormattedLine>> {
         let mut lines = Vec::new();
         let breakpoints = self.find_breakpoints(tokens, is_chinese)?;
-        let optimal_breaks = self.greedy_line_breaks(tokens, &breakpoints, max_width, is_chinese)?;
+        let optimal_breaks =
+            self.greedy_line_breaks(tokens, &breakpoints, max_width, is_chinese)?;
         let mut line_start = 0;
         let mut baseline = 0.0;
 
@@ -312,7 +318,12 @@ impl TextLayoutEngine {
                 .iter()
                 .rev()
                 .find(|t| !matches!(t, TextToken::Space))
-                .map(|t| matches!(t, TextToken::Punctuation('-') | TextToken::DiscretionaryHyphen))
+                .map(|t| {
+                    matches!(
+                        t,
+                        TextToken::Punctuation('-') | TextToken::DiscretionaryHyphen
+                    )
+                })
                 .unwrap_or(false);
 
             lines.push(FormattedLine {
@@ -370,7 +381,11 @@ impl TextLayoutEngine {
                 continue;
             }
 
-            let break_at = if best_break > line_start { best_break } else { i - 1 };
+            let break_at = if best_break > line_start {
+                best_break
+            } else {
+                i - 1
+            };
             if break_at <= line_start {
                 // Guarantee forward progress for very long/unbreakable chunks.
                 breaks.push(i);
@@ -515,7 +530,8 @@ impl TextLayoutEngine {
 
         // Keep tracking changes within reasonable bounds to avoid rivers/loose lines. [file:1]
         let max_ratio = 0.5; // clamp to +50% per space
-        let clamped_adjustment = space_adjustment.clamp(-base_space_width * max_ratio, base_space_width * max_ratio);
+        let clamped_adjustment =
+            space_adjustment.clamp(-base_space_width * max_ratio, base_space_width * max_ratio);
 
         let mut adjusted_tokens = Vec::new();
         let mut adjustments = Vec::new();
@@ -668,7 +684,8 @@ impl TextLayoutEngine {
 
             let remove_count = first_word_tokens.len();
             lines[last_index].tokens.drain(0..remove_count);
-            lines[last_index].width = self.calculate_line_width(&lines[last_index].tokens, is_chinese);
+            lines[last_index].width =
+                self.calculate_line_width(&lines[last_index].tokens, is_chinese);
             lines[last_index].text = lines[last_index].tokens_to_string();
         }
 
@@ -717,7 +734,9 @@ impl TextLayoutEngine {
         let added_width = self.calculate_line_width(&trailing_tokens, is_chinese);
         if lines[index + 1].width + added_width <= max_width {
             // Move tokens.
-            lines[index + 1].tokens.splice(0..0, trailing_tokens.clone());
+            lines[index + 1]
+                .tokens
+                .splice(0..0, trailing_tokens.clone());
             lines[index + 1].width += added_width;
             lines[index + 1].text = lines[index + 1].tokens_to_string();
 
@@ -809,18 +828,7 @@ impl TextLayoutEngine {
     fn is_natural_break_point(&self, ch: char) -> bool {
         matches!(
             ch,
-            '，'
-                | '。'
-                | '；'
-                | '：'
-                | '？'
-                | '！'
-                | '「'
-                | '」'
-                | '『'
-                | '』'
-                | '（'
-                | '）'
+            '，' | '。' | '；' | '：' | '？' | '！' | '「' | '」' | '『' | '』' | '（' | '）'
         )
     }
 
@@ -866,7 +874,11 @@ impl TextLayoutEngine {
     }
 
     /// Break a long English word into smaller pieces (static version). [file:6]
-    fn break_long_word_static(word: &str, max_width: f32, font_context: &mut FontContext) -> Vec<String> {
+    fn break_long_word_static(
+        word: &str,
+        max_width: f32,
+        font_context: &mut FontContext,
+    ) -> Vec<String> {
         let mut pieces = Vec::new();
         let mut current_piece = String::new();
 

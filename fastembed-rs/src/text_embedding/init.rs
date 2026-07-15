@@ -10,14 +10,14 @@ use crate::{
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
 
-#[cfg(feature = "ort-backend")]
-use ort::{execution_providers::ExecutionProviderDispatch, session::Session};
+#[cfg(not(feature = "ort-backend"))]
+use super::OutputKey;
 #[cfg(not(feature = "ort-backend"))]
 use crate::ExecutionProviderDispatch;
 #[cfg(feature = "ort-backend")]
 use crate::OutputKey;
-#[cfg(not(feature = "ort-backend"))]
-use super::OutputKey;
+#[cfg(feature = "ort-backend")]
+use ort::{execution_providers::ExecutionProviderDispatch, session::Session};
 
 use super::DEFAULT_MAX_LENGTH;
 
@@ -172,8 +172,12 @@ pub(crate) enum TextEmbeddingBackend {
         engine: crate::tensorrt::HostEmbeddingEngine,
     },
     #[cfg(not(feature = "tensorrt"))]
-    TensorRt { engine_path: PathBuf },
-    Cpu { model_path: PathBuf },
+    TensorRt {
+        engine_path: PathBuf,
+    },
+    Cpu {
+        model_path: PathBuf,
+    },
     #[cfg(feature = "ort-backend")]
     Ort,
 }

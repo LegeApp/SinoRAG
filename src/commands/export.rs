@@ -52,6 +52,13 @@ pub fn pdf(input_markdown: PathBuf, out: PathBuf, side_by_side: bool) -> Result<
     pdf_from_markdown(&markdown, out, side_by_side)
 }
 
+/// Render Markdown already held by the caller without requiring an
+/// intermediate file. This is the sink used by the agent-facing `pdf-build`
+/// tool's inline `markdown` argument.
+pub fn pdf_markdown(markdown: &str, out: PathBuf, side_by_side: bool) -> Result<()> {
+    pdf_from_markdown(markdown, out, side_by_side)
+}
+
 pub fn pdf_report(
     input: PathBuf,
     out: PathBuf,
@@ -159,6 +166,22 @@ pub fn report_build(
 /// still evolving alongside the research-packet contract, so we accept
 /// whatever the model emits and let the formatter do the best it can.
 fn pdf_from_markdown(markdown: &str, out: PathBuf, side_by_side: bool) -> Result<()> {
+    if !side_by_side {
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut context = cbeta_pdf_creator::FontContext::initialize_fonts()?;
+        context.set_options(595.0, 842.0, 72.0, 12.5, 11.5, 1.35, 8.0, 6.0, 0.45);
+        let output = out.to_string_lossy().to_string();
+        // The Markdown renderer preserves headings/lists and subsets each font
+        // to the glyphs actually used. Routing ordinary prose through the
+        // bilingual section renderer would embed the full CJK font even for an
+        // English-only page, inflating a small report by many megabytes.
+        cbeta_pdf_creator::create_markdown_pdf_with_context(markdown, &output, &context)?;
+        println!("wrote {}", out.display());
+        return Ok(());
+    }
+
     let (zh, en) = markdown_to_pdf_sections(markdown);
     pdf_from_sections(&zh, &en, out, side_by_side)
 }
@@ -231,6 +254,27 @@ fn strip_markdown(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inline_markdown_pdf_uses_subsetted_fonts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("inline.pdf");
+
+        super::pdf_markdown(
+            "# Finding\n\nEvery claim needs a passage ID.",
+            out.clone(),
+            false,
+        )
+        .expect("markdown PDF generation");
+
+        let bytes = std::fs::read(out).expect("pdf bytes");
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(
+            bytes.len() < 1_000_000,
+            "small prose PDF was {} bytes",
+            bytes.len()
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn pdf_report_writes_basic_pdf_from_json() {

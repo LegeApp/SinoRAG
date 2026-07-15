@@ -454,7 +454,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "pdf-build",
                 audience: ToolAudience::DefaultAgent,
-                description: "Build a PDF with the built-in Lopdf renderer. Accepts raw Markdown directly via input_markdown — hand-written or model-authored prose, no adjudication or evidence pipeline required — or structured report/evidence JSON via input_json for the basic report template. No external PDF tools are required.",
+                description: "Build a PDF with the built-in Lopdf renderer. Pass raw model-authored prose in `markdown`, a Markdown file path in `input_markdown`, or structured report/evidence JSON in `input_json`. No adjudication pipeline or external PDF tools are required.",
                 input_schema: schema_for::<PdfBuildRequest>(),
                 output_schema: schema_for::<PdfBuildResponse>(),
                 requires: vec![],
@@ -469,11 +469,18 @@ pub fn tool_defs() -> Vec<ToolDef> {
                         }),
                     },
                     ToolExample {
-                        title: "Build PDF from model-authored Markdown",
+                        title: "Build PDF from a Markdown file",
                         args: serde_json::json!({
                             "input_markdown": "GraphDiscovery/Runs/text-reuse-discovery/dossiers/test3.report.md",
                             "out": "GraphDiscovery/Runs/text-reuse-discovery/dossiers/test3.report.pdf",
                             "side_by_side": true
+                        }),
+                    },
+                    ToolExample {
+                        title: "Build PDF directly from model-authored prose",
+                        args: serde_json::json!({
+                            "markdown": "# Finding\n\nThe evidence supports a qualified conclusion.",
+                            "out": "output/finding.pdf"
                         }),
                     }
                 ],
@@ -490,7 +497,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "works",
                 audience: ToolAudience::Specialist,
-                description: "List works in the catalog, optionally filtered by tradition/period/canon/author — or look up a single work directly with work_id (title, author, period, canon, traditions) without reading any passage text.",
+                description: "List works in the catalog, optionally filtered by tradition/period/canon or normalized title/author substring — or look up a single work directly with work_id (title, author, period, canon, traditions) without reading passage text.",
                 input_schema: schema_for::<WorksRequest>(),
                 output_schema: schema_for::<WorksResponse>(),
                 requires: vec!["catalog.index"],
@@ -513,6 +520,12 @@ pub fn tool_defs() -> Vec<ToolDef> {
                         args: serde_json::json!({
                             "tradition": "canon",
                             "limit": 50
+                        }),
+                    },
+                    ToolExample {
+                        title: "Find works by normalized title spelling",
+                        args: serde_json::json!({
+                            "title": "万松"
                         }),
                     }
                 ],
@@ -1104,7 +1117,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "source-investigate",
                 audience: ToolAudience::DefaultAgent,
-                description: "Gather seed passage context, frontier, similarity, vector neighbors, and phrase histories for source investigation.",
+                description: "Investigate one seed passage with context and a lexical discovery frontier. The fast default avoids duplicate TF-IDF output and slow semantic search; set include_similar=true for a separate reused similarity block, include_vector=true for opt-in vector neighbors, and pass phrases only when historical distributions are needed.",
                 input_schema: schema_for::<SourceInvestigateRequest>(),
                 output_schema: schema_for::<SourceInvestigateResponse>(),
                 requires: vec!["passages.parquet", "doc_table.bin"],
@@ -1161,7 +1174,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "batch-evidence-search",
                 audience: ToolAudience::Specialist,
-                description: "Search for multiple phrases and return compact per-phrase summaries.",
+                description: "Search independent phrases concurrently and return compact per-phrase hit counts plus sample passage IDs. Prefer this over many separate search calls when no result depends on another.",
                 input_schema: schema_for::<BatchEvidenceSearchRequest>(),
                 output_schema: schema_for::<BatchEvidenceSearchResponse>(),
                 requires: vec!["passages.parquet"],
@@ -1171,7 +1184,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
                         title: "Search multiple phrases",
                         args: serde_json::json!({
                             "phrases": ["金剛經", "般若波羅蜜多"],
-                            "limit": 10
+                            "limit": 10,
+                            "concurrency": 4
                         }),
                     }
                 ],
