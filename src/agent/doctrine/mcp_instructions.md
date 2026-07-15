@@ -1,8 +1,8 @@
 # SinoRAG MCP Server
 
 This server exposes the SinoRAG corpus-research toolset over MCP. Each tool
-returns a JSON envelope `{ ok, tool, result | error, meta }`. Read `error.kind`
-when `ok` is false — common kinds include `unknown_tool`, `readonly_violation`,
+returns a JSON envelope `{ ok, tool, result | error, meta }`. Read `error.code`
+when `ok` is false — common codes include `unknown_tool`, `readonly_violation`,
 `admin_tool_disabled`, and `missing_artifact`.
 
 All corpus access goes through this server's tools — do not shell out to
@@ -63,6 +63,14 @@ Treat every discovery result (`frontier`, `similar`, `vector-neighbors`,
 `hybrid-discover`, `source-investigate`) as a candidate lead. Convert it into
 evidence only after exact verification and close reading.
 
+For `source-read`, send one compact anchor per call: `source_work_id` starts at
+the work's beginning, `passage_id` reads around that hit, and `cursor` continues
+from a prior response. Do not repeat `source_work_id` alongside `passage_id`;
+the complete passage ID already identifies its work. Its `#anchor` suffix is a
+required part of the string and is valid JSON. If the MCP client itself reports
+JSON parsing before execution, the call never reached SinoRAG; retry one compact
+call without issuing another tool call concurrently.
+
 ---
 
 ## Output discipline
@@ -76,7 +84,7 @@ evidence only after exact verification and close reading.
   inference, describe zero hits as absence in the loaded corpus rather than
   proof of nonexistence, and do not turn the earliest loaded attestation into
   an unsupported claim about historical origin.
-- Tool errors with `kind = missing_artifact` mean the relevant index has
+- Tool errors with `code = missing_artifact` mean the relevant index has
   not been built; surface this to the user rather than guessing.
 - Prefer JSON-ready output when the next consumer is another tool; prefer
   prose when the next consumer is the user.

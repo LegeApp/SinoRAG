@@ -169,6 +169,23 @@ fn passage_not_found(passage_id: &str) -> anyhow::Error {
     .into_anyhow()
 }
 
+fn resolve_source_read_direction(
+    requested: &str,
+    has_passage_id: bool,
+    has_cursor: bool,
+) -> (&str, Option<String>) {
+    match requested {
+        "auto" if has_passage_id => ("around", None),
+        "auto" if has_cursor => ("next", None),
+        "auto" => ("start", None),
+        "start" | "next" | "prev" | "at" | "around" => (requested, None),
+        other => (
+            "start",
+            Some(format!("unknown_direction_{other}_treated_as_start")),
+        ),
+    }
+}
+
 fn char_prefix(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
@@ -948,6 +965,34 @@ mod tests {
     }
 
     #[test]
+    fn source_read_accepts_hash_anchor_and_chooses_contextual_defaults() {
+        let request: crate::tools::requests::SourceReadRequest =
+            serde_json::from_value(serde_json::json!({
+                "passage_id": "B/B24/B24n0137_005.xml#pB24p0459b3001",
+                "max_chars": 8000,
+                "include_metadata": true
+            }))
+            .expect("hash-bearing passage ID is valid JSON input");
+        assert_eq!(request.direction, "auto");
+        assert_eq!(
+            resolve_source_read_direction(
+                &request.direction,
+                request.passage_id.is_some(),
+                request.cursor.is_some()
+            ),
+            ("around", None)
+        );
+        assert_eq!(
+            resolve_source_read_direction("auto", false, true),
+            ("next", None)
+        );
+        assert_eq!(
+            resolve_source_read_direction("auto", false, false),
+            ("start", None)
+        );
+    }
+
+    #[test]
     fn pair_profile_work_unit_keys_by_source_work_id() {
         let doc_table = DocumentTable::new();
         let row = serde_json::json!({
@@ -1530,15 +1575,18 @@ impl ToolEngine {
             SourceReadingState,
         };
 
+        if let Some(passage_id) = &req.passage_id {
+            validate_passage_input("source-read", passage_id)?;
+        }
+
         let passages = self.passages().await?;
         let mut warnings = Vec::new();
-        let direction = match req.direction.as_str() {
-            "start" | "next" | "prev" | "at" | "around" => req.direction.as_str(),
-            other => {
-                warnings.push(format!("unknown_direction_{other}_treated_as_start"));
-                "start"
-            }
-        };
+        let (direction, direction_warning) = resolve_source_read_direction(
+            &req.direction,
+            req.passage_id.is_some(),
+            req.cursor.is_some(),
+        );
+        warnings.extend(direction_warning);
         let unit = match req.unit.as_str() {
             "chunk" => "chunk",
             other => {
@@ -1587,9 +1635,29 @@ impl ToolEngine {
         }
 
         let anchor_passage = if let Some(passage_id) = &req.passage_id {
-            let row = passages.get_passage(passage_id).await?;
-            if source_work_id.is_none() {
-                source_work_id = opt_str(&row, "source_work_id");
+            let row = passages.get_passage(passage_id).await.map_err(|err| {
+                if err.to_string().contains("Passage not found") {
+                    passage_not_found(passage_id)
+                } else {
+                    err
+                }
+            })?;
+            if let Some(anchor_work_id) = opt_str(&row, "source_work_id") {
+                if let Some(requested_work_id) = source_work_id.as_deref() {
+                    if requested_work_id != anchor_work_id {
+                        return Err(ToolError::InvalidArgs(format!(
+                            "passage_id belongs to source_work_id={anchor_work_id}, not {requested_work_id}"
+                        ))
+                        .into_anyhow());
+                    }
+                    if req.source_work_id.is_some() {
+                        warnings.push(
+                            "source_work_id_redundant_with_passage_id; omit it on future calls"
+                                .to_string(),
+                        );
+                    }
+                }
+                source_work_id = Some(anchor_work_id);
             }
             Some(row)
         } else {
@@ -1765,7 +1833,7 @@ impl ToolEngine {
         if let Some(cursor) = &next_cursor {
             suggested_next_tools.push(suggested_tool(
                 "source-read",
-                serde_json::json!({"cursor": cursor, "direction": "next"}),
+                serde_json::json!({"cursor": cursor}),
                 "continue reading the source stream",
             ));
         }

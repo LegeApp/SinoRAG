@@ -141,18 +141,28 @@ pub struct PassageRequest {
 /// Request for the source-read tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct SourceReadRequest {
+    /// Start reading at the beginning of this work. Omit this when
+    /// `passage_id` or `cursor` is supplied; those anchors identify the work.
     #[serde(default)]
     pub source_work_id: Option<String>,
 
+    /// Read around this exact passage. The `#anchor` suffix is required, is
+    /// part of the identifier, and is safe in a JSON string. Pass this field
+    /// by itself rather than repeating `source_work_id`.
     #[serde(default)]
     pub passage_id: Option<String>,
 
     #[serde(default)]
     pub node_id: Option<u32>,
 
+    /// Continue from a cursor returned by an earlier source-read response.
+    /// Pass the cursor by itself; the default direction becomes `next`.
     #[serde(default)]
     pub cursor: Option<String>,
 
+    /// `auto` reads around a passage, continues forward from a cursor, or
+    /// starts at the beginning of a work. Explicit values are `start`, `next`,
+    /// `prev`, `at`, and `around`.
     #[serde(default = "default_read_direction")]
     pub direction: String,
 
@@ -182,7 +192,7 @@ pub struct SourceReadRequest {
 }
 
 fn default_read_direction() -> String {
-    "start".to_string()
+    "auto".to_string()
 }
 
 fn default_read_unit() -> String {

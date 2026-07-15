@@ -241,7 +241,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             spec: ToolSpec {
                 name: "source-read",
                 audience: ToolAudience::DefaultAgent,
-                description: "Read an ordered source stream in cursor-based, citation-aware chunks.",
+                description: "Read an ordered source stream in cursor-based, citation-aware chunks. Use one compact anchor: source_work_id to start a work, passage_id (including its JSON-safe #anchor) to read around a hit, or cursor to continue.",
                 input_schema: schema_for::<SourceReadRequest>(),
                 output_schema: schema_for::<SourceReadResponse>(),
                 requires: vec!["passages.parquet"],
@@ -251,7 +251,6 @@ pub fn tool_defs() -> Vec<ToolDef> {
                         title: "Start reading a work",
                         args: serde_json::json!({
                             "source_work_id": "T08n0235",
-                            "direction": "start",
                             "max_chars": 4000
                         }),
                     },
@@ -259,7 +258,6 @@ pub fn tool_defs() -> Vec<ToolDef> {
                         title: "Read around a passage",
                         args: serde_json::json!({
                             "passage_id": "T/T08/T08n0235.xml#pT08p0750c0201",
-                            "direction": "around",
                             "before_chars": 1200,
                             "after_chars": 1800
                         }),
